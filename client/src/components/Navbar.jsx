@@ -1,6 +1,12 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { Wifi, WifiOff, RefreshCw, User, LayoutDashboard, Briefcase, HelpCircle, PhoneCall, Bell, CheckCircle2, AlertCircle, Clock, X, Info } from 'lucide-react';
+import { formatDateDDMMYYYY, getLocalTimeStr } from '../utils/dateUtils';
+
+// __APP_BUILD_TIME__ is injected by Vite at build time (see vite.config.js `define`) — always
+// reflects the actual last deployment, no manual date to keep updated.
+const APP_LAST_UPDATED_DATE = formatDateDDMMYYYY(__APP_BUILD_TIME__);
+const APP_LAST_UPDATED_TIME = getLocalTimeStr(new Date(__APP_BUILD_TIME__));
 
 export default function Navbar({ currentView, setCurrentView }) {
   const { user, realUser, stopImpersonating, logout, isOnline, pendingSyncCount, syncOfflineData, refreshUserProfile } = useAuth();
@@ -371,6 +377,15 @@ export default function Navbar({ currentView, setCurrentView }) {
                 </span>
               )}
             </button>
+
+            {/* Hover this blank strip (right of the profile photo) to see the last app update */}
+            <div className="group relative w-3 sm:w-5 h-9 shrink-0 cursor-default">
+              <div className="pointer-events-none absolute right-0 top-full mt-2 whitespace-nowrap px-2.5 py-1.5 rounded-lg bg-white border border-slate-200 shadow-md text-[11px] font-semibold text-black text-center leading-tight opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-150 z-50">
+                <div className="text-[9px] font-bold uppercase tracking-wide text-slate-500">Last Updated</div>
+                <div>{APP_LAST_UPDATED_DATE}</div>
+                <div>{APP_LAST_UPDATED_TIME}</div>
+              </div>
+            </div>
           </div>
         </div>
       </div>

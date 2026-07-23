@@ -24,9 +24,9 @@ import {
   Share2,
   Lock
 } from 'lucide-react';
-import html2canvas from 'html2canvas';
-import { jsPDF } from 'jspdf';
 import { QRCodeCanvas } from 'qrcode.react';
+// html2canvas/jspdf are loaded on demand (see generateCertificateCanvas/buildCertificatePdf) —
+// they're ~590KB and only needed when the user actually downloads/prints/shares, not to open the page.
 
 // Helper: Format quantity with "Nos." unit
 const formatQtyNos = (val) => {
@@ -797,11 +797,36 @@ export default function CertificateComplianceGeneratorPage() {
         ? prev.map(x => (x.verificationGuid === certForm.verificationGuid || x.Verification_GUID === certForm.verificationGuid) ? json.certificate : x)
         : [...prev, json.certificate]);
     }
-    return json;
+    return { ...json, isExisting };
+  };
+
+  // Bumps the in-memory certificate number to the next unused sequence for the current format —
+  // called right after a brand-new certificate is successfully saved/downloaded, so if the user
+  // starts another certificate in the same session the number can never collide with the one just
+  // issued. Never runs when saving an edit to an already-existing certificate (that would silently
+  // change the number of the certificate the user is actively editing).
+  const advanceToNextCertNumber = (justSavedCertificate) => {
+    const updatedCerts = [...allCertificates.filter(c =>
+      (c.verificationGuid || c.Verification_GUID) !== (justSavedCertificate.verificationGuid || justSavedCertificate.Verification_GUID)
+    ), justSavedCertificate];
+    const latestSeq = getLatestSequenceNumber(updatedCerts, certForm.formatType);
+    const nextSeq = latestSeq + 1;
+    const prefixLetter = (certForm.certSequence || '').match(/^[A-Za-z]+/)?.[0] || '';
+    const nextSequence = `${prefixLetter}${nextSeq}`;
+    setCertForm(prev => ({
+      ...prev,
+      certSequence: nextSequence,
+      certificateNo: `${prev.certPrefix || 'Expert/'}${prev.certPeriod || '26-27'}/${nextSequence}`,
+      verificationGuid: 'ESS-VER-' + Math.random().toString(36).substring(2, 8).toUpperCase(),
+      isLocked: false,
+      isContentUnlocked: false,
+      revision: 0
+    }));
   };
 
   const generateCertificateCanvas = async () => {
     if (!certPreviewRef.current) throw new Error('Certificate preview container is not ready.');
+    const { default: html2canvas } = await import('html2canvas');
     let assets = certBase64Assets;
     if (!assets.header || !assets.stamp || !assets.footer || !assets.watermark) {
       const [h, s, f, w] = await Promise.all([
@@ -834,6 +859,7 @@ export default function CertificateComplianceGeneratorPage() {
 
   const buildCertificatePdf = async () => {
     const canvas = await generateCertificateCanvas();
+    const { jsPDF } = await import('jspdf');
     const imgData = canvas.toDataURL('image/jpeg', 0.98);
     const pdf = new jsPDF('p', 'mm', 'a4'); const pdfW = 210; const pgH = 297;
     const imgH = (canvas.height * pdfW) / canvas.width;
@@ -2003,7 +2029,8 @@ export default function CertificateComplianceGeneratorPage() {
                 <button type="button" disabled={Boolean(adminSubmitting)} onClick={async () => {
                   try {
                     setAdminSubmitting('save');
-                    await saveCertificateRecord();
+                    const result = await saveCertificateRecord();
+                    if (!result.isExisting && result.certificate) advanceToNextCertNumber(result.certificate);
                     alert('✅ Certificate saved.');
                   } catch (err) { alert('Save failed: ' + err.message); }
                   finally { setAdminSubmitting(''); }
@@ -2014,10 +2041,11 @@ export default function CertificateComplianceGeneratorPage() {
                 <button type="button" disabled={Boolean(adminSubmitting)} onClick={async () => {
                   try {
                     setAdminSubmitting('download');
-                    await saveCertificateRecord({ isLocked: true });
+                    const result = await saveCertificateRecord({ isLocked: true });
                     setCertForm(prev => ({ ...prev, isLocked: true }));
                     const { pdf } = await buildCertificatePdf();
                     pdf.save(`${getDownloadFilename(certForm.certificateNo, certForm.customerName, certForm.issueDate)}.pdf`);
+                    if (!result.isExisting && result.certificate) advanceToNextCertNumber(result.certificate);
                   } catch (err) { console.error(err); alert('PDF error: ' + err.message); }
                   finally { setAdminSubmitting(''); }
                 }} className="flex-1 min-w-[80px] py-2 px-2.5 rounded-xl bg-amber-700 hover:bg-amber-800 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50">
@@ -2356,7 +2384,8 @@ export default function CertificateComplianceGeneratorPage() {
             <button type="button" disabled={Boolean(adminSubmitting)} onClick={async () => {
               try {
                 setAdminSubmitting('save');
-                await saveCertificateRecord();
+                const result = await saveCertificateRecord();
+                if (!result.isExisting && result.certificate) advanceToNextCertNumber(result.certificate);
                 alert('✅ Certificate saved.');
               } catch (err) { alert('Save failed: ' + err.message); }
               finally { setAdminSubmitting(''); }
@@ -2367,10 +2396,11 @@ export default function CertificateComplianceGeneratorPage() {
             <button type="button" disabled={Boolean(adminSubmitting)} onClick={async () => {
               try {
                 setAdminSubmitting('download');
-                await saveCertificateRecord({ isLocked: true });
+                const result = await saveCertificateRecord({ isLocked: true });
                 setCertForm(prev => ({ ...prev, isLocked: true }));
                 const { pdf } = await buildCertificatePdf();
                 pdf.save(`${getDownloadFilename(certForm.certificateNo, certForm.customerName, certForm.issueDate)}.pdf`);
+                if (!result.isExisting && result.certificate) advanceToNextCertNumber(result.certificate);
               } catch (err) { console.error(err); alert('PDF error: ' + err.message); }
               finally { setAdminSubmitting(''); }
             }} className="flex-1 py-2.5 px-2 rounded-xl bg-amber-700 active:scale-95 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50">

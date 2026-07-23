@@ -29,9 +29,9 @@ import {
   Check,
   Plus
 } from 'lucide-react';
-import html2canvas from 'html2canvas';
-import { jsPDF } from 'jspdf';
 import { QRCodeCanvas } from 'qrcode.react';
+// html2canvas/jspdf are loaded on demand inside handleDownloadPDF — ~590KB, only needed when
+// the user actually downloads, not to open the page.
 
 // Helper: Get PDF download filename structured as: Suffix - CompanyName - DDMMYY
 const getDownloadFilename = (certNo, customerName, dateStr) => {
@@ -302,6 +302,27 @@ export default function CertificateGeneratorPage() {
     return maxSeq;
   };
 
+  // Bumps the in-memory report number to the next unused sequence — called right after a brand-new
+  // report is successfully saved, so the number can never collide with the one just issued. Never
+  // runs when saving an edit to an already-existing report (reportId set).
+  const advanceToNextReportNumber = (justSavedReport) => {
+    const updatedReports = [...allReports.filter(r =>
+      (r.verificationGuid || r.Verification_GUID) !== (justSavedReport.verificationGuid || justSavedReport.Verification_GUID)
+    ), justSavedReport];
+    const latestSeq = getLatestReportSequenceNumber(updatedReports);
+    const nextSeq = latestSeq + 1;
+    const prefixLetter = (reportForm.certSequence || '').match(/^[A-Za-z]+/)?.[0] || 'SR';
+    const nextSequence = `${prefixLetter}${nextSeq}`;
+    setReportForm(prev => ({
+      ...prev,
+      certSequence: nextSequence,
+      Report_ID: `${prev.certPrefix || 'Expert/'}${prev.certPeriod || '26-27'}/${nextSequence}`,
+      verificationGuid: 'SR-VER-' + Math.random().toString(36).substring(2, 8).toUpperCase(),
+      isLocked: false,
+      revision: 0
+    }));
+  };
+
   // Load customers, equipment master, and (if editing) the existing report
   useEffect(() => {
     let cancelled = false;
@@ -510,6 +531,7 @@ export default function CertificateGeneratorPage() {
       }
 
       if (!res.ok) throw new Error('Failed to save service report');
+      if (!reportId) advanceToNextReportNumber(payload);
       alert(`✅ Service Report ${targetStatus === 'Approved' ? 'Approved & Locked' : targetStatus === 'Pending Approval' ? 'Submitted for Approval' : 'Saved'}!`);
       handleBack();
     } catch (err) {
@@ -527,6 +549,8 @@ export default function CertificateGeneratorPage() {
         return;
       }
       setIsSubmitting(true);
+
+      const [{ default: html2canvas }, { jsPDF }] = await Promise.all([import('html2canvas'), import('jspdf')]);
 
       const canvas = await html2canvas(pdfContainerRef.current, {
         scale: 2,

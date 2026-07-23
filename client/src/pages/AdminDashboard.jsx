@@ -2,7 +2,6 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import ClientEquipmentModal from '../components/ClientEquipmentModal';
-import Papa from 'papaparse';
 import { getAccurateGpsPosition } from '../utils/gpsHelper';
 import {
   formatDateDDMMYYYY,
@@ -73,8 +72,6 @@ import {
   Settings,
   CreditCard
 } from 'lucide-react';
-import html2canvas from 'html2canvas';
-import { jsPDF } from 'jspdf';
 import { QRCodeCanvas } from 'qrcode.react';
 
 const REMARK_TAGS = [
@@ -1697,7 +1694,8 @@ export default function AdminDashboard() {
     }
   };
 
-  const handleExportCustomers = () => {
+  const handleExportCustomers = async () => {
+    const { default: Papa } = await import('papaparse');
     const csv = Papa.unparse(customers);
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement('a');
@@ -1709,10 +1707,11 @@ export default function AdminDashboard() {
     document.body.removeChild(link);
   };
 
-  const handleImportCustomers = (e) => {
+  const handleImportCustomers = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
     setLoading(true);
+    const { default: Papa } = await import('papaparse');
     Papa.parse(file, {
       header: true,
       skipEmptyLines: true,

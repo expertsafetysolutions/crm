@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="150" viewBox="0 0 400 150">
+  <!-- Dynamic smooth cursive blue ink signature representation for Nilesh Padaya -->
+  <path d="M 40,90 C 55,30 80,40 85,85 C 90,125 110,60 130,70 C 145,78 150,95 165,85 C 180,75 190,40 215,80 C 235,115 260,50 280,65 C 295,75 315,105 350,70" stroke="#1e3a8a" stroke-width="4.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M 65,95 C 130,125 220,95 335,85" stroke="#1e3a8a" stroke-width="2.5" fill="none" stroke-linecap="round" opacity="0.85"/>
+  <path d="M 195,75 L 235,55" stroke="#1e3a8a" stroke-width="3" fill="none" stroke-linecap="round"/>
+</svg>

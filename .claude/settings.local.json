@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Remove-Item \"client\\\\src\\\\components\\\\ServiceReportModal.jsx\" -Confirm:$false)",
+      "PowerShell(Remove-Item \"src\\\\components\\\\ServiceReportModal.jsx\" -Confirm:$false)",
+      "Skill(run)",
+      "Skill(run:*)",
+      "PowerShell(Get-CimInstance Win32_Process -Filter \"Name = 'node.exe'\")",
+      "PowerShell(\\(Get-Content \"c:\\\\Users\\\\DELL\\\\Desktop\\\\CRM 150726\\\\Expert CRM\\\\client\\\\src\\\\pages\\\\AdminDashboard.jsx\" | Measure-Object -Line\\).Lines)",
+      "PowerShell(Get-NetTCPConnection -LocalPort 5000 -State Listen | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object { Get-Process -Id $_ | Select-Object Id, ProcessName, Path, StartTime })",
+      "PowerShell(Stop-Process -Id 90460 -Force)",
+      "PowerShell(\"Stopped.\")",
+      "PowerShell(Get-NetTCPConnection -LocalPort 5000 -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object { Get-Process -Id $_ | Select-Object Id, ProcessName, Path, StartTime })",
+      "PowerShell(Get-NetTCPConnection -LocalPort 5000 -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object { Stop-Process -Id $_ -Force; \"Stopped PID $_\" })",
+      "PowerShell(Get-NetTCPConnection -LocalPort 5000 -State Listen -ErrorAction SilentlyContinue)",
+      "PowerShell(Get-NetTCPConnection -LocalPort 5000 -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object { Get-Process -Id $_ | Select-Object Id, StartTime })"
+    ]
+  }
+}

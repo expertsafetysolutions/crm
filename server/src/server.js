@@ -45,7 +45,8 @@ app.get('/api/verify-certificate/:guid', async (req, res) => {
         title: c.title || 'COMPLIANCE CERTIFICATE',
         equipmentDetails: c.equipmentDetails || '',
         customCertifyLines: c.customCertifyLines || [],
-        customEquipmentNotes: c.customEquipmentNotes || []
+        customEquipmentNotes: c.customEquipmentNotes || [],
+        customColumns: c.customColumns || []
       };
       items = c.itemsList || [];
     } else {
@@ -110,6 +111,21 @@ app.get('/api/verify-certificate/:guid', async (req, res) => {
       } catch(e) { return dStr; }
     };
 
+    const maskCustomerName = (name) => {
+      if (!name) return '';
+      const trimmed = name.trim();
+      if (trimmed.length <= 6) return trimmed;
+      return trimmed.substring(0, 3) + '...' + trimmed.substring(trimmed.length - 3);
+    };
+
+    const maskAddress = (addr) => {
+      if (!addr) return '';
+      const segments = addr.split(',').map(s => s.trim()).filter(Boolean);
+      if (segments.length <= 1) return addr;
+      const lastParts = segments.slice(-2);
+      return lastParts.join(', ');
+    };
+
     res.send(`
       <!DOCTYPE html>
       <html>
@@ -170,11 +186,11 @@ app.get('/api/verify-certificate/:guid', async (req, res) => {
               </div>
               <div class="info-box">
                 <div class="info-label">Client Name</div>
-                <div class="info-val">${details.client}</div>
+                <div class="info-val">${maskCustomerName(details.client)}</div>
               </div>
               <div class="info-box" style="grid-column: span 1;">
                 <div class="info-label">Premises Address</div>
-                <div class="info-val">${details.address}</div>
+                <div class="info-val">${maskAddress(details.address)}</div>
               </div>
               <div class="info-box">
                 <div class="info-label">Document Type</div>
@@ -198,9 +214,12 @@ app.get('/api/verify-certificate/:guid', async (req, res) => {
                     <tr>
                       <th style="text-align: center; width: 30px;">Sr.</th>
                       <th>Item Name</th>
-                      <th>Capacity</th>
-                      <th style="text-align: center;">Qty</th>
-                      <th>Next Due</th>
+                      ${details.type !== 'Training Certificate' ? `
+                        <th>Capacity</th>
+                        <th style="text-align: center;">Qty</th>
+                        <th>Next Due</th>
+                      ` : ''}
+                      ${(details.customColumns || []).map(c => `<th>${c.label}</th>`).join('')}
                     </tr>
                   </thead>
                   <tbody>
@@ -208,9 +227,12 @@ app.get('/api/verify-certificate/:guid', async (req, res) => {
                       <tr>
                         <td style="text-align: center; color: #64748b;">${idx + 1}</td>
                         <td style="font-weight: 800; color: #1e293b;">${it.itemName || it.Item_Name || '—'}</td>
-                        <td>${it.capacity || it.Capacity || '—'}</td>
-                        <td style="text-align: center; font-weight: 800; color: #1e3a8a;">${it.qty || it.quantity || it.Qty || '1 Nos.'}</td>
-                        <td style="font-weight: 700; color: #b91c1c;">${formatDate(it.nextDate || it.Next_Date || it.validUntil)}</td>
+                        ${details.type !== 'Training Certificate' ? `
+                          <td>${it.capacity || it.Capacity || '—'}</td>
+                          <td style="text-align: center; font-weight: 800; color: #1e3a8a;">${it.qty || it.quantity || it.Qty || '1 Nos.'}</td>
+                          <td style="font-weight: 700; color: #b91c1c;">${formatDate(it.nextDate || it.Next_Date || it.validUntil)}</td>
+                        ` : ''}
+                        ${(details.customColumns || []).map(c => `<td>${(it.customValues || it.Custom_Values)?.[c.id] || it[c.id] || '—'}</td>`).join('')}
                       </tr>
                     `).join('')}
                   </tbody>

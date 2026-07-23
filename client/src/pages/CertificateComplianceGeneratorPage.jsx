@@ -39,6 +39,23 @@ const formatQtyNos = (val) => {
   return `${str} Nos.`;
 };
 
+// Helper: Mask customer name for privacy (first 3 and last 3 chars, e.g. Lax...ome)
+const maskCustomerName = (name) => {
+  if (!name) return '';
+  const trimmed = name.trim();
+  if (trimmed.length <= 6) return trimmed;
+  return trimmed.substring(0, 3) + '...' + trimmed.substring(trimmed.length - 3);
+};
+
+// Helper: Mask address for privacy (show last 2 comma-separated segments only)
+const maskAddress = (addr) => {
+  if (!addr) return '';
+  const segments = addr.split(',').map(s => s.trim()).filter(Boolean);
+  if (segments.length <= 1) return addr;
+  const lastParts = segments.slice(-2);
+  return lastParts.join(', ');
+};
+
 // Helper: Get PDF download filename structured as: Suffix - CompanyName - DDMMYY
 const getDownloadFilename = (certNo, customerName, dateStr) => {
   const parts = (certNo || '').split('/');
@@ -486,6 +503,12 @@ export default function CertificateComplianceGeneratorPage() {
       seqSuffix = `V${nextSeq}`;
       defaultBodyIntro = ["This field service safety audit report documents the observations, checks, and safety verification carried out during our engineer visit to the client premises."];
       defaultCustomCertify = ["Recommended safety rectifications and routine check-up procedures have been explained to the customer."];
+    } else if (newFormat === 'Training Certificate') {
+      title = 'FIRE EXTINGUISHER OPERATION & SAFETY TRAINING CERTIFICATE';
+      details = 'Theoretical and Practical Training in Fire Protection and Safe Extinguisher Operation';
+      seqSuffix = `TR${nextSeq}`;
+      defaultBodyIntro = ["This is to certify that we have conducted practical fire extinguisher operation and basic fire safety training for the safety program participants."];
+      defaultCustomCertify = ["The trainees participated in mock fire drill demonstrations and basic instruction on fire safety guidelines."];
     } else {
       seqSuffix = `R${nextSeq}`;
       defaultBodyIntro = ["This is to certify that the under noted fire extinguisher/s has/have been refilled by us on as per below details."];
@@ -740,6 +763,8 @@ export default function CertificateComplianceGeneratorPage() {
   const contentEditable = true;
   const lockWrapClass = '';
 
+  const hideEquipmentSection = certForm.formatType === 'Training Certificate' && (certForm.customColumns || []).length === 0;
+
   const isSettingsSetupComplete = Boolean(
     (certForm.authorizedSignatory || '').trim() &&
     (certForm.certPrefix || '').trim() &&
@@ -749,7 +774,7 @@ export default function CertificateComplianceGeneratorPage() {
 
   // readyToFinalize also gates Save/Download/Print/Share (clientDetailsComplete itself is computed
   // above the early returns, since a hook depends on it — see Rules of Hooks).
-  const readyToFinalize = clientDetailsComplete && (certForm.itemsList || []).length > 0;
+  const readyToFinalize = clientDetailsComplete && (hideEquipmentSection || (certForm.itemsList || []).length > 0);
 
   // Shared certificate-persistence + PDF-rendering helpers, used by Save / Download / Print / Share below.
   const saveCertificateRecord = async (extra = {}) => {
@@ -913,6 +938,7 @@ export default function CertificateComplianceGeneratorPage() {
               <option value="System Installation" className="bg-white text-slate-900">🏢 System — Hydrant / Alarm Commissioning</option>
               <option value="AMC Certificate" className="bg-white text-slate-900">📋 AMC — Annual Maintenance Contract</option>
               <option value="Visit Report" className="bg-white text-slate-900">📝 Visit Report — Field Safety Inspection</option>
+              <option value="Training Certificate" className="bg-white text-slate-900">🎓 Training Certificate — Practical Operations Training</option>
             </select>
           </div>
 
@@ -1107,8 +1133,9 @@ export default function CertificateComplianceGeneratorPage() {
                 </div>
 
                 {/* Equipment section */}
-                <div ref={equipmentSectionRef} className="pt-1 scroll-mt-3">
-                  <div className={`space-y-3 ${lockWrapClass}`}>
+                {!hideEquipmentSection && (
+                  <div ref={equipmentSectionRef} className="pt-1 scroll-mt-3">
+                    <div className={`space-y-3 ${lockWrapClass}`}>
 
 
 
@@ -1137,132 +1164,138 @@ export default function CertificateComplianceGeneratorPage() {
                         <div className="text-[10px] font-bold text-amber-900 uppercase tracking-wide">Add Equipment Row to Certificate</div>
                       </div>
 
-                      <div className="space-y-1 relative">
-                        <div className="flex items-center justify-between">
-                          <label className="block text-[10px] font-bold text-slate-600">Item Name *</label>
-                        </div>
-                        <div className="relative">
-                          <input
-                            type="text"
-                            placeholder="Type or tap to search item name…"
-                            value={newItemSearch}
-                            onChange={e => {
-                              const val = e.target.value;
-                              setNewItemSearch(val);
-                              setShowNewItemDropdown(true);
-                              const match = findMatchingMasterItem(masterListToUse, '', val);
-                              if (match) {
-                                setNewItemSelectedMasterId(match.id);
-                                const matchCaps = match.capacities || [];
-                                if (matchCaps.length > 0 && !matchCaps.includes(newItemCapacity)) {
-                                  setNewItemCapacity(matchCaps[0]);
-                                }
-                              } else {
-                                setNewItemSelectedMasterId('');
-                              }
-                            }}
-                            onFocus={() => setShowNewItemDropdown(true)}
-                            onBlur={() => setTimeout(() => setShowNewItemDropdown(false), 180)}
-                            className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-medium focus:outline-none focus:ring-1 focus:ring-amber-500 shadow-2xs"
-                          />
-                          {showNewItemDropdown && (
-                            <div className="absolute z-50 left-0 right-0 mt-1 max-h-56 overflow-y-auto bg-white border border-amber-400 rounded-xl shadow-2xl divide-y divide-slate-100">
-                              {masterListToUse
-                                .filter(eq => !newItemSearch.trim() || (eq.type || eq.itemName || '').toLowerCase().includes(newItemSearch.toLowerCase()))
-                                .map(eq => {
-                                  const name = eq.type || eq.itemName || '';
-                                  const caps = (eq.capacities || []).join(', ');
-                                  return (
-                                    <div
-                                      key={eq.id}
-                                      onMouseDown={() => {
-                                        setNewItemSearch(name);
-                                        setNewItemSelectedMasterId(eq.id);
-                                        if ((eq.capacities || []).length > 0) {
-                                          setNewItemCapacity(eq.capacities[0]);
-                                        }
-                                        setShowNewItemDropdown(false);
-                                      }}
-                                      className="flex items-center justify-between px-3 py-2 hover:bg-amber-50 cursor-pointer transition"
-                                    >
-                                      <div>
-                                        <div className="font-bold text-slate-900 text-xs">{name}</div>
-                                        <div className="text-[10px] text-amber-800 font-semibold truncate max-w-xs">
-                                          {caps ? `Available: ${caps}` : 'Standard Equipment'}
-                                        </div>
-                                      </div>
-                                      <span className="text-[9px] bg-amber-100 text-amber-900 px-1.5 py-0.5 rounded font-bold ml-2 shrink-0">SELECT</span>
-                                    </div>
-                                  );
-                                })}
-                              {masterListToUse.filter(eq => !newItemSearch.trim() || (eq.type || eq.itemName || '').toLowerCase().includes(newItemSearch.toLowerCase())).length === 0 && (
-                                <div className="px-3 py-3 text-xs text-slate-400 text-center">No matching item found — custom name allowed</div>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-
-                      <div className="grid grid-cols-2 gap-2">
-                        <div className="space-y-1">
-                          <label className="block text-[10px] font-bold text-slate-600">Capacity / Size *</label>
-                          {availableCaps.length > 0 ? (
-                            <select
-                              value={newItemCapacity || availableCaps[0]}
-                              onChange={e => setNewItemCapacity(e.target.value)}
-                              className="w-full px-2.5 py-1.5 bg-white border border-amber-400 rounded-lg text-xs font-bold text-amber-950 focus:outline-none shadow-2xs"
-                            >
-                              {availableCaps.map(cap => (
-                                <option key={cap} value={cap}>
-                                  {cap}
-                                </option>
-                              ))}
-                            </select>
-                          ) : (
+                      {certForm.formatType !== 'Training Certificate' && (
+                        <div className="space-y-1 relative">
+                          <div className="flex items-center justify-between">
+                            <label className="block text-[10px] font-bold text-slate-600">Item Name *</label>
+                          </div>
+                          <div className="relative">
                             <input
                               type="text"
-                              value={newItemCapacity}
-                              onChange={e => setNewItemCapacity(e.target.value)}
-                              placeholder="e.g. 4.5 Kg"
-                              className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-bold focus:outline-none"
+                              placeholder="Type or tap to search item name…"
+                              value={newItemSearch}
+                              onChange={e => {
+                                const val = e.target.value;
+                                setNewItemSearch(val);
+                                setShowNewItemDropdown(true);
+                                const match = findMatchingMasterItem(masterListToUse, '', val);
+                                if (match) {
+                                  setNewItemSelectedMasterId(match.id);
+                                  const matchCaps = match.capacities || [];
+                                  if (matchCaps.length > 0 && !matchCaps.includes(newItemCapacity)) {
+                                    setNewItemCapacity(matchCaps[0]);
+                                  }
+                                } else {
+                                  setNewItemSelectedMasterId('');
+                                }
+                              }}
+                              onFocus={() => setShowNewItemDropdown(true)}
+                              onBlur={() => setTimeout(() => setShowNewItemDropdown(false), 180)}
+                              className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-medium focus:outline-none focus:ring-1 focus:ring-amber-500 shadow-2xs"
                             />
-                          )}
+                            {showNewItemDropdown && (
+                              <div className="absolute z-50 left-0 right-0 mt-1 max-h-56 overflow-y-auto bg-white border border-amber-400 rounded-xl shadow-2xl divide-y divide-slate-100">
+                                {masterListToUse
+                                  .filter(eq => !newItemSearch.trim() || (eq.type || eq.itemName || '').toLowerCase().includes(newItemSearch.toLowerCase()))
+                                  .map(eq => {
+                                    const name = eq.type || eq.itemName || '';
+                                    const caps = (eq.capacities || []).join(', ');
+                                    return (
+                                      <div
+                                        key={eq.id}
+                                        onMouseDown={() => {
+                                          setNewItemSearch(name);
+                                          setNewItemSelectedMasterId(eq.id);
+                                          if ((eq.capacities || []).length > 0) {
+                                            setNewItemCapacity(eq.capacities[0]);
+                                          }
+                                          setShowNewItemDropdown(false);
+                                        }}
+                                        className="flex items-center justify-between px-3 py-2 hover:bg-amber-50 cursor-pointer transition"
+                                      >
+                                        <div>
+                                          <div className="font-bold text-slate-900 text-xs">{name}</div>
+                                          <div className="text-[10px] text-amber-800 font-semibold truncate max-w-xs">
+                                            {caps ? `Available: ${caps}` : 'Standard Equipment'}
+                                          </div>
+                                        </div>
+                                        <span className="text-[9px] bg-amber-100 text-amber-900 px-1.5 py-0.5 rounded font-bold ml-2 shrink-0">SELECT</span>
+                                      </div>
+                                    );
+                                  })}
+                                {masterListToUse.filter(eq => !newItemSearch.trim() || (eq.type || eq.itemName || '').toLowerCase().includes(newItemSearch.toLowerCase())).length === 0 && (
+                                  <div className="px-3 py-3 text-xs text-slate-400 text-center">No matching item found — custom name allowed</div>
+                                )}
+                              </div>
+                            )}
+                          </div>
                         </div>
-                        <div className="space-y-1">
-                          <label className="block text-[10px] font-bold text-slate-600">Qty *</label>
-                          <input
-                            type="text"
-                            value={newItemQty}
-                            onChange={e => setNewItemQty(e.target.value)}
-                            placeholder="e.g. 5"
-                            className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-bold focus:outline-none"
-                          />
-                        </div>
-                      </div>
+                      )}
 
-                      <div className="grid grid-cols-2 gap-2">
-                        <div className="space-y-1">
-                          <label className="block text-[10px] font-bold text-slate-600">Date of Refilling</label>
-                          <input type="date" value={newItemRefillDate} max={certForm.challanDate || ''} onChange={e => {
-                            let refillDt = e.target.value;
-                            const maxLimit = certForm.challanDate || getLocalDateStr();
-                            if (refillDt > maxLimit) {
-                              alert("Item refilling date cannot exceed Challan Date.");
-                              refillDt = maxLimit;
-                            }
-                            setNewItemRefillDate(refillDt);
-                            if (certForm.validityDuration !== 'Custom') {
-                              setNewItemNextDate(calculateNextDate(refillDt));
-                            }
-                          }}
-                            className="w-full px-2 py-1.5 bg-white border border-slate-300 rounded-lg text-xs focus:outline-none"/>
-                        </div>
-                        <div className="space-y-1">
-                          <label className="block text-[10px] font-bold text-slate-600">Next Date of Refilling</label>
-                          <input type="date" value={newItemNextDate} onChange={e => setNewItemNextDate(e.target.value)}
-                            className="w-full px-2 py-1.5 bg-white border border-slate-300 rounded-lg text-xs text-rose-700 font-bold focus:outline-none"/>
-                        </div>
-                      </div>
+                      {certForm.formatType !== 'Training Certificate' && (
+                        <>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div className="space-y-1">
+                              <label className="block text-[10px] font-bold text-slate-600">Capacity / Size *</label>
+                              {availableCaps.length > 0 ? (
+                                <select
+                                  value={newItemCapacity || availableCaps[0]}
+                                  onChange={e => setNewItemCapacity(e.target.value)}
+                                  className="w-full px-2.5 py-1.5 bg-white border border-amber-400 rounded-lg text-xs font-bold text-amber-950 focus:outline-none shadow-2xs"
+                                >
+                                  {availableCaps.map(cap => (
+                                    <option key={cap} value={cap}>
+                                      {cap}
+                                    </option>
+                                  ))}
+                                </select>
+                              ) : (
+                                <input
+                                  type="text"
+                                  value={newItemCapacity}
+                                  onChange={e => setNewItemCapacity(e.target.value)}
+                                  placeholder="e.g. 4.5 Kg"
+                                  className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-bold focus:outline-none"
+                                />
+                              )}
+                            </div>
+                            <div className="space-y-1">
+                              <label className="block text-[10px] font-bold text-slate-600">Qty *</label>
+                              <input
+                                type="text"
+                                value={newItemQty}
+                                onChange={e => setNewItemQty(e.target.value)}
+                                placeholder="e.g. 5"
+                                className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-bold focus:outline-none"
+                              />
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-2">
+                            <div className="space-y-1">
+                              <label className="block text-[10px] font-bold text-slate-600">{certForm.formatType === 'HP Testing' ? 'Date of Testing' : 'Date of Refilling'}</label>
+                              <input type="date" value={newItemRefillDate} max={certForm.challanDate || ''} onChange={e => {
+                                let refillDt = e.target.value;
+                                const maxLimit = certForm.challanDate || getLocalDateStr();
+                                if (refillDt > maxLimit) {
+                                  alert(certForm.formatType === 'HP Testing' ? "Item testing date cannot exceed Challan Date." : "Item refilling date cannot exceed Challan Date.");
+                                  refillDt = maxLimit;
+                                }
+                                setNewItemRefillDate(refillDt);
+                                if (certForm.validityDuration !== 'Custom') {
+                                  setNewItemNextDate(calculateNextDate(refillDt));
+                                }
+                              }}
+                                className="w-full px-2 py-1.5 bg-white border border-slate-300 rounded-lg text-xs focus:outline-none"/>
+                            </div>
+                            <div className="space-y-1">
+                              <label className="block text-[10px] font-bold text-slate-600">{certForm.formatType === 'HP Testing' ? 'Next Date of Testing' : 'Next Date of Refilling'}</label>
+                              <input type="date" value={newItemNextDate} onChange={e => setNewItemNextDate(e.target.value)}
+                                className="w-full px-2 py-1.5 bg-white border border-slate-300 rounded-lg text-xs text-rose-700 font-bold focus:outline-none"/>
+                            </div>
+                          </div>
+                        </>
+                      )}
                       {(certForm.customColumns||[]).length > 0 && (
                         <div className="grid grid-cols-2 gap-2 pt-1 border-t border-amber-200">
                           {(certForm.customColumns||[]).map(col => (
@@ -1276,20 +1309,28 @@ export default function CertificateComplianceGeneratorPage() {
                         </div>
                       )}
                       <button type="button" onClick={() => {
-                        if (!newItemSearch.trim()) { alert('Please enter or select an Item Name.'); return; }
-                        const finalCapacity = newItemCapacity || (availableCaps.length > 0 ? availableCaps[0] : '');
-                        if (!finalCapacity || !finalCapacity.trim()) { alert('Please select or enter the Capacity / Size.'); return; }
+                        const isTraining = certForm.formatType === 'Training Certificate';
+                        if (!isTraining && !newItemSearch.trim()) { alert('Please enter or select an Item Name.'); return; }
+                        if (isTraining) {
+                          const hasValue = Object.values(newItemCustomValues).some(v => v && v.trim());
+                          if (!hasValue) { alert('Please fill in at least one custom field.'); return; }
+                        }
+                        const finalCapacity = isTraining ? '—' : (newItemCapacity || (availableCaps.length > 0 ? availableCaps[0] : ''));
+                        if (!isTraining && (!finalCapacity || !finalCapacity.trim())) { alert('Please select or enter the Capacity / Size.'); return; }
                         const currentList = certForm.itemsList || [];
                         const newItem = {
                           id: 'item-'+Date.now(), srNo: currentList.length+1,
-                          itemName: newItemSearch.trim(), capacity: finalCapacity.trim(),
-                          qty: formatQtyNos(newItemQty),
-                          refillingDate: newItemRefillDate||certForm.challanDate,
-                          nextDate: newItemNextDate||certForm.validUntil,
+                          itemName: isTraining ? '' : newItemSearch.trim(), capacity: finalCapacity.trim(),
+                          qty: isTraining ? '1 Nos.' : formatQtyNos(newItemQty),
+                          refillingDate: isTraining ? certForm.challanDate : (newItemRefillDate||certForm.challanDate),
+                          nextDate: isTraining ? certForm.validUntil : (newItemNextDate||certForm.validUntil),
                           customValues: {...newItemCustomValues}
                         };
                         setCertForm(prev => ({...prev, itemsList: [...(prev.itemsList||[]), newItem]}));
                         setNewItemCustomValues({});
+                        if (isTraining) {
+                          setNewItemSearch('');
+                        }
                       }} className="w-full py-2 bg-amber-700 hover:bg-amber-800 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition shadow-xs">
                         <PlusCircle className="w-3.5 h-3.5"/>+ Add Item to Certificate Table
                       </button>
@@ -1309,75 +1350,112 @@ export default function CertificateComplianceGeneratorPage() {
                           <div className="flex items-start gap-2 flex-1 min-w-0">
                             <span className="mt-0.5 w-5 h-5 bg-amber-100 text-amber-900 rounded-full flex items-center justify-center font-bold text-[10px] shrink-0">{idx+1}</span>
                             <div className="min-w-0 flex-1">
-                              <input type="text" value={it.itemName}
-                                onChange={e => setCertForm(prev => ({...prev, itemsList: prev.itemsList.map((item,i) => i===idx ? {...item, itemName:e.target.value} : item)}))}
-                                className="w-full font-bold text-slate-900 text-xs bg-transparent border-b border-transparent hover:border-slate-300 focus:border-amber-500 focus:outline-none py-0.5 mb-0.5"/>
-                              <div className="flex gap-2 flex-wrap text-[10px] text-slate-500">
-                                <span>Cap:
-                                  <input type="text" value={it.capacity}
-                                    onChange={e => setCertForm(prev => ({...prev, itemsList: prev.itemsList.map((item,i) => i===idx ? {...item, capacity:e.target.value} : item)}))}
-                                    className="ml-1 w-14 bg-transparent border-b border-transparent hover:border-slate-300 focus:border-amber-500 focus:outline-none text-[10px] font-bold text-slate-700"/>
-                                </span>
-                                <span>Qty:
-                                  <input type="text" value={it.qty || it.quantity || it.identificationNo || '1 Nos.'}
-                                    onChange={e => setCertForm(prev => ({...prev, itemsList: prev.itemsList.map((item,i) => i===idx ? {...item, qty: e.target.value} : item)}))}
-                                    onBlur={e => setCertForm(prev => ({...prev, itemsList: prev.itemsList.map((item,i) => i===idx ? {...item, qty: formatQtyNos(e.target.value)} : item)}))}
-                                    className="ml-1 w-16 bg-transparent border-b border-transparent hover:border-slate-300 focus:border-amber-500 focus:outline-none text-[10px] font-bold text-slate-700"/>
-                                </span>
-                                {(certForm.customColumns || []).map(col => (
-                                  <span key={col.id}>
-                                    {col.label}:
-                                    <input
-                                      type="text"
-                                      value={it.customValues?.[col.id] || ''}
-                                      onChange={e => {
-                                        const val = e.target.value;
-                                        setCertForm(prev => ({
-                                          ...prev,
-                                          itemsList: prev.itemsList.map((item, i) =>
-                                            i === idx
-                                              ? { ...item, customValues: { ...(item.customValues || {}), [col.id]: val } }
-                                              : item
-                                          )
-                                        }));
-                                      }}
-                                      className="ml-1 w-16 bg-transparent border-b border-transparent hover:border-slate-300 focus:border-indigo-500 focus:outline-none text-[10px] font-bold text-indigo-850"
-                                      placeholder={col.label}
-                                    />
-                                  </span>
-                                ))}
-                                <span>Refilling:
-                                  <input type="date" value={it.refillingDate} max={certForm.challanDate || ''}
-                                    onChange={e => {
-                                      let refillDt = e.target.value;
-                                      const maxLimit = certForm.challanDate || getLocalDateStr();
-                                      if (refillDt > maxLimit) {
-                                        alert("Item refilling date cannot exceed Challan Date.");
-                                        refillDt = maxLimit;
-                                      }
-                                      const years = certForm.validityDuration === '5 Years' ? 5 : certForm.validityDuration === '3 Years' ? 3 : 1;
-                                      const itemDue = new Date(new Date(refillDt).setFullYear(new Date(refillDt).getFullYear() + years)).toISOString().split('T')[0];
-                                      setCertForm(prev => ({
-                                        ...prev,
-                                        itemsList: prev.itemsList.map((item, i) =>
-                                          i === idx
-                                            ? {
-                                                ...item,
-                                                refillingDate: refillDt,
-                                                nextDate: prev.validityDuration === 'Custom' ? item.nextDate : itemDue
+                              {certForm.formatType === 'Training Certificate' ? (
+                                <div className="grid grid-cols-2 gap-2 mt-1">
+                                  {(certForm.customColumns || []).map(col => (
+                                    <div key={col.id} className="flex flex-col">
+                                      <span className="text-[9px] font-extrabold text-indigo-800 uppercase tracking-wide">{col.label}</span>
+                                      <input
+                                        type="text"
+                                        value={it.customValues?.[col.id] || ''}
+                                        onChange={e => {
+                                          const val = e.target.value;
+                                          setCertForm(prev => ({
+                                            ...prev,
+                                            itemsList: prev.itemsList.map((item, i) =>
+                                              i === idx
+                                                ? { ...item, customValues: { ...(item.customValues || {}), [col.id]: val } }
+                                                : item
+                                            )
+                                          }));
+                                        }}
+                                        className="w-full bg-transparent border-b border-indigo-200 hover:border-indigo-400 focus:border-indigo-500 focus:outline-none text-xs font-bold text-slate-800 py-0.5"
+                                        placeholder={col.label}
+                                      />
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : (
+                                <>
+                                  <input type="text" value={it.itemName}
+                                    onChange={e => setCertForm(prev => ({...prev, itemsList: prev.itemsList.map((item,i) => i===idx ? {...item, itemName:e.target.value} : item)}))}
+                                    className="w-full font-bold text-slate-900 text-xs bg-transparent border-b border-transparent hover:border-slate-300 focus:border-amber-500 focus:outline-none py-0.5 mb-0.5"/>
+                                  <div className="flex gap-2 flex-wrap text-[10px] text-slate-500">
+                                    {certForm.formatType !== 'Training Certificate' && (
+                                      <>
+                                        <span>Cap:
+                                          <input type="text" value={it.capacity}
+                                            onChange={e => setCertForm(prev => ({...prev, itemsList: prev.itemsList.map((item,i) => i===idx ? {...item, capacity:e.target.value} : item)}))}
+                                            className="ml-1 w-14 bg-transparent border-b border-transparent hover:border-slate-300 focus:border-amber-500 focus:outline-none text-[10px] font-bold text-slate-700"/>
+                                        </span>
+                                        <span>Qty:
+                                          <input type="text" value={it.qty || it.quantity || it.identificationNo || '1 Nos.'}
+                                            onChange={e => setCertForm(prev => ({...prev, itemsList: prev.itemsList.map((item,i) => i===idx ? {...item, qty: e.target.value} : item)}))}
+                                            onBlur={e => setCertForm(prev => ({...prev, itemsList: prev.itemsList.map((item,i) => i===idx ? {...item, qty: formatQtyNos(e.target.value)} : item)}))}
+                                            className="ml-1 w-16 bg-transparent border-b border-transparent hover:border-slate-300 focus:border-amber-500 focus:outline-none text-[10px] font-bold text-slate-700"/>
+                                        </span>
+                                      </>
+                                    )}
+                                    {(certForm.customColumns || []).map(col => (
+                                      <span key={col.id}>
+                                        {col.label}:
+                                        <input
+                                          type="text"
+                                          value={it.customValues?.[col.id] || ''}
+                                          onChange={e => {
+                                            const val = e.target.value;
+                                            setCertForm(prev => ({
+                                              ...prev,
+                                              itemsList: prev.itemsList.map((item, i) =>
+                                                i === idx
+                                                  ? { ...item, customValues: { ...(item.customValues || {}), [col.id]: val } }
+                                                  : item
+                                              )
+                                            }));
+                                          }}
+                                          className="ml-1 w-16 bg-transparent border-b border-transparent hover:border-slate-300 focus:border-indigo-500 focus:outline-none text-[10px] font-bold text-indigo-850"
+                                          placeholder={col.label}
+                                        />
+                                      </span>
+                                    ))}
+                                    {certForm.formatType !== 'Training Certificate' && (
+                                      <>
+                                        <span>{certForm.formatType === 'HP Testing' ? 'Testing' : 'Refilling'}:
+                                          <input type="date" value={it.refillingDate} max={certForm.challanDate || ''}
+                                            onChange={e => {
+                                              let refillDt = e.target.value;
+                                              const maxLimit = certForm.challanDate || getLocalDateStr();
+                                              if (refillDt > maxLimit) {
+                                                alert(certForm.formatType === 'HP Testing' ? "Item testing date cannot exceed Challan Date." : "Item refilling date cannot exceed Challan Date.");
+                                                refillDt = maxLimit;
                                               }
-                                            : item
-                                        )
-                                      }));
-                                    }}
-                                    className="ml-1 bg-transparent border-b border-transparent hover:border-slate-300 focus:border-amber-500 focus:outline-none text-[10px] font-bold text-slate-700"/>
-                                </span>
-                                <span className="text-rose-600">Next Refilling:
-                                  <input type="date" value={it.nextDate}
-                                    onChange={e => setCertForm(prev => ({...prev, itemsList: prev.itemsList.map((item,i) => i===idx ? {...item, nextDate:e.target.value} : item)}))}
-                                    className="ml-1 bg-transparent border-b border-transparent hover:border-slate-300 focus:border-amber-500 focus:outline-none text-[10px] font-bold text-rose-700"/>
-                                </span>
-                              </div>
+                                              const years = certForm.validityDuration === '5 Years' ? 5 : certForm.validityDuration === '3 Years' ? 3 : 1;
+                                              const itemDue = new Date(new Date(refillDt).setFullYear(new Date(refillDt).getFullYear() + years)).toISOString().split('T')[0];
+                                              setCertForm(prev => ({
+                                                ...prev,
+                                                itemsList: prev.itemsList.map((item, i) =>
+                                                  i === idx
+                                                    ? {
+                                                        ...item,
+                                                        refillingDate: refillDt,
+                                                        nextDate: prev.validityDuration === 'Custom' ? item.nextDate : itemDue
+                                                      }
+                                                    : item
+                                                )
+                                              }));
+                                            }}
+                                            className="ml-1 bg-transparent border-b border-transparent hover:border-slate-300 focus:border-amber-500 focus:outline-none text-[10px] font-bold text-slate-700"/>
+                                        </span>
+                                        <span className="text-rose-600">{certForm.formatType === 'HP Testing' ? 'Next Testing' : 'Next Refilling'}:
+                                          <input type="date" value={it.nextDate}
+                                            onChange={e => setCertForm(prev => ({...prev, itemsList: prev.itemsList.map((item,i) => i===idx ? {...item, nextDate:e.target.value} : item)}))}
+                                            className="ml-1 bg-transparent border-b border-transparent hover:border-slate-300 focus:border-amber-500 focus:outline-none text-[10px] font-bold text-rose-700"/>
+                                        </span>
+                                      </>
+                                    )}
+                                  </div>
+                                </>
+                              )}
                             </div>
                           </div>
                           <button type="button"
@@ -1390,8 +1468,9 @@ export default function CertificateComplianceGeneratorPage() {
                 )}
 
 
-                </div>
-                </div>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
@@ -2128,18 +2207,18 @@ export default function CertificateComplianceGeneratorPage() {
                       <p className="mt-1 text-slate-800 font-medium whitespace-pre-wrap">{certForm.visitObservations}</p>
                     </div>
                   )}
-                  {(certForm.itemsList||[]).length > 0 && (
+                  {(!hideEquipmentSection && (certForm.itemsList||[]).length > 0) && (
                     <div className={density.tableMt}>
                       <div className="font-extrabold text-xs text-red-950 mb-1 border-b border-red-400 pb-0.5 text-center">Certified Equipment &amp; Schedule Summary</div>
                       <table className={`w-full ${density.cellText} border-collapse border border-slate-400 shadow-2xs`}>
                         <thead>
                           <tr className="bg-transparent text-red-950 font-extrabold text-left">
                             {(certCfg.visible_columns?.sr_no !== false) && <th className={`border border-slate-400 ${density.cellPad} text-center w-8`} style={{ verticalAlign: 'middle' }}>Sr.</th>}
-                            {(certCfg.visible_columns?.item_name !== false) && <th className={`border border-slate-400 ${density.cellPad}`} style={{ verticalAlign: 'middle' }}>Item Name / Type</th>}
-                            {(certCfg.visible_columns?.capacity !== false) && <th className={`border border-slate-400 ${density.cellPad}`} style={{ verticalAlign: 'middle' }}>Capacity</th>}
-                            {(certCfg.visible_columns?.qty !== false) && <th className={`border border-slate-400 ${density.cellPad} text-center`} style={{ verticalAlign: 'middle' }}>Qty</th>}
-                            {(certCfg.visible_columns?.refill_date !== false) && <th className={`border border-slate-400 ${density.cellPad}`} style={{ verticalAlign: 'middle' }}>Date of Refilling</th>}
-                            {(certCfg.visible_columns?.valid_until !== false) && <th className={`border border-slate-400 ${density.cellPad}`} style={{ verticalAlign: 'middle' }}>Next Date of Refilling</th>}
+                            {(certForm.formatType !== 'Training Certificate' && certCfg.visible_columns?.item_name !== false) && <th className={`border border-slate-400 ${density.cellPad}`} style={{ verticalAlign: 'middle' }}>Item Name / Type</th>}
+                            {(certForm.formatType !== 'Training Certificate' && certCfg.visible_columns?.capacity !== false) && <th className={`border border-slate-400 ${density.cellPad}`} style={{ verticalAlign: 'middle' }}>Capacity</th>}
+                            {(certForm.formatType !== 'Training Certificate' && certCfg.visible_columns?.qty !== false) && <th className={`border border-slate-400 ${density.cellPad} text-center`} style={{ verticalAlign: 'middle' }}>Qty</th>}
+                            {(certForm.formatType !== 'Training Certificate' && certCfg.visible_columns?.refill_date !== false) && <th className={`border border-slate-400 ${density.cellPad}`} style={{ verticalAlign: 'middle' }}>{certForm.formatType === 'HP Testing' ? 'Date of Testing' : 'Date of Refilling'}</th>}
+                            {(certForm.formatType !== 'Training Certificate' && certCfg.visible_columns?.valid_until !== false) && <th className={`border border-slate-400 ${density.cellPad}`} style={{ verticalAlign: 'middle' }}>{certForm.formatType === 'HP Testing' ? 'Next Date of Testing' : 'Next Date of Refilling'}</th>}
                             {(certForm.customColumns||[]).map(c => (<th key={c.id} className={`border border-slate-400 ${density.cellPad} bg-transparent text-indigo-950`} style={{ verticalAlign: 'middle' }}>{c.label}</th>))}
                           </tr>
                         </thead>
@@ -2147,15 +2226,15 @@ export default function CertificateComplianceGeneratorPage() {
                           {(certForm.itemsList||[]).map((it, idx) => (
                             <tr key={it.id||idx} className="border border-slate-300 hover:bg-slate-50 font-semibold">
                               {(certCfg.visible_columns?.sr_no !== false) && <td className={`border border-slate-300 ${density.cellPad} text-center font-bold`} style={{ verticalAlign: 'middle' }}>{idx+1}</td>}
-                              {(certCfg.visible_columns?.item_name !== false) && (
+                              {(certForm.formatType !== 'Training Certificate' && certCfg.visible_columns?.item_name !== false) && (
                                 <td className={`border border-slate-300 ${density.cellPad} font-bold text-slate-950`} style={{ verticalAlign: 'middle' }}>
                                   {it.itemName} {it.identificationNo ? `(Cyl No: ${it.identificationNo})` : ''}
                                 </td>
                               )}
-                              {(certCfg.visible_columns?.capacity !== false) && <td className={`border border-slate-300 ${density.cellPad}`} style={{ verticalAlign: 'middle' }}>{it.capacity}</td>}
-                              {(certCfg.visible_columns?.qty !== false) && <td className={`border border-slate-300 ${density.cellPad} font-extrabold bg-transparent text-indigo-950 text-center`} style={{ verticalAlign: 'middle' }}>{formatQtyNos(it.qty || it.quantity || '1')}</td>}
-                              {(certCfg.visible_columns?.refill_date !== false) && <td className={`border border-slate-300 ${density.cellPad}`} style={{ verticalAlign: 'middle' }}>{formatDateDDMMYYYY(it.refillingDate)}</td>}
-                              {(certCfg.visible_columns?.valid_until !== false) && <td className={`border border-slate-300 ${density.cellPad} font-bold text-rose-700`} style={{ verticalAlign: 'middle' }}>{formatDateDDMMYYYY(it.nextDate)}</td>}
+                              {(certForm.formatType !== 'Training Certificate' && certCfg.visible_columns?.capacity !== false) && <td className={`border border-slate-300 ${density.cellPad}`} style={{ verticalAlign: 'middle' }}>{it.capacity}</td>}
+                              {(certForm.formatType !== 'Training Certificate' && certCfg.visible_columns?.qty !== false) && <td className={`border border-slate-300 ${density.cellPad} font-extrabold bg-transparent text-indigo-950 text-center`} style={{ verticalAlign: 'middle' }}>{formatQtyNos(it.qty || it.quantity || '1')}</td>}
+                              {(certForm.formatType !== 'Training Certificate' && certCfg.visible_columns?.refill_date !== false) && <td className={`border border-slate-300 ${density.cellPad}`} style={{ verticalAlign: 'middle' }}>{formatDateDDMMYYYY(it.refillingDate)}</td>}
+                              {(certForm.formatType !== 'Training Certificate' && certCfg.visible_columns?.valid_until !== false) && <td className={`border border-slate-300 ${density.cellPad} font-bold text-rose-700`} style={{ verticalAlign: 'middle' }}>{formatDateDDMMYYYY(it.nextDate)}</td>}
                               {(certForm.customColumns||[]).map(c => (<td key={c.id} className={`border border-slate-300 ${density.cellPad} text-indigo-900 font-bold`} style={{ verticalAlign: 'middle' }}>{it.customValues?.[c.id]||'—'}</td>))}
                             </tr>
                           ))}

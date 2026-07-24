@@ -1880,10 +1880,11 @@ router.patch('/leaves/status', updateLeaveStatusHandler);
 router.put('/leaves/:requestId/status', updateLeaveStatusHandler);
 router.patch('/leaves/:requestId/status', updateLeaveStatusHandler);
 
-// --- DOCUMENT & TEMPLATE SETTINGS (Admin Only) ---
+// --- DOCUMENT & TEMPLATE SETTINGS (read: any authenticated user, write: Admin only) ---
+// Staff need read access so admin-configured report templates, checkpoint libraries and
+// observation/recommendation defaults reach the field technicians filling in reports.
 router.get('/document-settings', async (req, res) => {
   try {
-    if (req.user.role !== 'Admin') return res.status(403).json({ error: 'Admin only' });
     const settings = await sheetsService.getDocumentSettings('DEFAULT');
     res.json(settings || {});
   } catch (err) {

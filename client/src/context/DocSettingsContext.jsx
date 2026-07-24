@@ -43,9 +43,10 @@ export function DocSettingsProvider({ children }) {
   const [saveError, setSaveError] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
 
-  // Fetch settings from server on mount / login
+  // Fetch settings from server on mount / login. Staff fetch too — report templates and
+  // checkpoint/recommendation libraries are admin-configured but consumed in the field.
   const fetchSettings = useCallback(async () => {
-    if (!token || !isAdmin) return;
+    if (!token) return;
     setIsLoading(true);
     try {
       const res = await fetch('/api/document-settings', {
@@ -62,7 +63,7 @@ export function DocSettingsProvider({ children }) {
     } finally {
       setIsLoading(false);
     }
-  }, [token, isAdmin]);
+  }, [token]);
 
   useEffect(() => {
     fetchSettings();

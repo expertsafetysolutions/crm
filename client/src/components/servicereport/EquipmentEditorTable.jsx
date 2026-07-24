@@ -73,7 +73,9 @@ export default function EquipmentEditorTable({
       );
 
   return (
-    <div className="overflow-x-auto max-h-[55vh]">
+    <>
+    {/* Desktop / tablet: wide table */}
+    <div className="hidden lg:block overflow-x-auto max-h-[55vh]">
       <table className="w-full text-left text-[11px] border-collapse">
         <thead>
           <tr className="bg-amber-100 text-amber-950 font-black border-b border-slate-300 text-center">
@@ -155,6 +157,102 @@ export default function EquipmentEditorTable({
         </tbody>
       </table>
     </div>
+
+    {/* Phone: one card per item, no sideways scrolling */}
+    <div className="lg:hidden space-y-2.5 max-h-[60vh] overflow-y-auto p-0.5">
+      {visibleItems.map((it, idx) => {
+        const dataCols = columns.filter(c => c.type !== COLUMN_TYPES.CHECKPOINT);
+        const checkCols = columns.filter(c => c.type === COLUMN_TYPES.CHECKPOINT);
+        return (
+          <div
+            key={it.id || idx}
+            className={`rounded-xl border-l-4 border p-3 shadow-2xs ${
+              it.serviced ? 'bg-emerald-50 border-emerald-400' : 'bg-white border-l-slate-200 border-slate-200'
+            }`}
+          >
+            {/* Card header: Sr + serviced + delete */}
+            <div className="flex items-center justify-between gap-2 mb-2">
+              <span className="text-[11px] font-black text-slate-500">#{idx + 1}</span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => onToggleServiced(it.id)}
+                  className={`h-9 px-3 rounded-full flex items-center gap-1.5 text-[11px] font-bold transition active:scale-95 ${
+                    it.serviced
+                      ? 'bg-emerald-500 text-white shadow-sm'
+                      : 'bg-slate-100 text-slate-500 border border-slate-300'
+                  }`}
+                >
+                  <Check className="w-4 h-4" />
+                  {it.serviced ? 'Checked' : 'Mark checked'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onDeleteRow(it.id)}
+                  className="p-2 text-slate-300 hover:text-rose-600"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            {/* Data fields */}
+            <div className="grid grid-cols-2 gap-2">
+              {dataCols.map(col => (
+                <label key={col.id} className={col.align === 'left' ? 'col-span-2' : ''}>
+                  <span className="block text-[9px] font-bold text-slate-400 uppercase mb-0.5">{col.label}</span>
+                  <input
+                    type={INPUT_TYPE[col.type] || 'text'}
+                    value={it[col.id] ?? ''}
+                    onChange={e => onCellChange(it.id, col.id, e.target.value)}
+                    className="w-full px-2 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-400/40"
+                  />
+                </label>
+              ))}
+              {customColumns.map(col => (
+                <label key={col.id} className="col-span-1">
+                  <span className="block text-[9px] font-bold text-indigo-400 uppercase mb-0.5">{col.label}</span>
+                  <input
+                    type="text"
+                    value={it.customValues?.[col.id] || ''}
+                    onChange={e => onCustomValueChange(it.id, col.id, e.target.value)}
+                    className="w-full px-2 py-1.5 bg-indigo-50/60 border border-indigo-200 rounded-lg text-xs font-bold text-indigo-900 focus:outline-none focus:ring-2 focus:ring-indigo-400/40"
+                  />
+                </label>
+              ))}
+            </div>
+
+            {/* Checks */}
+            {checkCols.length > 0 && (
+              <div className="mt-2.5">
+                <span className="block text-[9px] font-bold text-slate-400 uppercase mb-1">Checks — tap to mark Not OK</span>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {checkCols.map(col => {
+                    const ok = (it[col.id] || CHECKPOINT_OK) === CHECKPOINT_OK;
+                    return (
+                      <button
+                        key={col.id}
+                        type="button"
+                        onClick={() => onToggleCheckpoint(it.id, col.id)}
+                        className={`min-h-[40px] px-2 py-1.5 rounded-lg text-[11px] font-bold flex items-center justify-between gap-1 transition active:scale-95 border ${
+                          ok
+                            ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
+                            : 'bg-rose-100 text-rose-800 border-rose-300'
+                        }`}
+                      >
+                        <span className="truncate">{col.label}</span>
+                        <span className="shrink-0 font-black">{it[col.id] || CHECKPOINT_OK}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+    </>
   );
 }
 

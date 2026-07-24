@@ -550,14 +550,19 @@ export default function StaffDashboard() {
     return () => window.removeEventListener('scroll', onScroll);
   }, []);
 
-  const ORDER_KEY = 'expert_safety_task_sequence_order';
+  const ORDER_KEY = `expert_safety_task_sequence_order_${user?.Staff_ID || 'default'}`;
 
   const sortTasksByOrder = (taskList) => {
     if (!Array.isArray(taskList)) return taskList;
     try {
+      let orderArr = null;
       const rawOrder = localStorage.getItem(ORDER_KEY);
-      if (!rawOrder) return taskList;
-      const orderArr = JSON.parse(rawOrder);
+      if (rawOrder) {
+        orderArr = JSON.parse(rawOrder);
+      }
+      if ((!orderArr || orderArr.length === 0) && user?.Task_Order) {
+        orderArr = user.Task_Order;
+      }
       if (!Array.isArray(orderArr) || orderArr.length === 0) return taskList;
       return [...taskList].sort((a, b) => {
         const idxA = orderArr.indexOf(a.Task_ID);
@@ -572,10 +577,18 @@ export default function StaffDashboard() {
     }
   };
 
-  const saveTasksOrder = (taskList) => {
+  const saveTasksOrder = async (taskList) => {
     try {
       const orderArr = taskList.map(t => t.Task_ID);
       localStorage.setItem(ORDER_KEY, JSON.stringify(orderArr));
+      
+      if (navigator.onLine && token && user?.Staff_ID) {
+        await fetch(`/api/staff/${user.Staff_ID}/task-order`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+          body: JSON.stringify({ taskOrder: orderArr })
+        });
+      }
     } catch { }
   };
 
@@ -1911,7 +1924,7 @@ export default function StaffDashboard() {
                 setReorderingTaskId(prev => prev === task.Task_ID ? null : task.Task_ID);
               }}
               className="w-5 h-5 rounded-md bg-slate-100 hover:bg-indigo-100 active:bg-indigo-200 border border-slate-200 hover:border-indigo-300 flex items-center justify-center text-slate-400 hover:text-indigo-600 transition shrink-0 cursor-grab active:cursor-grabbing shadow-2xs touch-none"
-              title="Tap to show Move Up/Down controls, or hold & drag to reorder"
+              title="The six-dot handle lets you drag-and-drop reorder tasks in the list (or tap it for Move Up / Move Down controls). This is your visual ordering preference — it is shown when the admin accesses the particular staff panel, showing tasks in your preferred order."
             >
               <GripVertical className="w-2.5 h-2.5" />
             </div>

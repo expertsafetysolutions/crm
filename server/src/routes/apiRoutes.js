@@ -461,6 +461,25 @@ router.delete('/staff/:id', async (req, res) => {
   }
 });
 
+router.put('/staff/:id/task-order', async (req, res) => {
+  try {
+    if (req.user.role !== 'Admin' && req.user.staffId !== req.params.id) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    const { taskOrder } = req.body;
+    if (!Array.isArray(taskOrder)) {
+      return res.status(400).json({ error: 'taskOrder must be an array of Task_IDs' });
+    }
+    const updated = await sheetsService.updateRow('Staff_Master', 'Staff_ID', req.params.id, { Task_Order: taskOrder });
+    if (!updated) return res.status(404).json({ error: 'Staff member not found' });
+    const { Password, ...clean } = updated;
+    res.json({ success: true, staff: clean });
+  } catch (err) {
+    console.error('Update task order error:', err);
+    res.status(500).json({ error: 'Failed to update task order' });
+  }
+});
+
 // ADMIN OVERRIDE: set a NEW password directly for any staff/admin account.
 // Requires the acting Admin's own password as confirmation (does not need the target's old password).
 router.put('/staff/:id/set-password', async (req, res) => {

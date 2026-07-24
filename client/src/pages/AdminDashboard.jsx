@@ -644,11 +644,29 @@ export default function AdminDashboard() {
     }
   };
 
-  const saveTasksOrder = (taskList) => {
+  const saveTasksOrder = async (taskList) => {
     try {
       const orderArr = taskList.map(t => t.Task_ID);
       localStorage.setItem(ORDER_KEY, JSON.stringify(orderArr));
-    } catch {}
+
+      if (filterSelectedUsers.length === 1) {
+        const selectedStaffNameOrId = filterSelectedUsers[0];
+        const staffMember = staff.find(s => s.Name === selectedStaffNameOrId || s.Staff_ID === selectedStaffNameOrId);
+        if (staffMember?.Staff_ID) {
+          const staffTaskIds = taskList
+            .filter(t => t.Assigned_Staff === staffMember.Staff_ID || t.Assigned_Staff_Name === staffMember.Name)
+            .map(t => t.Task_ID);
+
+          await fetch(`/api/staff/${staffMember.Staff_ID}/task-order`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+            body: JSON.stringify({ taskOrder: staffTaskIds })
+          });
+
+          setStaff(prev => prev.map(s => s.Staff_ID === staffMember.Staff_ID ? { ...s, Task_Order: staffTaskIds } : s));
+        }
+      }
+    } catch { }
   };
 
   const handleDropTask = (fromTaskId, toTaskId) => {
@@ -1749,41 +1767,60 @@ export default function AdminDashboard() {
   // Memoized so this O(n) scan (with per-task O(1) customer lookups) only re-runs when one of
   // its actual inputs changes, instead of on every render of this component (e.g. every 20s
   // poll tick or unrelated modal/state toggle elsewhere in this file).
-  const filteredTasks = useMemo(() => tasks.filter(t => {
-    if (filterStatus !== 'ALL' && t.Status !== filterStatus) return false;
-    if (activeTagFilters.length > 0) {
-      const taskTags = Array.isArray(t.Tags) ? t.Tags : [];
-      if (!activeTagFilters.some(id => taskTags.includes(id))) return false;
+  const filteredTasks = useMemo(() => {
+    let list = tasks.filter(t => {
+      if (filterStatus !== 'ALL' && t.Status !== filterStatus) return false;
+      if (activeTagFilters.length > 0) {
+        const taskTags = Array.isArray(t.Tags) ? t.Tags : [];
+        if (!activeTagFilters.some(id => taskTags.includes(id))) return false;
+      }
+      // User filter: Created_By
+      if (filterSelectedUsers.length > 0) {
+        const creator = t.Created_By || t.Assigned_Staff || 'Unknown';
+        if (!filterSelectedUsers.includes(creator)) return false;
+      }
+      // Date filter: Created_At
+      if (filterSelectedDates.length > 0) {
+        const createdAtDate = t.Created_At || t.Scheduled_Date;
+        if (!filterSelectedDates.includes(createdAtDate)) return false;
+      }
+      if (filterStartDate) {
+        const createdAtDate = t.Created_At || t.Scheduled_Date;
+        if (createdAtDate < filterStartDate) return false;
+      }
+      if (filterEndDate) {
+        const createdAtDate = t.Created_At || t.Scheduled_Date;
+        if (createdAtDate > filterEndDate) return false;
+      }
+      if (!searchQuery.trim()) return true;
+      const q = searchQuery.toLowerCase().trim();
+      const cust = findCustomerForTask(t);
+      const matchCompany = (t.Customer_Name || cust.Company_Name || '').toLowerCase().includes(q);
+      const matchMobile = (cust.Contact || t.Contact || t.Customer_Contact || '').toLowerCase().includes(q);
+      const matchPerson = (cust.Auth_Person || t.Auth_Person || t.Customer_Auth_Person || '').toLowerCase().includes(q);
+      const matchAddress = (cust.Address || t.Address || t.Customer_Address || '').toLowerCase().includes(q);
+      const matchId = (t.Task_ID || '').toLowerCase().includes(q);
+      const matchDesc = (t.Description || '').toLowerCase().includes(q);
+      return matchCompany || matchMobile || matchPerson || matchAddress || matchId || matchDesc;
+    });
+
+    if (filterSelectedUsers.length === 1) {
+      const selectedStaffNameOrId = filterSelectedUsers[0];
+      const staffMember = staff.find(s => s.Name === selectedStaffNameOrId || s.Staff_ID === selectedStaffNameOrId);
+      const taskOrder = staffMember?.Task_Order;
+      if (Array.isArray(taskOrder) && taskOrder.length > 0) {
+        list = [...list].sort((a, b) => {
+          const idxA = taskOrder.indexOf(a.Task_ID);
+          const idxB = taskOrder.indexOf(b.Task_ID);
+          if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+          if (idxA !== -1) return -1;
+          if (idxB !== -1) return 1;
+          return 0;
+        });
+      }
     }
-    // User filter: Created_By
-    if (filterSelectedUsers.length > 0) {
-      const creator = t.Created_By || t.Assigned_Staff || 'Unknown';
-      if (!filterSelectedUsers.includes(creator)) return false;
-    }
-    // Date filter: Created_At
-    if (filterSelectedDates.length > 0) {
-      const createdAtDate = t.Created_At || t.Scheduled_Date;
-      if (!filterSelectedDates.includes(createdAtDate)) return false;
-    }
-    if (filterStartDate) {
-      const createdAtDate = t.Created_At || t.Scheduled_Date;
-      if (createdAtDate < filterStartDate) return false;
-    }
-    if (filterEndDate) {
-      const createdAtDate = t.Created_At || t.Scheduled_Date;
-      if (createdAtDate > filterEndDate) return false;
-    }
-    if (!searchQuery.trim()) return true;
-    const q = searchQuery.toLowerCase().trim();
-    const cust = findCustomerForTask(t);
-    const matchCompany = (t.Customer_Name || cust.Company_Name || '').toLowerCase().includes(q);
-    const matchMobile = (cust.Contact || t.Contact || t.Customer_Contact || '').toLowerCase().includes(q);
-    const matchPerson = (cust.Auth_Person || t.Auth_Person || t.Customer_Auth_Person || '').toLowerCase().includes(q);
-    const matchAddress = (cust.Address || t.Address || t.Customer_Address || '').toLowerCase().includes(q);
-    const matchId = (t.Task_ID || '').toLowerCase().includes(q);
-    const matchDesc = (t.Description || '').toLowerCase().includes(q);
-    return matchCompany || matchMobile || matchPerson || matchAddress || matchId || matchDesc;
-  }), [tasks, filterStatus, activeTagFilters, filterSelectedUsers, filterSelectedDates, filterStartDate, filterEndDate, searchQuery, customersById, customersByName]);
+    return list;
+  }, [tasks, filterStatus, activeTagFilters, filterSelectedUsers, filterSelectedDates, filterStartDate, filterEndDate, searchQuery, customersById, customersByName, staff]);
 
   const filteredCustomers = useMemo(() => customers.filter(c => {
     if (!searchQuery.trim()) return true;
@@ -2968,7 +3005,7 @@ export default function AdminDashboard() {
                           setReorderingTaskId(prev => prev === task.Task_ID ? null : task.Task_ID);
                         }}
                         className="w-5 h-5 rounded-md bg-slate-100 hover:bg-indigo-100 active:bg-indigo-200 border border-slate-200 hover:border-indigo-300 flex items-center justify-center text-slate-400 hover:text-indigo-600 transition shrink-0 cursor-grab active:cursor-grabbing shadow-2xs touch-none"
-                        title="Tap to show Move Up/Down controls, or hold & drag to reorder"
+                        title="The six-dot handle lets you drag-and-drop reorder tasks in the list (or tap it for Move Up / Move Down controls). This is just your own visual ordering preference — it is shown when the admin accesses the particular staff panel, showing tasks in your preferred order."
                       >
                         <GripVertical className="w-2.5 h-2.5" />
                       </div>
@@ -7980,7 +8017,18 @@ export default function AdminDashboard() {
               </h4>
               <div className="max-h-52 overflow-y-auto space-y-2 pr-1">
                 {(() => {
-                  const staffTasks = tasks.filter(t => t.Assigned_Staff === selectedStaffProfile.Staff_ID || t.Assigned_Staff_Name === selectedStaffProfile.Name);
+                  let staffTasks = tasks.filter(t => t.Assigned_Staff === selectedStaffProfile.Staff_ID || t.Assigned_Staff_Name === selectedStaffProfile.Name);
+                  const taskOrder = selectedStaffProfile?.Task_Order;
+                  if (Array.isArray(taskOrder) && taskOrder.length > 0) {
+                    staffTasks = [...staffTasks].sort((a, b) => {
+                      const idxA = taskOrder.indexOf(a.Task_ID);
+                      const idxB = taskOrder.indexOf(b.Task_ID);
+                      if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+                      if (idxA !== -1) return -1;
+                      if (idxB !== -1) return 1;
+                      return 0;
+                    });
+                  }
                   if (staffTasks.length === 0) {
                     return <p className="text-xs text-slate-400 italic p-3 bg-slate-50 rounded-xl text-center">No tasks currently assigned to this staff member.</p>;
                   }

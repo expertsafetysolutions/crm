@@ -5,6 +5,7 @@ import { useDocSettings } from '../context/DocSettingsContext';
 import { formatDateDDMMYYYY } from '../utils/dateUtils';
 import EquipmentPreviewTable from '../components/servicereport/EquipmentPreviewTable';
 import EquipmentEditorTable from '../components/servicereport/EquipmentEditorTable';
+import GuidedInspection from '../components/servicereport/GuidedInspection';
 import { itemsToCsvObjects, csvObjectsToItems } from '../utils/serviceReportCsv';
 import {
   resolveColumns,
@@ -692,6 +693,36 @@ export default function CertificateGeneratorPage() {
     }));
   };
 
+  // ─── Guided one-at-a-time mobile inspection flow ───────────────────────────────────────────
+  const [guidedMode, setGuidedMode] = useState(false);
+  const [guidedSelectedId, setGuidedSelectedId] = useState(null);
+  const [guidedSearch, setGuidedSearch] = useState('');
+
+  // The report's server id once it exists (from the URL for edits, or set after the first save).
+  // Both auto-save and the manual save use this to decide create-vs-update, so no duplicate record.
+  const [savedReportId, setSavedReportId] = useState(reportId || null);
+
+  // Phone auto-save: keep a local draft of the in-progress report so field work survives the app
+  // closing or losing signal. Debounced; only once a client is chosen (i.e. real work has begun).
+  const draftKey = `sr_draft:${savedReportId || reportForm.Report_ID}`;
+  useEffect(() => {
+    if (!reportForm.customerName) return;
+    const t = setTimeout(() => {
+      try { localStorage.setItem(draftKey, JSON.stringify({ savedAt: Date.now(), form: reportForm })); } catch (e) { /* quota */ }
+    }, 800);
+    return () => clearTimeout(t);
+  }, [reportForm, draftKey]);
+
+  // Save the current equipment as done and return to the list to pick/search the next one.
+  const handleGuidedSaveNext = (rowId) => {
+    setReportForm(prev => ({
+      ...prev,
+      itemsList: prev.itemsList.map(row => row.id === rowId ? { ...row, serviced: true } : row)
+    }));
+    setGuidedSelectedId(null);
+    setGuidedSearch('');
+  };
+
   // ─── Equipment CSV import/export + client equipment registry ───────────────────────────────
   const csvFileInputRef = useRef(null);
   const [equipmentBusy, setEquipmentBusy] = useState('');
@@ -1315,7 +1346,39 @@ export default function CertificateGeneratorPage() {
                 </div>
               )}
 
-              <div className="bg-amber-50/90 border border-amber-300 rounded-xl p-3.5 space-y-3 shadow-2xs">
+              {/* Guided one-at-a-time inspection toggle (best on a phone) */}
+              <button
+                type="button"
+                onClick={() => { setGuidedMode(g => !g); setGuidedSelectedId(null); setGuidedSearch(''); }}
+                className={`w-full py-2.5 rounded-xl font-black text-sm flex items-center justify-center gap-2 transition ${
+                  guidedMode ? 'bg-slate-200 text-slate-700 hover:bg-slate-300' : 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm'
+                }`}
+              >
+                <Layers className="w-4 h-4" />
+                {guidedMode ? 'Exit Guided Inspection' : 'Guided Inspection (one item at a time)'}
+              </button>
+
+              {guidedMode && (
+                <div className="bg-white border border-indigo-200 rounded-xl p-3 shadow-2xs">
+                  <GuidedInspection
+                    items={reportForm.itemsList || []}
+                    columns={previewColumns}
+                    customColumns={reportForm.customColumns || []}
+                    selectedId={guidedSelectedId}
+                    search={guidedSearch}
+                    onSearch={setGuidedSearch}
+                    onSelect={setGuidedSelectedId}
+                    onCloseItem={() => setGuidedSelectedId(null)}
+                    onCellChange={updateItemField}
+                    onToggleCheckpoint={toggleCheckpoint}
+                    onCustomValueChange={updateItemCustomValue}
+                    onRecommendationChange={setIssueRecommendation}
+                    onSaveNext={handleGuidedSaveNext}
+                  />
+                </div>
+              )}
+
+              <div className={`bg-amber-50/90 border border-amber-300 rounded-xl p-3.5 space-y-3 shadow-2xs ${guidedMode ? 'hidden' : ''}`}>
 
                 {/* Rapid Search Bar & Add Column Bar */}
                 <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 border-b border-amber-200 pb-2">

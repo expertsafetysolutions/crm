@@ -44,6 +44,7 @@ import {
   ChevronDown,
   ArrowUp,
   ArrowDown,
+  ArrowLeft,
   GripVertical,
   Search,
   X,
@@ -3324,40 +3325,41 @@ export default function StaffDashboard() {
         </div>
       )}
 
-      {/* REMARKS & INTERACTION HISTORY MODAL */}
+      {/* REMARKS & INTERACTION HISTORY MODAL — full-screen with back button, so the History list gets maximum screen space */}
       {showRemarksModal && remarkTask && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-2 sm:p-4">
-          <div className="bg-white rounded-2xl max-w-2xl w-full p-4 sm:p-6 shadow-xl border border-slate-200 max-h-[90vh] overflow-y-auto space-y-4 sm:space-y-5 animate-fadeIn">
-            <div className="flex items-center justify-between border-b border-slate-200 pb-3">
-              <div>
-                <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                  <MessageSquare className="w-5 h-5 text-amber-600" />
-                  Discussion Log
-                </h3>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Client: <strong className="text-slate-800">
-                    {(remarkTask.Customer_Name && remarkTask.Customer_Name !== 'General Client' && remarkTask.Customer_Name !== 'Unknown Company')
-                      ? remarkTask.Customer_Name
-                      : (customersList.find(c => String(c.Customer_ID || '').trim().toLowerCase() === String(remarkTask.Customer_ID || '').trim().toLowerCase())?.Company_Name || remarkTask.Customer_Name || (remarkTask.Customer_ID ? `Customer (${remarkTask.Customer_ID})` : 'General Client'))}
-                  </strong> • Task: #{remarkTask.Task_ID}
-                </p>
-              </div>
-              <button
-                onClick={() => {
-                  setShowRemarksModal(false);
-                  setRemarkTask(null);
-                  setShowTagList(true);
-                  setShowRemarkInputs(true);
-                  setHistorySearchText('');
-                  setShowHistorySearch(false);
-                  setIsMasterRemarksSearch(false);
-                  setMasterRemarksSearchQuery('');
-                }}
-                className="text-slate-400 hover:text-slate-600 font-bold text-sm p-1"
-              >
-                ✕
-              </button>
+        <div className="fixed inset-0 z-50 bg-white flex flex-col">
+          <div className="flex items-center gap-2.5 border-b border-slate-200 px-4 py-3 sm:px-6 shrink-0">
+            <button
+              onClick={() => {
+                setShowRemarksModal(false);
+                setRemarkTask(null);
+                setShowTagList(true);
+                setShowRemarkInputs(true);
+                setHistorySearchText('');
+                setShowHistorySearch(false);
+                setIsMasterRemarksSearch(false);
+                setMasterRemarksSearchQuery('');
+              }}
+              className="p-1.5 -ml-1.5 rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-700 transition shrink-0"
+              title="Back"
+            >
+              <ArrowLeft className="w-5 h-5" />
+            </button>
+            <div className="min-w-0 flex-1">
+              <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                <MessageSquare className="w-5 h-5 text-amber-600 shrink-0" />
+                Discussion Log
+              </h3>
+              <p className="text-xs text-slate-500 mt-0.5 truncate">
+                Client: <strong className="text-slate-800">
+                  {(remarkTask.Customer_Name && remarkTask.Customer_Name !== 'General Client' && remarkTask.Customer_Name !== 'Unknown Company')
+                    ? remarkTask.Customer_Name
+                    : (customersList.find(c => String(c.Customer_ID || '').trim().toLowerCase() === String(remarkTask.Customer_ID || '').trim().toLowerCase())?.Company_Name || remarkTask.Customer_Name || (remarkTask.Customer_ID ? `Customer (${remarkTask.Customer_ID})` : 'General Client'))}
+                </strong> • Task: #{remarkTask.Task_ID}
+              </p>
             </div>
+          </div>
+          <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4 sm:space-y-5 animate-fadeIn">
 
             {/* ADD NEW REMARK FORM (Auto-hidden after submit or when search / full-page history mode is active) */}
             {!showHistorySearch && !isMasterRemarksSearch && (
@@ -3699,7 +3701,7 @@ export default function StaffDashboard() {
                           </div>
                         </div>
 
-                        <div className="space-y-2.5 max-h-64 overflow-y-auto pr-1">
+                        <div className="space-y-2.5 pr-1">
                           {allRemarks.length === 0 ? (
                             <div className="p-6 text-center text-xs text-slate-400 bg-white rounded-xl border border-dashed border-indigo-200 font-medium">
                               No matching remarks found for this company{masterRemarksSearchQuery ? ` ("${masterRemarksSearchQuery}")` : ''}{masterRemarksStaffFilter !== 'ALL' ? ` by ${masterRemarksStaffFilter}` : ''}.
@@ -3753,7 +3755,7 @@ export default function StaffDashboard() {
                     );
                   }
                   return (
-                    <div className="space-y-2.5 max-h-64 overflow-y-auto pr-1">
+                    <div className="space-y-2.5 pr-1">
                       {history.slice().reverse().map((item, idx) => (
                         <div key={item.Interaction_ID || idx} className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-1.5">
                           <div className="flex items-center justify-between flex-wrap gap-2">

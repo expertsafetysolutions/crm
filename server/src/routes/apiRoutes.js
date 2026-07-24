@@ -1198,7 +1198,13 @@ router.post('/customer-interactions', async (req, res) => {
     await sheetsService.insertRow('Customer_Interactions', newInteraction);
     res.json(newInteraction);
   } catch (err) {
-    res.status(500).json({ error: 'Failed to record customer interaction' });
+    console.error('Failed to record customer interaction:', err);
+    const dbUnavailable = err.name === 'MongooseServerSelectionError' || err.name === 'MongoServerSelectionError';
+    res.status(500).json({
+      error: dbUnavailable
+        ? 'Database temporarily unavailable — please try again in a moment.'
+        : 'Failed to record customer interaction'
+    });
   }
 });
 

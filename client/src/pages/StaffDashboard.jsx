@@ -1362,7 +1362,10 @@ export default function StaffDashboard() {
           remarks: remarkForm.remarks
         })
       });
-      if (!res.ok) throw new Error('Failed to save remark');
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || 'Failed to save remark');
+      }
       setRemarkForm({ type: '', remarks: '' });
       setShowTagList(true);
       setShowRemarkInputs(false);

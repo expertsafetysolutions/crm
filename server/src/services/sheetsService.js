@@ -60,10 +60,15 @@ class MongoService {
     const Model = models[sheetName];
     if (!Model) throw new Error(`Collection ${sheetName} not found`);
     const data = await Model.find({}).lean();
-    // Remove _id and __v for backward compatibility with existing JSON code
+    // Remove _id and __v for backward compatibility with existing JSON code. If a document has no
+    // app-level `id` field of its own (legacy rows inserted before an `id` convention existed),
+    // backfill it from Mongo's real, always-unique _id — otherwise every such row collapses to
+    // `id: undefined` and editing/deleting one wipes all of them from the client's perspective.
     const cleanData = data.map(doc => {
+      const fallbackId = doc._id ? String(doc._id) : undefined;
       delete doc._id;
       delete doc.__v;
+      if (doc.id === undefined && fallbackId) doc.id = fallbackId;
       return doc;
     });
     this.cache[sheetName] = { timestamp: now, data: cleanData };
@@ -94,6 +99,12 @@ class MongoService {
           { [idColumn]: new RegExp(`^${idValue.trim()}$`, 'i') }
         ]
       };
+      // getTab() backfills a missing app-level `id` from Mongo's real _id (see getTab) — if this
+      // looks like that fallback (a raw ObjectId string), also match on _id so legacy documents
+      // without their own `id` field can still be found and updated.
+      if (idColumn === 'id' && mongoose.Types.ObjectId.isValid(idValue.trim())) {
+        query.$or.push({ _id: idValue.trim() });
+      }
     }
 
     let oldDoc = null;
@@ -199,7 +210,13 @@ class MongoService {
     await this.connect();
     const Model = models[sheetName];
     if (!Model) throw new Error(`Collection ${sheetName} not found`);
-    await Model.deleteOne({ [idColumn]: idValue });
+    // See updateRow: getTab() backfills a missing app-level `id` from Mongo's real _id, so also
+    // match on _id when idValue looks like that fallback, or legacy rows without their own `id`
+    // field can never actually be deleted by this route.
+    const query = (idColumn === 'id' && typeof idValue === 'string' && mongoose.Types.ObjectId.isValid(idValue.trim()))
+      ? { $or: [{ [idColumn]: idValue }, { _id: idValue.trim() }] }
+      : { [idColumn]: idValue };
+    await Model.deleteOne(query);
     return true;
   }
 

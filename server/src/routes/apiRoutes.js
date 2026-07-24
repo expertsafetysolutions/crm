@@ -3,6 +3,7 @@ const bcrypt = require('bcryptjs');
 const sheetsService = require('../services/sheetsService');
 const workflowEngine = require('../services/workflowEngine');
 const attendanceService = require('../services/attendanceService');
+const driveService = require('../services/driveService');
 const { authenticateToken } = require('./authRoutes');
 const { verifyStaffPassword, validatePasswordPolicy } = require('../utils/passwordUtils');
 
@@ -170,6 +171,21 @@ router.put('/certificates/:guid', async (req, res) => {
     res.json({ success: true, certificate: updated });
   } catch (err) {
     res.status(500).json({ error: 'Failed to update certificate' });
+  }
+});
+
+router.post('/certificates/upload-pdf', async (req, res) => {
+  try {
+    const { pdfBase64, certificateNo } = req.body;
+    if (!pdfBase64) return res.status(400).json({ error: 'PDF data missing' });
+    
+    const safeFilename = (certificateNo || 'Certificate').replace(/[^a-z0-9]/gi, '_') + '.pdf';
+    const file = await driveService.uploadPdfToDrive(pdfBase64, safeFilename);
+    
+    res.json({ success: true, file });
+  } catch (err) {
+    console.error('PDF Upload failed:', err);
+    res.status(500).json({ error: err.message || 'Failed to upload PDF to Google Drive' });
   }
 });
 

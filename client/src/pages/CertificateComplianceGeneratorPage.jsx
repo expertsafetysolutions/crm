@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useDocSettings } from '../context/DocSettingsContext';
-import { getLocalDateStr, formatDateDDMMYYYY } from '../utils/dateUtils';
+import { getLocalDateStr, formatDateDDMMYYYY, getRecordCreatedAt, formatDateTimeDDMMYYYYHHMMSS } from '../utils/dateUtils';
 import {
   ChevronLeft,
   ChevronRight,
@@ -22,11 +22,41 @@ import {
   Maximize2,
   Minimize2,
   Share2,
-  Lock
+  Lock,
+  GripVertical,
+  RotateCcw
 } from 'lucide-react';
 import { QRCodeCanvas } from 'qrcode.react';
 // html2canvas/jspdf are loaded on demand (see generateCertificateCanvas/buildCertificatePdf) —
 // they're ~590KB and only needed when the user actually downloads/prints/shares, not to open the page.
+
+// Settings-panel sections. `order` controls the panel layout only; `pdf: true` marks
+// sections whose content actually prints on the certificate, so they get a show/hide
+// tick. Unticked = hidden from the certificate but kept here for later reuse.
+const CERT_SECTIONS = [
+  { id: 'itemMaster',     label: 'Item Master & Variants',   pdf: false },
+  { id: 'bodyIntro',      label: 'Certificate Body Text',    pdf: true  },
+  { id: 'customCertify',  label: 'Custom Lines',             pdf: true  },
+  { id: 'equipmentNotes', label: 'Custom Notes',             pdf: true  },
+  { id: 'formatSpecific', label: 'Format-Specific Details',  pdf: true  },
+  { id: 'title',          label: 'Certificate Title',        pdf: true  },
+  { id: 'statusBadge',    label: 'Compliance Status Badge',  pdf: false },
+  { id: 'certNo',         label: 'Certificate No Structure', pdf: true  },
+  { id: 'customColumns',  label: 'Custom Table Columns',     pdf: true  },
+  { id: 'validity',       label: 'Validity Period',          pdf: false },
+  { id: 'signatory',      label: 'Authorized Signatory',     pdf: true  }
+];
+const CERT_SECTION_IDS = CERT_SECTIONS.map(s => s.id);
+const CERT_SECTION_META = Object.fromEntries(CERT_SECTIONS.map(s => [s.id, s]));
+const CERT_SECTION_ORDER_KEY = 'esc_cert_section_order_v1';
+
+// Normalize a stored order: keep known ids, drop unknown, append anything missing.
+const normalizeSectionOrder = (saved) => {
+  if (!Array.isArray(saved)) return CERT_SECTION_IDS;
+  const valid = saved.filter(id => CERT_SECTION_IDS.includes(id));
+  if (!valid.length) return CERT_SECTION_IDS;
+  return [...valid, ...CERT_SECTION_IDS.filter(id => !valid.includes(id))];
+};
 
 // Helper: Format quantity with "Nos." unit
 const formatQtyNos = (val) => {
@@ -97,6 +127,21 @@ const getLatestSequenceNumber = (certs, formatType) => {
     }
   });
   return maxSeq;
+};
+
+// A saved/locked Settings template stores a fixed reference certSequence (e.g. "R9813"), but that
+// number goes stale the moment any newer certificate is actually issued — it must never be applied
+// as-is, or every subsequently opened certificate resets back to it and collides with real numbers
+// already in use. This resolves the true next-available sequence: whichever is higher between
+// "next after the highest certificate actually on file" and the template's own reference number,
+// so the number only ever moves forward and can never produce a duplicate.
+const resolveEffectiveNextSequence = (templateSequence, formatType, certsList, fallbackSequence) => {
+  const latestIssuedNum = getLatestSequenceNumber(certsList, formatType);
+  const templateNumMatch = (templateSequence || '').match(/\d+/);
+  const templateNum = templateNumMatch ? parseInt(templateNumMatch[0], 10) : 0;
+  const nextNum = Math.max(latestIssuedNum + 1, templateNum);
+  const prefixLetter = (templateSequence || fallbackSequence || '').match(/^[A-Za-z]+/)?.[0] || '';
+  return `${prefixLetter}${nextNum}`;
 };
 
 // Helper: fetch one URL as base64 data URL, trying multiple fallbacks in order
@@ -380,11 +425,69 @@ export default function CertificateComplianceGeneratorPage() {
     customCertifyLines: [''],
     customEquipmentNotes: [''],
     customColumns: [],
-    itemsList: []
+    itemsList: [],
+    sectionOrder: normalizeSectionOrder((() => {
+      try { return JSON.parse(localStorage.getItem(CERT_SECTION_ORDER_KEY)); } catch { return null; }
+    })()),
+    sectionVisibility: {}
   });
 
   const [certCustomerSearch, setCertCustomerSearch] = useState('');
   const [showCertCustDropdown, setShowCertCustDropdown] = useState(false);
+
+  // Settings-panel section ordering + per-section show/hide on the certificate.
+  // Order is panel layout only; visibility gates what prints on the certificate.
+  const [draggingSectionId, setDraggingSectionId] = useState(null);
+  const [dragOverSectionId, setDragOverSectionId] = useState(null);
+
+  const sectionOrder = normalizeSectionOrder(certForm.sectionOrder);
+  const isSectionVisible = (id) => {
+    if (!CERT_SECTION_META[id]?.pdf) return true;
+    return certForm.sectionVisibility?.[id] !== false;
+  };
+
+  const setSectionOrder = (updater) => {
+    setCertForm(prev => {
+      const current = normalizeSectionOrder(prev.sectionOrder);
+      const next = typeof updater === 'function' ? updater(current) : updater;
+      try { localStorage.setItem(CERT_SECTION_ORDER_KEY, JSON.stringify(next)); } catch { /* quota */ }
+      return { ...prev, sectionOrder: next };
+    });
+  };
+
+  const moveCertSection = (fromId, toId) => {
+    if (!fromId || !toId || fromId === toId) return;
+    setSectionOrder(current => {
+      const next = [...current];
+      const from = next.indexOf(fromId);
+      const to = next.indexOf(toId);
+      if (from === -1 || to === -1) return current;
+      next.splice(to, 0, next.splice(from, 1)[0]);
+      return next;
+    });
+  };
+
+  const nudgeCertSection = (id, dir) => {
+    setSectionOrder(current => {
+      const idx = current.indexOf(id);
+      const target = idx + dir;
+      if (idx === -1 || target < 0 || target >= current.length) return current;
+      const next = [...current];
+      [next[idx], next[target]] = [next[target], next[idx]];
+      return next;
+    });
+  };
+
+  const toggleSectionVisible = (id) => {
+    if (!CERT_SECTION_META[id]?.pdf) return;
+    setCertForm(prev => ({
+      ...prev,
+      sectionVisibility: {
+        ...(prev.sectionVisibility || {}),
+        [id]: prev.sectionVisibility?.[id] === false
+      }
+    }));
+  };
   const [newColLabel, setNewColLabel] = useState('');
   const [newItemCustomValues, setNewItemCustomValues] = useState({});
   const [newItemSearch, setNewItemSearch] = useState('');
@@ -459,6 +562,51 @@ export default function CertificateComplianceGeneratorPage() {
     alert(`Loaded Certificate ${newCertNo} (Ready to edit and re-save).`);
   };
 
+  // Copies every field from an existing certificate into a brand-new one — same customer,
+  // equipment, and settings, but today's date and the next unused certificate number, so it never
+  // collides with the original. Nothing is saved until the user hits Save/Download themselves.
+  const handleDuplicateCertificate = (c) => {
+    const format = c.formatType || c.Format_Type || 'Refilling';
+    const prefix = c.certPrefix || 'Expert/';
+    const period = c.certPeriod || '26-27';
+    const rawCertNo = c.Certificate_No || c.certificateNo || '';
+    const originalSeq = c.certSequence || rawCertNo.split('/').pop() || '';
+    const nextSequence = resolveEffectiveNextSequence(null, format, allCertificates, originalSeq);
+    const todayStr = getLocalDateStr();
+    const years = c.validityDuration === '5 Years' ? 5 : c.validityDuration === '3 Years' ? 3 : 1;
+    const nextValidUntil = c.validityDuration === 'Custom'
+      ? (c.validUntil || todayStr)
+      : new Date(new Date(todayStr).setFullYear(new Date(todayStr).getFullYear() + years)).toISOString().split('T')[0];
+
+    setCertForm({
+      ...c,
+      formatType: format,
+      certPrefix: prefix,
+      certPeriod: period,
+      certSequence: nextSequence,
+      certificateNo: `${prefix}${period}/${nextSequence}`,
+      customerName: c.Customer_Name || c.customerName || '',
+      address: c.Address || c.address || '',
+      gstin: c.GSTIN || c.gstin || '',
+      contact: c.Contact || c.contact || '',
+      authPerson: c.Auth_Person || c.authPerson || '',
+      issueDate: todayStr,
+      challanDate: todayStr,
+      validUntil: nextValidUntil,
+      isLocked: false,
+      isContentUnlocked: false,
+      revision: 0,
+      verificationGuid: 'ESS-VER-' + Math.random().toString(36).substring(2, 8).toUpperCase()
+    });
+
+    setNewItemRefillDate(todayStr);
+    setNewItemNextDate(nextValidUntil);
+    setCertSearchQuery('');
+    setShowCertSearchDropdown(false);
+    setActiveMobileTab('preview');
+    alert(`Duplicated as new certificate ${prefix}${period}/${nextSequence} — dated today. Review and Save/Download to issue it.`);
+  };
+
   const handleCertFormatChange = (newFormat) => {
     let title = 'FIRE EXTINGUISHER REFILLING & MAINTENANCE CERTIFICATE';
     let details = 'Fire Extinguishers Refilling, Testing & Maintenance as per IS:2190 standards';
@@ -529,7 +677,7 @@ export default function CertificateComplianceGeneratorPage() {
       const nextDetails = systemSettings.equipmentDetails || details;
       const nextPrefix = systemSettings.certPrefix || currentPrefix;
       const nextPeriod = systemSettings.certPeriod || currentPeriod;
-      const nextSequence = systemSettings.certSequence || seqSuffix;
+      const nextSequence = resolveEffectiveNextSequence(systemSettings.certSequence, newFormat, allCertificates, seqSuffix);
       const nextCertNo = `${nextPrefix}${nextPeriod}/${nextSequence}`;
       
       const nextValidityDuration = systemSettings.validityDuration || duration;
@@ -571,6 +719,8 @@ export default function CertificateComplianceGeneratorPage() {
         customColumns: nextCustomColumns,
         authorizedSignatory: nextSignatory,
         status: nextStatus,
+        sectionOrder: normalizeSectionOrder(systemSettings.sectionOrder),
+        sectionVisibility: systemSettings.sectionVisibility || {},
         isSettingsLocked: nextIsLocked
       };
     });
@@ -665,16 +815,21 @@ export default function CertificateComplianceGeneratorPage() {
 
     const systemSettings = docSettings?.certificate_types?.[certForm.formatType];
     if (systemSettings) {
-      setCertForm(prev => ({
-        ...prev,
-        ...systemSettings,
-        certPrefix: systemSettings.certPrefix || prev.certPrefix,
-        certPeriod: systemSettings.certPeriod || prev.certPeriod,
-        certSequence: systemSettings.certSequence || prev.certSequence,
-        certificateNo: `${systemSettings.certPrefix || prev.certPrefix}${systemSettings.certPeriod || prev.certPeriod}/${systemSettings.certSequence || prev.certSequence}`,
-      }));
+      setCertForm(prev => {
+        const prefix = systemSettings.certPrefix || prev.certPrefix;
+        const period = systemSettings.certPeriod || prev.certPeriod;
+        const nextSequence = resolveEffectiveNextSequence(systemSettings.certSequence, prev.formatType, allCertificates, prev.certSequence);
+        return {
+          ...prev,
+          ...systemSettings,
+          certPrefix: prefix,
+          certPeriod: period,
+          certSequence: nextSequence,
+          certificateNo: `${prefix}${period}/${nextSequence}`,
+        };
+      });
     }
-  }, [docSettings]);
+  }, [docSettings, allCertificates]);
 
   // Load header/stamp/signature/footer/watermark images as base64 (needed for html2canvas export)
   useEffect(() => {
@@ -763,7 +918,13 @@ export default function CertificateComplianceGeneratorPage() {
   const contentEditable = true;
   const lockWrapClass = '';
 
-  const hideEquipmentSection = certForm.formatType === 'Training Certificate' && (certForm.customColumns || []).length === 0;
+  // AMC Certificate and Visit Report don't revolve around specific fire-extinguisher units either,
+  // so they share Training Certificate's minimal, custom-columns-only item design (no standard
+  // item name / capacity / qty / date fields, and the whole table hides itself when no custom
+  // columns have been configured for that format).
+  const NO_EQUIPMENT_TABLE_FORMATS = ['Training Certificate', 'AMC Certificate', 'Visit Report'];
+  const isMinimalItemFormat = NO_EQUIPMENT_TABLE_FORMATS.includes(certForm.formatType);
+  const hideEquipmentSection = isMinimalItemFormat && (certForm.customColumns || []).length === 0;
 
   const isSettingsSetupComplete = Boolean(
     (certForm.authorizedSignatory || '').trim() &&
@@ -800,6 +961,24 @@ export default function CertificateComplianceGeneratorPage() {
     return { ...json, isExisting };
   };
 
+  const uploadToDriveBackground = async (existingPdf = null) => {
+    try {
+      let pdfObj = existingPdf;
+      if (!pdfObj) {
+        const generated = await buildCertificatePdf();
+        pdfObj = generated.pdf;
+      }
+      const pdfBase64 = pdfObj.output('datauristring');
+      await fetch('/api/certificates/upload-pdf', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ pdfBase64, certificateNo: certForm.certificateNo })
+      });
+    } catch (err) {
+      console.error('Background Drive Upload Failed:', err);
+    }
+  };
+
   // Bumps the in-memory certificate number to the next unused sequence for the current format —
   // called right after a brand-new certificate is successfully saved/downloaded, so if the user
   // starts another certificate in the same session the number can never collide with the one just
@@ -822,6 +1001,116 @@ export default function CertificateComplianceGeneratorPage() {
       isContentUnlocked: false,
       revision: 0
     }));
+  };
+
+  const handleLoadPreviousCertificate = () => {
+    if (allCertificates.length === 0) {
+      alert("No certificates found in history.");
+      return;
+    }
+
+    const sortedCerts = [...allCertificates].sort((a, b) => {
+      const ta = getRecordCreatedAt(a)?.getTime();
+      const tb = getRecordCreatedAt(b)?.getTime();
+      if (ta === undefined && tb === undefined) return 0;
+      if (ta === undefined) return 1;
+      if (tb === undefined) return -1;
+      return tb - ta;
+    });
+
+    const currentIndex = sortedCerts.findIndex(c =>
+      (c.verificationGuid && c.verificationGuid === certForm.verificationGuid) || 
+      (c.Verification_GUID && c.Verification_GUID === certForm.verificationGuid)
+    );
+
+    let targetIndex = 0;
+    if (currentIndex !== -1) {
+      targetIndex = currentIndex + 1;
+    }
+
+    if (targetIndex >= sortedCerts.length) {
+      alert("You have reached the oldest certificate.");
+      return;
+    }
+
+    const targetCert = sortedCerts[targetIndex];
+    const newCertNo = targetCert.Certificate_No || targetCert.certificateNo || '';
+    const newRevision = (targetCert.Revision || targetCert.revision || 0);
+    const loadedChallanDate = targetCert.Challan_Date || targetCert.challanDate || targetCert.Issue_Date || targetCert.issueDate || getLocalDateStr();
+    const loadedValidUntil = targetCert.Valid_Until || targetCert.validUntil || '';
+
+    setCertForm({
+      ...targetCert,
+      certificateNo: newCertNo,
+      revision: newRevision,
+      isLocked: false,
+      isContentUnlocked: true,
+      customerName: targetCert.Customer_Name || targetCert.customerName || '',
+      address: targetCert.Address || targetCert.address || '',
+      gstin: targetCert.GSTIN || targetCert.gstin || '',
+      contact: targetCert.Contact || targetCert.contact || '',
+      authPerson: targetCert.Auth_Person || targetCert.authPerson || '',
+      issueDate: targetCert.Issue_Date || targetCert.issueDate || getLocalDateStr(),
+      validUntil: loadedValidUntil,
+      challanDate: loadedChallanDate,
+      verificationGuid: targetCert.Verification_GUID || targetCert.verificationGuid
+    });
+
+    setNewItemRefillDate(loadedChallanDate);
+    setNewItemNextDate(loadedValidUntil);
+    setCertCustomerSearch(targetCert.Customer_Name || targetCert.customerName || '');
+    setActiveMobileTab('edit');
+    alert(`Loaded Certificate ${newCertNo} (Previous)`);
+  };
+
+  const handleNewBlankCertificate = async () => {
+    let updatedCerts = allCertificates;
+    if (readyToFinalize) {
+      try {
+        setAdminSubmitting('save');
+        const result = await saveCertificateRecord();
+        uploadToDriveBackground(null);
+        if (result.certificate) {
+          updatedCerts = [
+            ...allCertificates.filter(c =>
+              (c.verificationGuid || c.Verification_GUID) !== (result.certificate.verificationGuid || result.certificate.Verification_GUID)
+            ),
+            result.certificate
+          ];
+        }
+        alert('✅ Previous certificate saved automatically.');
+      } catch (err) {
+        alert('Failed to auto-save previous certificate: ' + err.message);
+        return;
+      } finally {
+        setAdminSubmitting('');
+      }
+    }
+
+    const latestSeq = getLatestSequenceNumber(updatedCerts, certForm.formatType);
+    const nextSeq = latestSeq + 1;
+    const prefixLetter = (certForm.certSequence || '').match(/^[A-Za-z]+/)?.[0] || '';
+    const nextSequence = `${prefixLetter}${nextSeq}`;
+
+    setCertForm(prev => ({
+      ...prev,
+      customerName: '',
+      address: '',
+      gstin: '',
+      contact: '',
+      authPerson: '',
+      itemsList: [],
+      certSequence: nextSequence,
+      certificateNo: `${prev.certPrefix || 'Expert/'}${prev.certPeriod || '26-27'}/${nextSequence}`,
+      verificationGuid: 'ESS-VER-' + Math.random().toString(36).substring(2, 8).toUpperCase(),
+      isLocked: false,
+      isContentUnlocked: false,
+      revision: 0
+    }));
+    setCertCustomerSearch('');
+    setNewItemSearch('');
+    setActiveMobileTab('edit');
+    alert('✨ New blank certificate opened.');
   };
 
   const generateCertificateCanvas = async () => {
@@ -971,8 +1260,17 @@ export default function CertificateComplianceGeneratorPage() {
           {/* Tab Bar — Client + Equipment merged into one guided flow; Settings stays separate */}
           <div className="flex items-center justify-between border-b border-slate-200 bg-white">
             <button type="button" onClick={() => setCertTab('client')}
-              className={`flex-1 py-2 text-[11px] font-bold border-b-2 transition-colors ${certTab==='client' ? 'border-amber-600 text-amber-800 bg-amber-50' : 'border-transparent text-slate-500 hover:text-slate-700 hover:bg-slate-50'}`}>
-              📋 Certificate Details {clientDetailsComplete ? '✅' : ''}
+              className={`flex-1 py-2 px-3 text-[11px] font-bold border-b-2 transition-colors flex items-center justify-between ${certTab==='client' ? 'border-amber-600 text-amber-800 bg-amber-50' : 'border-transparent text-slate-500 hover:text-slate-700 hover:bg-slate-50'}`}>
+              <span>📋 Certificate Details {clientDetailsComplete ? '✅' : ''}</span>
+              {certForm.certificateNo && (
+                <span className={`text-[10px] font-black px-2 py-0.5 rounded border transition-colors shrink-0 ${
+                  certTab === 'client' 
+                    ? 'text-amber-900 bg-amber-100/80 border-amber-200' 
+                    : 'text-slate-600 bg-slate-100 border-slate-205'
+                }`}>
+                  No: {certForm.certificateNo}
+                </span>
+              )}
             </button>
             <button
               type="button"
@@ -1143,7 +1441,6 @@ export default function CertificateComplianceGeneratorPage() {
                   />
                 </div>
 
-
                 {/* 4. Certificate No */}
                 <div className="space-y-1">
                   <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wide">Certificate No *</label>
@@ -1190,7 +1487,7 @@ export default function CertificateComplianceGeneratorPage() {
                         <div className="text-[10px] font-bold text-amber-900 uppercase tracking-wide">Add Equipment Row to Certificate</div>
                       </div>
 
-                      {certForm.formatType !== 'Training Certificate' && (
+                      {!isMinimalItemFormat && (
                         <div className="space-y-1 relative">
                           <div className="flex items-center justify-between">
                             <label className="block text-[10px] font-bold text-slate-600">Item Name *</label>
@@ -1258,7 +1555,7 @@ export default function CertificateComplianceGeneratorPage() {
                         </div>
                       )}
 
-                      {certForm.formatType !== 'Training Certificate' && (
+                      {!isMinimalItemFormat && (
                         <>
                           <div className="grid grid-cols-2 gap-2">
                             <div className="space-y-1">
@@ -1335,7 +1632,7 @@ export default function CertificateComplianceGeneratorPage() {
                         </div>
                       )}
                       <button type="button" onClick={() => {
-                        const isTraining = certForm.formatType === 'Training Certificate';
+                        const isTraining = isMinimalItemFormat;
                         if (!isTraining && !newItemSearch.trim()) { alert('Please enter or select an Item Name.'); return; }
                         if (isTraining) {
                           const hasValue = Object.values(newItemCustomValues).some(v => v && v.trim());
@@ -1376,7 +1673,7 @@ export default function CertificateComplianceGeneratorPage() {
                           <div className="flex items-start gap-2 flex-1 min-w-0">
                             <span className="mt-0.5 w-5 h-5 bg-amber-100 text-amber-900 rounded-full flex items-center justify-center font-bold text-[10px] shrink-0">{idx+1}</span>
                             <div className="min-w-0 flex-1">
-                              {certForm.formatType === 'Training Certificate' ? (
+                              {isMinimalItemFormat ? (
                                 <div className="grid grid-cols-2 gap-2 mt-1">
                                   {(certForm.customColumns || []).map(col => (
                                     <div key={col.id} className="flex flex-col">
@@ -1407,7 +1704,7 @@ export default function CertificateComplianceGeneratorPage() {
                                     onChange={e => setCertForm(prev => ({...prev, itemsList: prev.itemsList.map((item,i) => i===idx ? {...item, itemName:e.target.value} : item)}))}
                                     className="w-full font-bold text-slate-900 text-xs bg-transparent border-b border-transparent hover:border-slate-300 focus:border-amber-500 focus:outline-none py-0.5 mb-0.5"/>
                                   <div className="flex gap-2 flex-wrap text-[10px] text-slate-500">
-                                    {certForm.formatType !== 'Training Certificate' && (
+                                    {!isMinimalItemFormat && (
                                       <>
                                         <span>Cap:
                                           <input type="text" value={it.capacity}
@@ -1444,7 +1741,7 @@ export default function CertificateComplianceGeneratorPage() {
                                         />
                                       </span>
                                     ))}
-                                    {certForm.formatType !== 'Training Certificate' && (
+                                    {!isMinimalItemFormat && (
                                       <>
                                         <span>{certForm.formatType === 'HP Testing' ? 'Testing' : 'Refilling'}:
                                           <input type="date" value={it.refillingDate} max={certForm.challanDate || ''}
@@ -1510,9 +1807,13 @@ export default function CertificateComplianceGeneratorPage() {
                   </div>
                 )}
 
-                <div className={`space-y-3 ${certForm.isSettingsLocked ? 'opacity-50 pointer-events-none select-none' : ''}`}>
-                  {/* Item Master Manager */}
-                  <div className="mb-2">
+                <div className={`space-y-2 ${certForm.isSettingsLocked ? 'opacity-50 pointer-events-none select-none' : ''}`}>
+                {(() => {
+                const certSectionBlocks = {};
+
+                // Item Master Manager — a management tool, never printed on the certificate
+                certSectionBlocks.itemMaster = (
+                  <div>
                     <button type="button"
                       onClick={() => { setShowItemMasterPanel(p => !p); setImEditId(null); setImName(''); setImVariants(''); }}
                       className="w-full flex items-center justify-between px-3 py-2 bg-indigo-50 border border-indigo-200 rounded-xl hover:bg-indigo-100 transition">
@@ -1535,8 +1836,11 @@ export default function CertificateComplianceGeneratorPage() {
                                 <button type="button"
                                   onClick={async () => {
                                     if (!window.confirm(`Delete "${eq.type||eq.itemName}"?`)) return;
-                                    await fetch(`/api/equipment-master/${eq.id}`, {method:'DELETE', headers:{Authorization:`Bearer ${token}`}});
-                                    setEquipmentMasterList(prev => prev.filter(x => x.id !== eq.id));
+                                    try {
+                                      const r = await fetch(`/api/equipment-master/${eq.id}`, {method:'DELETE', headers:{Authorization:`Bearer ${token}`}});
+                                      if (!r.ok) throw new Error('Delete request failed');
+                                      setEquipmentMasterList(prev => prev.filter(x => x.id !== eq.id));
+                                    } catch (e) { alert('Delete failed: ' + e.message); }
                                   }}
                                   className="px-2 py-0.5 bg-rose-100 hover:bg-rose-200 text-rose-700 rounded text-[10px] font-bold">Del</button>
                               </div>
@@ -1580,8 +1884,10 @@ export default function CertificateComplianceGeneratorPage() {
                       </div>
                     )}
                   </div>
+                );
 
-                {/* Certificate body text — custom intro per cert type */}
+                // Certificate body text — custom intro per cert type
+                certSectionBlocks.bodyIntro = (
                 <div className="space-y-1">
                   <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wide">Certificate Body Text (Custom Intro)</label>
                   <CustomLinesEditor
@@ -1591,7 +1897,9 @@ export default function CertificateComplianceGeneratorPage() {
                     accent="amber"
                   />
                 </div>
+                );
 
+                certSectionBlocks.customCertify = (
                 <div className="space-y-1">
                   <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wide">Custom Lines (shown below the certify statement)</label>
                   <CustomLinesEditor
@@ -1601,8 +1909,10 @@ export default function CertificateComplianceGeneratorPage() {
                     accent="amber"
                   />
                 </div>
+                );
 
-                {/* Custom Notes (shown after equipment list) */}
+                // Custom Notes (shown after equipment list)
+                certSectionBlocks.equipmentNotes = (
                 <div className="space-y-1">
                   <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wide">Custom Notes (shown after equipment list)</label>
                   <CustomLinesEditor
@@ -1612,9 +1922,10 @@ export default function CertificateComplianceGeneratorPage() {
                     accent="indigo"
                   />
                 </div>
-                </div>
+                );
 
-                <div className={`space-y-3 ${certForm.isSettingsLocked ? 'opacity-50 pointer-events-none select-none' : ''}`}>
+                certSectionBlocks.formatSpecific = (
+                <>
                 {certForm.formatType === 'HP Testing' && (
                   <div className="grid grid-cols-2 gap-2 bg-blue-50 border border-blue-200 rounded-xl p-2.5">
                     <div className="space-y-1"><label className="block text-[10px] font-bold text-blue-700 uppercase">Test Pressure</label><input type="text" value={certForm.hpTestPressure||''} onChange={e=>setCertForm(prev=>({...prev,hpTestPressure:e.target.value}))} className="w-full px-2.5 py-1.5 bg-white border border-blue-300 rounded-lg text-xs font-bold focus:outline-none" placeholder="e.g. 35 kg/cm²"/></div>
@@ -1645,7 +1956,10 @@ export default function CertificateComplianceGeneratorPage() {
                     <textarea rows={3} value={certForm.visitObservations||''} onChange={e=>setCertForm(prev=>({...prev,visitObservations:e.target.value}))} className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-medium focus:outline-none resize-none"/>
                   </div>
                 )}
+                </>
+                );
 
+                certSectionBlocks.title = (
                 <div className="space-y-1">
                   <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wide">Certificate Title</label>
                   <input
@@ -1656,14 +1970,18 @@ export default function CertificateComplianceGeneratorPage() {
                     placeholder="Enter Certificate Title (e.g. HYDRAULIC PRESSURE TESTING CERTIFICATE)"
                   />
                 </div>
+                );
 
+                certSectionBlocks.statusBadge = (
                 <div className="space-y-1">
                   <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wide">Compliance Status Badge</label>
                   <input type="text" value={certForm.status||'VERIFIED & COMPLIANT'} onChange={e => setCertForm(prev=>({...prev,status:e.target.value}))}
                     className="w-full px-3 py-2 bg-emerald-50 border border-emerald-300 rounded-lg font-bold text-emerald-800 text-xs focus:ring-2 focus:ring-emerald-500 focus:outline-none"/>
                 </div>
+                );
 
-                {/* Certificate Number Builder settings */}
+                // Certificate Number Builder settings
+                certSectionBlocks.certNo = (
                 <div className="bg-amber-50/50 border border-amber-250 rounded-xl p-2.5 space-y-2">
                   <div className="text-[10px] font-bold text-amber-900 uppercase tracking-wide flex items-center gap-1">
                     <span>⚙️ Certificate No Structure</span>
@@ -1701,8 +2019,10 @@ export default function CertificateComplianceGeneratorPage() {
                     Resulting Cert No: <strong className="text-amber-900">{certForm.certificateNo}</strong>
                   </div>
                 </div>
+                );
 
-                {/* Custom Columns Setup */}
+                // Custom Columns Setup
+                certSectionBlocks.customColumns = (
                 <div className="bg-indigo-50/50 border border-indigo-200 rounded-xl p-2.5 space-y-2">
                   <div className="text-[10px] font-bold text-indigo-900 uppercase tracking-wide flex items-center gap-1">
                     <span>📊 Custom Table Columns</span>
@@ -1768,7 +2088,9 @@ export default function CertificateComplianceGeneratorPage() {
                     </button>
                   </div>
                 </div>
+                );
 
+                certSectionBlocks.validity = (
                 <div className="bg-slate-50 border border-slate-200 rounded-xl p-2.5 space-y-2">
                   <div className="text-[10px] font-bold text-slate-600 uppercase tracking-wide">Validity Period</div>
                   <div className="grid grid-cols-3 gap-2">
@@ -1873,12 +2195,102 @@ export default function CertificateComplianceGeneratorPage() {
                     </div>
                   </div>
                 </div>
+                );
 
+                certSectionBlocks.signatory = (
                 <div className="space-y-1">
                   <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wide">Authorized Signatory</label>
                   <input type="text" value={certForm.authorizedSignatory} onChange={e => setCertForm(prev=>({...prev,authorizedSignatory:e.target.value}))}
                     className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg font-medium text-slate-800 text-xs focus:ring-2 focus:ring-amber-500 focus:outline-none"/>
                 </div>
+                );
+
+                return (
+                  <>
+                    <div className="flex items-center justify-between px-0.5 pb-1">
+                      <div className="text-[9px] font-bold text-slate-400 uppercase tracking-wide flex items-center gap-1">
+                        <GripVertical className="w-3 h-3 text-slate-300" />
+                        Drag to reorder · tick to print on certificate
+                      </div>
+                      {sectionOrder.join() !== CERT_SECTION_IDS.join() && (
+                        <button
+                          type="button"
+                          onClick={() => setSectionOrder(CERT_SECTION_IDS)}
+                          title="Reset section order to default"
+                          className="flex items-center gap-1 text-[9px] font-bold text-slate-400 hover:text-amber-700 transition"
+                        >
+                          <RotateCcw className="w-3 h-3" /> RESET
+                        </button>
+                      )}
+                    </div>
+
+                    {sectionOrder.map((sectionId, idx) => {
+                      const meta = CERT_SECTION_META[sectionId];
+                      const block = certSectionBlocks[sectionId];
+                      if (!meta || !block) return null;
+                      const shown = isSectionVisible(sectionId);
+                      return (
+                        <div
+                          key={sectionId}
+                          onDragOver={e => { e.preventDefault(); if (draggingSectionId && dragOverSectionId !== sectionId) setDragOverSectionId(sectionId); }}
+                          onDrop={e => { e.preventDefault(); moveCertSection(draggingSectionId, sectionId); setDraggingSectionId(null); setDragOverSectionId(null); }}
+                          className={`rounded-xl transition-all ${draggingSectionId === sectionId ? 'opacity-40' : ''} ${dragOverSectionId === sectionId && draggingSectionId !== sectionId ? 'ring-2 ring-amber-400 ring-offset-1' : ''}`}
+                        >
+                          <div className="flex items-start gap-1.5">
+                            <div className="flex flex-col items-center gap-0.5 pt-0.5 shrink-0">
+                              <div
+                                draggable
+                                onDragStart={e => { setDraggingSectionId(sectionId); e.dataTransfer.effectAllowed = 'move'; }}
+                                onDragEnd={() => { setDraggingSectionId(null); setDragOverSectionId(null); }}
+                                title={`Drag to move "${meta.label}"`}
+                                className="cursor-grab active:cursor-grabbing text-slate-300 hover:text-amber-600 transition p-0.5 touch-none"
+                              >
+                                <GripVertical className="w-3.5 h-3.5" />
+                              </div>
+                              {meta.pdf ? (
+                                <button
+                                  type="button"
+                                  onClick={() => toggleSectionVisible(sectionId)}
+                                  title={shown ? `"${meta.label}" is printed on the certificate — click to hide it` : `"${meta.label}" is hidden from the certificate — click to show it`}
+                                  className={`w-4 h-4 rounded border flex items-center justify-center transition shrink-0 ${shown ? 'bg-emerald-500 border-emerald-600 text-white hover:bg-emerald-600' : 'bg-white border-slate-300 text-transparent hover:border-emerald-400'}`}
+                                >
+                                  <CheckCircle2 className="w-3 h-3" strokeWidth={3} />
+                                </button>
+                              ) : (
+                                <span title="Setting only — this never prints on the certificate" className="w-4 h-4 flex items-center justify-center text-slate-300 text-[10px] font-bold">—</span>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => nudgeCertSection(sectionId, -1)}
+                                disabled={idx === 0}
+                                title="Move up"
+                                className="text-slate-300 hover:text-amber-600 disabled:opacity-20 disabled:hover:text-slate-300 transition leading-none"
+                              >
+                                <ChevronUp className="w-3 h-3" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => nudgeCertSection(sectionId, 1)}
+                                disabled={idx === sectionOrder.length - 1}
+                                title="Move down"
+                                className="text-slate-300 hover:text-amber-600 disabled:opacity-20 disabled:hover:text-slate-300 transition leading-none"
+                              >
+                                <ChevronDown className="w-3 h-3" />
+                              </button>
+                            </div>
+                            <div className={`flex-1 min-w-0 transition-opacity ${meta.pdf && !shown ? 'opacity-45' : ''}`}>
+                              {block}
+                              {meta.pdf && !shown && (
+                                <div className="text-[9px] font-bold text-slate-400 mt-0.5">Hidden from certificate — kept here for later use</div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </>
+                );
+                })()}
                 </div>
 
                 {/* Save Settings & Lock buttons */}
@@ -1928,6 +2340,8 @@ export default function CertificateComplianceGeneratorPage() {
                                   customCertifyLines: certForm.customCertifyLines,
                                   customEquipmentNotes: certForm.customEquipmentNotes,
                                   customColumns: certForm.customColumns,
+                                  sectionOrder: certForm.sectionOrder,
+                                  sectionVisibility: certForm.sectionVisibility,
                                   status: certForm.status,
                                   authorizedSignatory: certForm.authorizedSignatory,
                                   certPrefix: certForm.certPrefix,
@@ -1983,6 +2397,8 @@ export default function CertificateComplianceGeneratorPage() {
                                   customCertifyLines: certForm.customCertifyLines,
                                   customEquipmentNotes: certForm.customEquipmentNotes,
                                   customColumns: certForm.customColumns,
+                                  sectionOrder: certForm.sectionOrder,
+                                  sectionVisibility: certForm.sectionVisibility,
                                   status: certForm.status,
                                   authorizedSignatory: certForm.authorizedSignatory,
                                   certPrefix: certForm.certPrefix,
@@ -2014,45 +2430,67 @@ export default function CertificateComplianceGeneratorPage() {
                       className={`w-full py-2 px-4 rounded-xl text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-md transition ${isSettingsSetupComplete ? 'bg-amber-700 hover:bg-amber-800' : 'bg-amber-700/50 cursor-not-allowed opacity-50'}`}
                     >
                       <Lock className="w-4 h-4" />
-                      <span>{adminSubmitting === 'settings_lock' ? 'Locking…' : 'LOCK'}</span>
-                    </button>
-                    </>
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
-          {/* Final Action Buttons — Docked at the end of the form/configuration panel */}
+                      <span>{adminSubmitting === 'settings_lock' ? 'Locking…' : 'LOCK'}</span          {/* Final Action Buttons — Docked at the end of the form/configuration panel */}
           <div className="pt-4 mt-2 border-t border-slate-200 shrink-0 space-y-2.5 lg:block hidden">
-            {readyToFinalize ? (
-              <div className="flex flex-wrap gap-2 w-full">
-                <button type="button" disabled={Boolean(adminSubmitting)} onClick={async () => {
+            <div className="flex flex-wrap gap-2 w-full">
+              {/* Previous */}
+              <button
+                type="button"
+                disabled={Boolean(adminSubmitting)}
+                onClick={handleLoadPreviousCertificate}
+                className="flex-1 min-w-[80px] py-2 px-2.5 rounded-xl bg-zinc-600 hover:bg-zinc-700 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>Previous</span>
+              </button>
+
+              {/* Save */}
+              <button
+                type="button"
+                disabled={!readyToFinalize || Boolean(adminSubmitting)}
+                onClick={async () => {
                   try {
                     setAdminSubmitting('save');
                     const result = await saveCertificateRecord();
+                    uploadToDriveBackground(null);
                     if (!result.isExisting && result.certificate) advanceToNextCertNumber(result.certificate);
                     alert('✅ Certificate saved.');
                   } catch (err) { alert('Save failed: ' + err.message); }
                   finally { setAdminSubmitting(''); }
-                }} className="flex-1 min-w-[80px] py-2 px-2.5 rounded-xl bg-slate-700 hover:bg-slate-800 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50">
-                  <Save className="w-3.5 h-3.5" /><span>{adminSubmitting === 'save' ? 'Saving…' : 'Save'}</span>
-                </button>
+                }}
+                className="flex-1 min-w-[80px] py-2 px-2.5 rounded-xl bg-slate-700 hover:bg-slate-800 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50"
+              >
+                <Save className="w-3.5 h-3.5" />
+                <span>{adminSubmitting === 'save' ? 'Saving…' : 'Save'}</span>
+              </button>
 
-                <button type="button" disabled={Boolean(adminSubmitting)} onClick={async () => {
+              {/* Download */}
+              <button
+                type="button"
+                disabled={!readyToFinalize || Boolean(adminSubmitting)}
+                onClick={async () => {
                   try {
                     setAdminSubmitting('download');
                     const result = await saveCertificateRecord({ isLocked: true });
                     setCertForm(prev => ({ ...prev, isLocked: true }));
                     const { pdf } = await buildCertificatePdf();
                     pdf.save(`${getDownloadFilename(certForm.certificateNo, certForm.customerName, certForm.issueDate)}.pdf`);
+                    uploadToDriveBackground(pdf);
                     if (!result.isExisting && result.certificate) advanceToNextCertNumber(result.certificate);
                   } catch (err) { console.error(err); alert('PDF error: ' + err.message); }
                   finally { setAdminSubmitting(''); }
-                }} className="flex-1 min-w-[80px] py-2 px-2.5 rounded-xl bg-amber-700 hover:bg-amber-800 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50">
-                  <Download className="w-3.5 h-3.5" /><span>{adminSubmitting === 'download' ? 'Generating…' : 'Download'}</span>
-                </button>
+                }}
+                className="flex-1 min-w-[80px] py-2 px-2.5 rounded-xl bg-amber-700 hover:bg-amber-800 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>{adminSubmitting === 'download' ? 'Generating…' : 'Download'}</span>
+              </button>
 
-                <button type="button" disabled={Boolean(adminSubmitting)} onClick={async () => {
+              {/* Print */}
+              <button
+                type="button"
+                disabled={!readyToFinalize || Boolean(adminSubmitting)}
+                onClick={async () => {
                   try {
                     setAdminSubmitting('print');
                     const { imgData } = await buildCertificatePdf();
@@ -2062,50 +2500,43 @@ export default function CertificateComplianceGeneratorPage() {
                     pw.document.close();
                   } catch (err) { alert('Print failed: ' + err.message); }
                   finally { setAdminSubmitting(''); }
-                }} className="flex-1 min-w-[80px] py-2 px-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50">
-                  <Printer className="w-3.5 h-3.5" /><span>{adminSubmitting === 'print' ? 'Preparing…' : 'Print'}</span>
-                </button>
+                }}
+                className="flex-1 min-w-[80px] py-2 px-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50"
+              >
+                <Printer className="w-3.5 h-3.5" />
+                <span>{adminSubmitting === 'print' ? 'Preparing…' : 'Print'}</span>
+              </button>
 
-                <button type="button" disabled={Boolean(adminSubmitting)} onClick={async () => {
-                  try {
-                    setAdminSubmitting('share');
-                    const { pdf } = await buildCertificatePdf();
-                    const fileName = `${getDownloadFilename(certForm.certificateNo, certForm.customerName, certForm.issueDate)}.pdf`;
-                    const blob = pdf.output('blob');
-                    const file = new File([blob], fileName, { type: 'application/pdf' });
-                    const shareTitle = `Certificate ${certForm.certificateNo}`;
-                    const shareText = `Fire Safety Certificate for ${certForm.customerName || 'client'}`;
-                    if (navigator.canShare && navigator.canShare({ files: [file] })) {
-                      await navigator.share({ files: [file], title: shareTitle, text: shareText });
-                    } else if (navigator.share) {
-                      await navigator.share({ title: shareTitle, text: shareText, url: `${window.location.origin}/api/verify-certificate/${certForm.verificationGuid}` });
-                    } else {
-                      alert('Sharing is not supported on this browser. Please use Download instead, then share the PDF file manually.');
-                    }
-                  } catch (err) { if (err.name !== 'AbortError') alert('Share failed: ' + err.message); }
-                  finally { setAdminSubmitting(''); }
-                }} className="flex-1 min-w-[80px] py-2 px-2.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50">
-                  <Share2 className="w-3.5 h-3.5" /><span>{adminSubmitting === 'share' ? 'Preparing…' : 'Share'}</span>
-                </button>
+              {/* New Certificate */}
+              <button
+                type="button"
+                disabled={Boolean(adminSubmitting)}
+                onClick={handleNewBlankCertificate}
+                className="flex-1 min-w-[80px] py-2 px-2.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50"
+              >
+                <PlusCircle className="w-3.5 h-3.5" />
+                <span>New Certificate</span>
+              </button>
+            </div>
 
-                {task && (
-                  <button type="button" disabled={Boolean(adminSubmitting)} onClick={async () => {
-                    try {
-                      setAdminSubmitting('cert');
-                      await saveCertificateRecord({ isLocked: true });
-                      const r = await fetch(`/api/tasks/${task.Task_ID}/stage`, { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ remarks: `[Certificate Issued: ${certForm.certificateNo}] Challan Date: ${certForm.challanDate} | Valid Until: ${certForm.validUntil}`, latLong: '0.0000, 0.0000' }) });
-                      if (!r.ok) throw new Error('Failed to advance stage');
-                      alert(`✅ Certificate ${certForm.certificateNo} issued and stage advanced!`); handleBack();
-                    } catch (err) { alert(err.message); }
-                    finally { setAdminSubmitting(''); }
-                  }} className="w-full py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-xs flex items-center justify-center gap-1.5 shadow-md transition disabled:opacity-50">
-                    <CheckCircle2 className="w-3.5 h-3.5" /><span>{adminSubmitting === 'cert' ? 'Saving…' : '✅ Mark Certified & Advance Stage'}</span>
-                  </button>
-                )}
-              </div>
-            ) : (
-              <div className="px-3 py-2.5 bg-slate-100 border border-dashed border-slate-300 rounded-xl text-center">
-                <span className="text-[10px] font-bold text-slate-400">Complete Certificate Details &amp; add at least one Equipment item to unlock Save, Download, Print &amp; Share.</span>
+            {task && readyToFinalize && (
+              <button type="button" disabled={Boolean(adminSubmitting)} onClick={async () => {
+                try {
+                  setAdminSubmitting('cert');
+                  await saveCertificateRecord({ isLocked: true });
+                  const r = await fetch(`/api/tasks/${task.Task_ID}/stage`, { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ remarks: `[Certificate Issued: ${certForm.certificateNo}] Challan Date: ${certForm.challanDate} | Valid Until: ${certForm.validUntil}`, latLong: '0.0000, 0.0000' }) });
+                  if (!r.ok) throw new Error('Failed to advance stage');
+                  alert(`✅ Certificate ${certForm.certificateNo} issued and stage advanced!`); handleBack();
+                } catch (err) { alert(err.message); }
+                finally { setAdminSubmitting(''); }
+              }} className="w-full py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-xs flex items-center justify-center gap-1.5 shadow-md transition disabled:opacity-50">
+                <CheckCircle2 className="w-3.5 h-3.5" /><span>{adminSubmitting === 'cert' ? 'Saving…' : '✅ Mark Certified & Advance Stage'}</span>
+              </button>
+            )}
+
+            {!readyToFinalize && (
+              <div className="px-3 py-2 bg-slate-100 border border-dashed border-slate-300 rounded-xl text-center">
+                <span className="text-[10px] font-bold text-slate-400">Complete Certificate Details &amp; add at least one Equipment item to unlock Save, Download &amp; Print.</span>
               </div>
             )}
 
@@ -2180,22 +2611,24 @@ export default function CertificateComplianceGeneratorPage() {
                 </div>
                 )}
 
-                <div className="flex justify-between items-center text-xs font-extrabold text-red-950 bg-red-50/80 px-4 h-8 rounded border border-red-300 mb-4">
-                  <div className="flex items-center">Ref / Cert No:&nbsp;<span className="text-slate-900">{certForm.certificateNo}</span></div>
-                  <div className="flex items-center">Date:&nbsp;<span className="text-slate-800 font-bold">{formatDateDDMMYYYY(certForm.issueDate)}</span></div>
+                <div className="flex justify-between items-center text-xs font-extrabold text-red-950 bg-red-50/80 px-4 rounded border border-red-300 mb-4" style={{ paddingTop: '8px', paddingBottom: '16px', lineHeight: '1' }}>
+                  <div>{isSectionVisible('certNo') && <>Ref / Cert No:&nbsp;<span className="text-slate-900">{certForm.certificateNo}</span></>}</div>
+                  <div>Date:&nbsp;<span className="text-slate-800 font-bold">{formatDateDDMMYYYY(certForm.issueDate)}</span></div>
                 </div>
+                {isSectionVisible('title') && (
                 <div className="flex justify-center w-full my-4">
-                  <span className="flex items-center justify-center bg-red-700 text-white font-black text-sm px-5 h-10 rounded-md uppercase tracking-wider shadow-md border border-red-800 text-center">{certForm.title}</span>
+                  <span className="inline-block bg-red-700 text-white font-black text-sm px-5 rounded-md uppercase tracking-wider shadow-md border border-red-800 text-center" style={{ paddingTop: '10px', paddingBottom: '18px', lineHeight: '1' }}>{certForm.title}</span>
                 </div>
+                )}
                 <div className={`${density.bodyText} leading-relaxed text-slate-800 text-justify ${density.bodySpace}`}>
                   {/* To Block (Fixed Location At Top of Page Content) */}
-                  <div className="mb-3 text-left bg-red-50/20 p-2.5 rounded border border-red-300/80 text-[10.5px] font-bold text-slate-800 w-full shadow-2xs">
-                    <span className="text-red-950 font-black">TO,</span>
-                    <div className="mt-1 text-slate-900 font-black uppercase leading-tight tracking-wide break-words">{certForm.customerName || 'Valued Client'}</div>
-                    <div className="mt-0.5 text-slate-700 font-bold leading-normal break-words whitespace-pre-wrap">{certForm.address || 'Client Address'}</div>
+                  <div className="mb-3 text-left bg-red-50/20 rounded border border-red-300/80 text-[10.5px] font-bold text-slate-800 w-full shadow-2xs" style={{ paddingTop: '10px', paddingRight: '10px', paddingLeft: '10px', paddingBottom: '20px' }}>
+                    <div className="text-red-950 font-black" style={{ lineHeight: '1.2' }}>TO,</div>
+                    <div className="mt-1 text-slate-900 font-black uppercase tracking-wide break-words" style={{ lineHeight: '1.4' }}>{certForm.customerName || 'Valued Client'}</div>
+                    <div className="mt-1 text-slate-700 font-bold break-words whitespace-pre-wrap" style={{ lineHeight: '1.4' }}>{certForm.address || 'Client Address'}</div>
                   </div>
 
-                   {certForm.bodyIntroLines && certForm.bodyIntroLines.filter(l => l && l.trim()).length > 0 ? (
+                   {!isSectionVisible('bodyIntro') ? null : certForm.bodyIntroLines && certForm.bodyIntroLines.filter(l => l && l.trim()).length > 0 ? (
                      <div className="space-y-1 w-full">
                        {certForm.bodyIntroLines.filter(l => l && l.trim()).map((line, i) => (
                          <p key={i} className="w-full text-justify font-semibold text-slate-850 leading-relaxed break-words">{line}</p>
@@ -2205,31 +2638,31 @@ export default function CertificateComplianceGeneratorPage() {
                      <p className="w-full text-justify font-semibold text-slate-850 leading-relaxed">This is to certify that we have carried out the servicing, refilling and maintenance of the Fire Safety Equipment of the above client. The system has been tested, checked and found to be in complete working readiness. Detailed equipment scheduling summary is listed below:</p>
                    )}
 
-                  {certForm.formatType === 'HP Testing' && (
-                    <div className="bg-slate-50 px-4 h-9 rounded border border-slate-300 text-[11px] flex items-center justify-between font-bold shadow-2xs">
-                      <div className="flex items-center">Test Pressure:&nbsp;<span className="text-indigo-855 font-black">{certForm.hpTestPressure}</span></div>
-                      <div className="flex items-center">Result:&nbsp;<span className="text-emerald-750 font-black">{certForm.hpTestResult}</span></div>
+                  {isSectionVisible('formatSpecific') && certForm.formatType === 'HP Testing' && (
+                    <div className="bg-slate-50 px-4 py-2.5 rounded border border-slate-300 text-[11px] flex justify-between font-bold shadow-2xs leading-none">
+                      <div>Test Pressure:&nbsp;<span className="text-indigo-855 font-black">{certForm.hpTestPressure}</span></div>
+                      <div>Result:&nbsp;<span className="text-emerald-750 font-black">{certForm.hpTestResult}</span></div>
                     </div>
                   )}
-                  {certForm.formatType === 'New Fire Extinguisher' && (
-                    <div className="bg-slate-50 px-4 h-9 rounded border border-slate-300 text-[11px] flex items-center justify-between font-bold shadow-2xs">
-                      <div className="flex items-center">ISI Mark:&nbsp;<span className="text-indigo-855 font-black">{certForm.isiMarkNumber}</span></div>
-                      <div className="flex items-center">Warranty:&nbsp;<span className="text-red-950 font-black">{certForm.newExtinguisherWarranty}</span></div>
+                  {isSectionVisible('formatSpecific') && certForm.formatType === 'New Fire Extinguisher' && (
+                    <div className="bg-slate-50 px-4 py-2.5 rounded border border-slate-300 text-[11px] flex justify-between font-bold shadow-2xs leading-none">
+                      <div>ISI Mark:&nbsp;<span className="text-indigo-855 font-black">{certForm.isiMarkNumber}</span></div>
+                      <div>Warranty:&nbsp;<span className="text-red-950 font-black">{certForm.newExtinguisherWarranty}</span></div>
                     </div>
                   )}
-                  {certForm.formatType === 'System Installation' && (
-                    <div className="bg-slate-50 px-4 h-9 rounded border border-slate-300 text-[11px] flex items-center justify-between font-bold shadow-2xs">
-                      <div className="flex items-center">System:&nbsp;<span className="text-indigo-950 font-black">{certForm.systemInstallationType}</span></div>
-                      <div className="flex items-center text-emerald-750">Status:&nbsp;<span className="font-black">{certForm.systemStatus}</span></div>
+                  {isSectionVisible('formatSpecific') && certForm.formatType === 'System Installation' && (
+                    <div className="bg-slate-50 px-4 py-2.5 rounded border border-slate-300 text-[11px] flex justify-between font-bold shadow-2xs leading-none">
+                      <div>System:&nbsp;<span className="text-indigo-950 font-black">{certForm.systemInstallationType}</span></div>
+                      <div className="text-emerald-750">Status:&nbsp;<span className="font-black">{certForm.systemStatus}</span></div>
                     </div>
                   )}
-                  {certForm.formatType === 'AMC Certificate' && (
-                    <div className="bg-slate-50 px-4 h-9 rounded border border-slate-300 text-[11px] flex items-center justify-between font-bold shadow-2xs">
-                      <div className="flex items-center">Period:&nbsp;<span className="text-indigo-950 font-black">{certForm.amcPeriod}</span></div>
-                      <div className="flex items-center">Frequency:&nbsp;<span className="text-emerald-855 font-black">{certForm.amcFrequency}</span></div>
+                  {isSectionVisible('formatSpecific') && certForm.formatType === 'AMC Certificate' && (
+                    <div className="bg-slate-50 px-4 py-2.5 rounded border border-slate-300 text-[11px] flex justify-between font-bold shadow-2xs leading-none">
+                      <div>Period:&nbsp;<span className="text-indigo-950 font-black">{certForm.amcPeriod}</span></div>
+                      <div>Frequency:&nbsp;<span className="text-emerald-855 font-black">{certForm.amcFrequency}</span></div>
                     </div>
                   )}
-                  {certForm.formatType === 'Visit Report' && (
+                  {isSectionVisible('formatSpecific') && certForm.formatType === 'Visit Report' && (
                     <div className="bg-slate-50 p-2 rounded border border-slate-300 text-[11px]">
                       <strong>Engineer Observations:</strong>
                       <p className="mt-1 text-slate-800 font-medium whitespace-pre-wrap">{certForm.visitObservations}</p>
@@ -2237,43 +2670,43 @@ export default function CertificateComplianceGeneratorPage() {
                   )}
                   {(!hideEquipmentSection && (certForm.itemsList||[]).length > 0) && (
                     <div className={density.tableMt}>
-                      <div className="font-extrabold text-xs text-red-950 mb-1 border-b border-red-400 pb-0.5 text-center">Certified Equipment &amp; Schedule Summary</div>
+                      <div className="font-extrabold text-xs text-red-950 text-center border-b border-red-400 mb-2" style={{ paddingBottom: '10px', lineHeight: '1.2' }}>Certified Equipment &amp; Schedule Summary</div>
                       <table className={`w-full ${density.cellText} border-collapse border border-slate-400 shadow-2xs`}>
                         <thead>
                           <tr className="bg-transparent text-red-950 font-extrabold text-left">
-                            {(certCfg.visible_columns?.sr_no !== false) && <th className={`border border-slate-400 ${density.cellPad} text-center w-8`} style={{ verticalAlign: 'middle' }}>Sr.</th>}
-                            {(certForm.formatType !== 'Training Certificate' && certCfg.visible_columns?.item_name !== false) && <th className={`border border-slate-400 ${density.cellPad}`} style={{ verticalAlign: 'middle' }}>Item Name / Type</th>}
-                            {(certForm.formatType !== 'Training Certificate' && certCfg.visible_columns?.capacity !== false) && <th className={`border border-slate-400 ${density.cellPad}`} style={{ verticalAlign: 'middle' }}>Capacity</th>}
-                            {(certForm.formatType !== 'Training Certificate' && certCfg.visible_columns?.qty !== false) && <th className={`border border-slate-400 ${density.cellPad} text-center`} style={{ verticalAlign: 'middle' }}>Qty</th>}
-                            {(certForm.formatType !== 'Training Certificate' && certCfg.visible_columns?.refill_date !== false) && <th className={`border border-slate-400 ${density.cellPad}`} style={{ verticalAlign: 'middle' }}>{certForm.formatType === 'HP Testing' ? 'Date of Testing' : 'Date of Refilling'}</th>}
-                            {(certForm.formatType !== 'Training Certificate' && certCfg.visible_columns?.valid_until !== false) && <th className={`border border-slate-400 ${density.cellPad}`} style={{ verticalAlign: 'middle' }}>{certForm.formatType === 'HP Testing' ? 'Next Date of Testing' : 'Next Date of Refilling'}</th>}
-                            {(certForm.customColumns||[]).map(c => (<th key={c.id} className={`border border-slate-400 ${density.cellPad} bg-transparent text-indigo-950`} style={{ verticalAlign: 'middle' }}>{c.label}</th>))}
+                            {(certCfg.visible_columns?.sr_no !== false) && <th className={`border border-slate-400 ${density.cellPad} text-center w-8 align-middle leading-none`}>Sr.</th>}
+                            {(!isMinimalItemFormat && certCfg.visible_columns?.item_name !== false) && <th className={`border border-slate-400 ${density.cellPad} align-middle leading-none`}>Item Name / Type</th>}
+                            {(!isMinimalItemFormat && certCfg.visible_columns?.capacity !== false) && <th className={`border border-slate-400 ${density.cellPad} align-middle leading-none`}>Capacity</th>}
+                            {(!isMinimalItemFormat && certCfg.visible_columns?.qty !== false) && <th className={`border border-slate-400 ${density.cellPad} text-center align-middle leading-none`}>Qty</th>}
+                            {(!isMinimalItemFormat && certCfg.visible_columns?.refill_date !== false) && <th className={`border border-slate-400 ${density.cellPad} align-middle leading-none`}>{certForm.formatType === 'HP Testing' ? 'Date of Testing' : 'Date of Refilling'}</th>}
+                            {(!isMinimalItemFormat && certCfg.visible_columns?.valid_until !== false) && <th className={`border border-slate-400 ${density.cellPad} align-middle leading-none`}>{certForm.formatType === 'HP Testing' ? 'Next Date of Testing' : 'Next Date of Refilling'}</th>}
+                            {isSectionVisible('customColumns') && (certForm.customColumns||[]).map(c => (<th key={c.id} className={`border border-slate-400 ${density.cellPad} bg-transparent text-indigo-950 align-middle leading-none`}>{c.label}</th>))}
                           </tr>
                         </thead>
                         <tbody>
                           {(certForm.itemsList||[]).map((it, idx) => (
                             <tr key={it.id||idx} className="border border-slate-300 hover:bg-slate-50 font-semibold">
-                              {(certCfg.visible_columns?.sr_no !== false) && <td className={`border border-slate-300 ${density.cellPad} text-center font-bold`} style={{ verticalAlign: 'middle' }}>{idx+1}</td>}
-                              {(certForm.formatType !== 'Training Certificate' && certCfg.visible_columns?.item_name !== false) && (
-                                <td className={`border border-slate-300 ${density.cellPad} font-bold text-slate-950`} style={{ verticalAlign: 'middle' }}>
+                              {(certCfg.visible_columns?.sr_no !== false) && <td className={`border border-slate-300 ${density.cellPad} text-center font-bold align-middle leading-none`}>{idx+1}</td>}
+                              {(!isMinimalItemFormat && certCfg.visible_columns?.item_name !== false) && (
+                                <td className={`border border-slate-300 ${density.cellPad} font-bold text-slate-950 align-middle leading-none`}>
                                   {it.itemName} {it.identificationNo ? `(Cyl No: ${it.identificationNo})` : ''}
                                 </td>
                               )}
-                              {(certForm.formatType !== 'Training Certificate' && certCfg.visible_columns?.capacity !== false) && <td className={`border border-slate-300 ${density.cellPad}`} style={{ verticalAlign: 'middle' }}>{it.capacity}</td>}
-                              {(certForm.formatType !== 'Training Certificate' && certCfg.visible_columns?.qty !== false) && <td className={`border border-slate-300 ${density.cellPad} font-extrabold bg-transparent text-indigo-950 text-center`} style={{ verticalAlign: 'middle' }}>{formatQtyNos(it.qty || it.quantity || '1')}</td>}
-                              {(certForm.formatType !== 'Training Certificate' && certCfg.visible_columns?.refill_date !== false) && <td className={`border border-slate-300 ${density.cellPad}`} style={{ verticalAlign: 'middle' }}>{formatDateDDMMYYYY(it.refillingDate)}</td>}
-                              {(certForm.formatType !== 'Training Certificate' && certCfg.visible_columns?.valid_until !== false) && <td className={`border border-slate-300 ${density.cellPad} font-bold text-rose-700`} style={{ verticalAlign: 'middle' }}>{formatDateDDMMYYYY(it.nextDate)}</td>}
-                              {(certForm.customColumns||[]).map(c => (<td key={c.id} className={`border border-slate-300 ${density.cellPad} text-indigo-900 font-bold`} style={{ verticalAlign: 'middle' }}>{it.customValues?.[c.id]||'—'}</td>))}
+                              {(!isMinimalItemFormat && certCfg.visible_columns?.capacity !== false) && <td className={`border border-slate-300 ${density.cellPad} align-middle leading-none`}>{it.capacity}</td>}
+                              {(!isMinimalItemFormat && certCfg.visible_columns?.qty !== false) && <td className={`border border-slate-300 ${density.cellPad} font-extrabold bg-transparent text-indigo-950 text-center align-middle leading-none`}>{formatQtyNos(it.qty || it.quantity || '1')}</td>}
+                              {(!isMinimalItemFormat && certCfg.visible_columns?.refill_date !== false) && <td className={`border border-slate-300 ${density.cellPad} align-middle leading-none`}>{formatDateDDMMYYYY(it.refillingDate)}</td>}
+                              {(!isMinimalItemFormat && certCfg.visible_columns?.valid_until !== false) && <td className={`border border-slate-300 ${density.cellPad} font-bold text-rose-700 align-middle leading-none`}>{formatDateDDMMYYYY(it.nextDate)}</td>}
+                              {isSectionVisible('customColumns') && (certForm.customColumns||[]).map(c => (<td key={c.id} className={`border border-slate-300 ${density.cellPad} text-indigo-900 font-bold align-middle leading-none`}>{it.customValues?.[c.id]||'—'}</td>))}
                             </tr>
                           ))}
                         </tbody>
                       </table>
                     </div>
                   )}
-                  {(certForm.customCertifyLines || []).filter(l => l && l.trim()).map((line, i) => (
+                  {isSectionVisible('customCertify') && (certForm.customCertifyLines || []).filter(l => l && l.trim()).map((line, i) => (
                     <p key={`certify-${i}`} className="w-full text-justify font-semibold text-slate-850 leading-relaxed whitespace-pre-wrap mt-1.5">{line}</p>
                   ))}
-                  {(certForm.customEquipmentNotes || []).filter(l => l && l.trim()).map((line, i) => (
+                  {isSectionVisible('equipmentNotes') && (certForm.customEquipmentNotes || []).filter(l => l && l.trim()).map((line, i) => (
                     <p key={i} className={`w-full text-justify font-semibold text-slate-850 leading-relaxed whitespace-pre-wrap${i === 0 ? ' border-t border-dashed border-slate-300 pt-1.5' : ''}`}>{line}</p>
                   ))}
                 </div>
@@ -2299,10 +2732,10 @@ export default function CertificateComplianceGeneratorPage() {
                     <div className="flex flex-col items-center justify-between text-center w-[200px] h-[140px] shrink-0 mx-auto">
                       <div className="flex flex-col items-center gap-1">
                         <span className="text-[9px] font-black text-slate-700 uppercase tracking-wide">Customer Support</span>
-                        <span className="text-[11px] font-extrabold text-red-600 border border-red-300 rounded-md px-2.5 py-0.5 bg-red-50/50">8460699569</span>
+                        <div className="text-[11px] font-extrabold text-red-600 border border-red-300 rounded-md bg-red-50/50 block text-center w-full" style={{ paddingTop: '4px', paddingBottom: '14px', paddingLeft: '10px', paddingRight: '10px', lineHeight: '1' }}>8460699569</div>
                       </div>
                       <div className="w-full">
-                        <span className="text-[10.5px] font-black text-red-600 uppercase tracking-widest border-b border-red-300 pb-1 w-full text-center mb-1.5 block">Emergency Contact</span>
+                        <div className="text-[10.5px] font-black text-red-600 uppercase tracking-widest w-full text-center border-b border-red-300 mb-2" style={{ paddingBottom: '10px', lineHeight: '1.2' }}>Emergency Contact</div>
                         <table className="w-full border-collapse text-[10px] text-center font-extrabold">
                           <tbody className="w-full">
                             <tr className="border-b border-slate-300 w-full flex">
@@ -2333,21 +2766,25 @@ export default function CertificateComplianceGeneratorPage() {
                         <div className="text-center flex flex-col items-center justify-end min-w-[180px] shrink-0">
                           {/* Stamp placed above signature line (system signature removed) */}
                           {(certCfg.show_stamp !== false) && (
-                            <img 
-                              src={certBase64Assets.stamp||branding.company_stamp_url||'/assets/company_stamp.png'} 
-                              onError={e=>{e.target.onerror=null;e.target.src='/assets/stamp.jpg';}} 
-                              alt="Official Seal Stamp" 
-                              className="w-24 h-24 object-contain mx-auto -mb-1 shrink-0"
+                            <img
+                              src={certBase64Assets.stamp||branding.company_stamp_url||'/assets/company_stamp.png'}
+                              onError={e=>{e.target.onerror=null;e.target.src='/assets/stamp.jpg';}}
+                              alt="Official Seal Stamp"
+                              className="w-28 h-auto object-contain mx-auto -mb-1 shrink-0"
                             />
                           )}
-                          <div className="border-t-2 border-slate-900 pt-1 font-black text-xs text-slate-950 w-full">{certForm.authorizedSignatory||'Mr. Nilesh Padaya'}</div>
-                          <div className="text-[10px] text-slate-600 font-bold leading-tight">Authorized Signatory<br/>Expert Safety Solutions</div>
+                          {isSectionVisible('signatory') && (
+                            <>
+                              <div className="border-t-2 border-slate-900 pt-1 font-black text-xs text-slate-950 w-full">{certForm.authorizedSignatory||'Mr. Nilesh Padaya'}</div>
+                              <div className="text-[10px] text-slate-600 font-bold leading-tight">Authorized Signatory<br/>Expert Safety Solutions</div>
+                            </>
+                          )}
                         </div>
                       ) : (
                         /* If signature is hidden but stamp is shown */
                         (certCfg.show_stamp !== false) && (
                           <div className="flex flex-col items-center justify-end shrink-0">
-                            <img src={certBase64Assets.stamp||branding.company_stamp_url||'/assets/company_stamp.png'} onError={e=>{e.target.onerror=null;e.target.src='/assets/stamp.jpg';}} alt="Official Seal Stamp" className="w-24 h-24 object-contain shrink-0"/>
+                            <img src={certBase64Assets.stamp||branding.company_stamp_url||'/assets/company_stamp.png'} onError={e=>{e.target.onerror=null;e.target.src='/assets/stamp.jpg';}} alt="Official Seal Stamp" className="w-28 h-auto object-contain shrink-0"/>
                             <span className="text-[9px] font-bold text-slate-500 mt-1 uppercase">Official Company Seal</span>
                           </div>
                         )
@@ -2364,50 +2801,68 @@ export default function CertificateComplianceGeneratorPage() {
                 <div className="mt-1 shrink-0">
                   <img src={certBase64Assets.footer||branding.footer_image_url||'/assets/Footer - Expert (2025).PNG'} alt="Expert Footer Branding" className={`w-full h-auto ${density.imgMaxH} object-contain mx-auto shrink-0`} onError={e=>{e.target.onerror=null;e.target.src='/assets/footer.png';}}/>
                 </div>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
-          </div>
-        </div>
-
-          {/* Action buttons moved to left column */}
-        </div>
-      </div>
-
-      {/* Sticky Bottom Actions Bar for Mobile */}
+                     {/* Sticky Bottom Actions Bar for Mobile */}
       <div className="lg:hidden fixed bottom-0 left-0 right-0 z-50 bg-white/95 backdrop-blur-md border-t border-slate-200 p-3 pb-safe shadow-[0_-8px_30px_rgba(0,0,0,0.12)] flex flex-col gap-2">
         {/* Row 1: Quick Actions */}
-        {readyToFinalize ? (
-          <div className="flex gap-2">
-            <button type="button" disabled={Boolean(adminSubmitting)} onClick={async () => {
+        <div className="flex gap-2 w-full">
+          {/* Previous */}
+          <button
+            type="button"
+            disabled={Boolean(adminSubmitting)}
+            onClick={handleLoadPreviousCertificate}
+            className="flex-1 py-2.5 px-2 rounded-xl bg-zinc-600 active:scale-95 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50"
+          >
+            <RotateCcw className="w-3.5 h-3.5" />
+            <span>Prev</span>
+          </button>
+
+          {/* Save */}
+          <button
+            type="button"
+            disabled={!readyToFinalize || Boolean(adminSubmitting)}
+            onClick={async () => {
               try {
                 setAdminSubmitting('save');
                 const result = await saveCertificateRecord();
+                uploadToDriveBackground(null);
                 if (!result.isExisting && result.certificate) advanceToNextCertNumber(result.certificate);
                 alert('✅ Certificate saved.');
               } catch (err) { alert('Save failed: ' + err.message); }
               finally { setAdminSubmitting(''); }
-            }} className="flex-1 py-2.5 px-2 rounded-xl bg-slate-700 active:scale-95 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50">
-              <Save className="w-3.5 h-3.5" /><span>{adminSubmitting === 'save' ? 'Saving…' : 'Save'}</span>
-            </button>
+            }}
+            className="flex-1 py-2.5 px-2 rounded-xl bg-slate-700 active:scale-95 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50"
+          >
+            <Save className="w-3.5 h-3.5" />
+            <span>{adminSubmitting === 'save' ? 'Saving…' : 'Save'}</span>
+          </button>
 
-            <button type="button" disabled={Boolean(adminSubmitting)} onClick={async () => {
+          {/* Download */}
+          <button
+            type="button"
+            disabled={!readyToFinalize || Boolean(adminSubmitting)}
+            onClick={async () => {
               try {
                 setAdminSubmitting('download');
                 const result = await saveCertificateRecord({ isLocked: true });
                 setCertForm(prev => ({ ...prev, isLocked: true }));
                 const { pdf } = await buildCertificatePdf();
                 pdf.save(`${getDownloadFilename(certForm.certificateNo, certForm.customerName, certForm.issueDate)}.pdf`);
+                uploadToDriveBackground(pdf);
                 if (!result.isExisting && result.certificate) advanceToNextCertNumber(result.certificate);
               } catch (err) { console.error(err); alert('PDF error: ' + err.message); }
               finally { setAdminSubmitting(''); }
-            }} className="flex-1 py-2.5 px-2 rounded-xl bg-amber-700 active:scale-95 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50">
-              <Download className="w-3.5 h-3.5" /><span>{adminSubmitting === 'download' ? 'Generating…' : 'Download'}</span>
-            </button>
+            }}
+            className="flex-1 py-2.5 px-2 rounded-xl bg-amber-700 active:scale-95 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50"
+          >
+            <Download className="w-3.5 h-3.5" />
+            <span>{adminSubmitting === 'download' ? 'Generating…' : 'Download'}</span>
+          </button>
 
-            <button type="button" disabled={Boolean(adminSubmitting)} onClick={async () => {
+          {/* Print */}
+          <button
+            type="button"
+            disabled={!readyToFinalize || Boolean(adminSubmitting)}
+            onClick={async () => {
               try {
                 setAdminSubmitting('print');
                 const { imgData } = await buildCertificatePdf();
@@ -2417,33 +2872,26 @@ export default function CertificateComplianceGeneratorPage() {
                 pw.document.close();
               } catch (err) { alert('Print failed: ' + err.message); }
               finally { setAdminSubmitting(''); }
-            }} className="flex-1 py-2.5 px-2 rounded-xl bg-indigo-600 active:scale-95 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50">
-              <Printer className="w-3.5 h-3.5" /><span>{adminSubmitting === 'print' ? 'Preparing…' : 'Print'}</span>
-            </button>
+            }}
+            className="flex-1 py-2.5 px-2 rounded-xl bg-indigo-600 active:scale-95 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50"
+          >
+            <Printer className="w-3.5 h-3.5" />
+            <span>{adminSubmitting === 'print' ? 'Preparing…' : 'Print'}</span>
+          </button>
 
-            <button type="button" disabled={Boolean(adminSubmitting)} onClick={async () => {
-              try {
-                setAdminSubmitting('share');
-                const { pdf } = await buildCertificatePdf();
-                const fileName = `${getDownloadFilename(certForm.certificateNo, certForm.customerName, certForm.issueDate)}.pdf`;
-                const blob = pdf.output('blob');
-                const file = new File([blob], fileName, { type: 'application/pdf' });
-                const shareTitle = `Certificate ${certForm.certificateNo}`;
-                const shareText = `Fire Safety Certificate for ${certForm.customerName || 'client'}`;
-                if (navigator.canShare && navigator.canShare({ files: [file] })) {
-                  await navigator.share({ files: [file], title: shareTitle, text: shareText });
-                } else if (navigator.share) {
-                  await navigator.share({ title: shareTitle, text: shareText, url: `${window.location.origin}/api/verify-certificate/${certForm.verificationGuid}` });
-                } else {
-                  alert('Sharing is not supported on this browser. Please use Download instead, then share the PDF file manually.');
-                }
-              } catch (err) { if (err.name !== 'AbortError') alert('Share failed: ' + err.message); }
-              finally { setAdminSubmitting(''); }
-            }} className="flex-1 py-2.5 px-2 rounded-xl bg-emerald-700 active:scale-95 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50">
-              <Share2 className="w-3.5 h-3.5" /><span>{adminSubmitting === 'share' ? 'Preparing…' : 'Share'}</span>
-            </button>
-          </div>
-        ) : (
+          {/* New Certificate */}
+          <button
+            type="button"
+            disabled={Boolean(adminSubmitting)}
+            onClick={handleNewBlankCertificate}
+            className="flex-1 py-2.5 px-2 rounded-xl bg-emerald-700 active:scale-95 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50"
+          >
+            <PlusCircle className="w-3.5 h-3.5" />
+            <span>New</span>
+          </button>
+        </div>
+
+        {!readyToFinalize && (
           <div className="px-3 py-1.5 bg-slate-50 border border-dashed border-slate-200 rounded-xl text-center">
             <span className="text-[10px] font-bold text-slate-400">Complete details &amp; add equipment to unlock Save / Download.</span>
           </div>
@@ -2550,6 +2998,17 @@ export default function CertificateComplianceGeneratorPage() {
                     const cName = (c.Customer_Name || c.customerName || '').toLowerCase();
                     return cNo.includes(q) || cName.includes(q);
                   })
+                  .slice()
+                  .sort((a, b) => {
+                    // Newest-created first. Records with no recoverable creation time sink to the bottom
+                    // rather than jumping to the top on a 0 timestamp.
+                    const ta = getRecordCreatedAt(a)?.getTime();
+                    const tb = getRecordCreatedAt(b)?.getTime();
+                    if (ta === undefined && tb === undefined) return 0;
+                    if (ta === undefined) return 1;
+                    if (tb === undefined) return -1;
+                    return tb - ta;
+                  })
                   .slice(0, 15)
                   .map(c => (
                     <div
@@ -2569,10 +3028,34 @@ export default function CertificateComplianceGeneratorPage() {
                         <div className="text-[9px] text-slate-400 font-semibold mt-0.5">
                           Issued: {formatDateDDMMYYYY(c.Issue_Date || c.issueDate)}
                         </div>
+                        {(() => {
+                          const created = getRecordCreatedAt(c);
+                          if (!created) return null;
+                          return (
+                            <div className="text-[9px] text-slate-400 font-semibold" title="When this certificate record was created">
+                              Created: <span className="text-slate-500 font-bold">{formatDateTimeDDMMYYYYHHMMSS(created)}</span>
+                            </div>
+                          );
+                        })()}
                       </div>
-                      <span className="text-[10px] bg-indigo-50 text-indigo-800 px-2.5 py-1 rounded-md font-extrabold shrink-0 border border-indigo-200">
-                        EDIT
-                      </span>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          title="Duplicate as a new certificate dated today, with the next available number"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDuplicateCertificate(c);
+                            setShowSearchModal(false);
+                            setCertSearchQuery('');
+                          }}
+                          className="text-[10px] bg-emerald-50 hover:bg-emerald-100 text-emerald-800 px-2.5 py-1 rounded-md font-extrabold border border-emerald-200 transition"
+                        >
+                          DUPLICATE
+                        </button>
+                        <span className="text-[10px] bg-indigo-50 text-indigo-800 px-2.5 py-1 rounded-md font-extrabold border border-indigo-200">
+                          EDIT
+                        </span>
+                      </div>
                     </div>
                   ))}
 

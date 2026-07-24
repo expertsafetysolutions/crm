@@ -238,6 +238,58 @@ export function formatInteractionTimestamp(tsStr, itemObj = null) {
 }
 
 /**
+ * Recovers the moment a record was actually created. Prefers an explicit Created_At/Timestamp when
+ * one exists; otherwise falls back to the Mongo ObjectId in `id` — its first 8 hex characters are
+ * the creation time in unix seconds, so rows saved before any timestamp field existed still resolve
+ * to a real (second-precision) creation time. Returns null when nothing usable is present.
+ */
+export function getRecordCreatedAt(record) {
+  if (!record || typeof record !== 'object') return null;
+
+  const explicit = record.Created_At || record.createdAt || record.Timestamp;
+  if (explicit) {
+    const d = typeof explicit === 'number' || /^\d{11,15}$/.test(String(explicit).trim())
+      ? new Date(Number(explicit))
+      : new Date(explicit);
+    if (!isNaN(d)) return d;
+  }
+
+  const oid = String(record.id || record._id || '').trim();
+  if (/^[0-9a-f]{24}$/i.test(oid)) {
+    const d = new Date(parseInt(oid.substring(0, 8), 16) * 1000);
+    if (!isNaN(d)) return d;
+  }
+
+  return null;
+}
+
+/**
+ * Returns an IST timestamp as DD/MM/YYYY; HH:MM:SS (24-hour)
+ * e.g. "24/07/2026; 06:54:17"
+ */
+export function formatDateTimeDDMMYYYYHHMMSS(input) {
+  if (!input) return '-';
+  const d = input instanceof Date ? input : parseSafeDate(input);
+  if (isNaN(d)) return '-';
+
+  try {
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Asia/Kolkata',
+      day: '2-digit', month: '2-digit', year: 'numeric',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+      hour12: false
+    }).formatToParts(d);
+    const get = (type) => parts.find(p => p.type === type)?.value || '';
+    // Intl renders midnight as "24" in some en-GB/hourCycle combinations; normalize to 00.
+    const hour = get('hour') === '24' ? '00' : get('hour');
+    return `${get('day')}/${get('month')}/${get('year')}; ${hour}:${get('minute')}:${get('second')}`;
+  } catch (err) {
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()}; ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  }
+}
+
+/**
  * Returns true when a task's set/scheduled date is 2+ days old (configurable via `days`) and no
  * interaction/remark has been logged for it since that date. Rescheduling the task (which updates
  * Scheduled_Date) resets the window — the 2-day clock restarts from the new date. Completed/Closed

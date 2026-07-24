@@ -34,6 +34,11 @@ export default function ClientEquipmentModal({
     location: 'Ground Floor Lobby',
     clientIdNo: `CYL-${new Date().getFullYear()}-${String(srNo).padStart(3, '0')}`,
     itemName: 'DCP ABC Type Fire Extinguisher (6 Kg)',
+    subType: 'ABC',
+    capacity: '6 Kg',
+    serialNo: '',
+    mfgName: '',
+    cylinderNo: '',
     mfgYear: String(new Date().getFullYear()),
     refillingDate: new Date().toISOString().split('T')[0],
     nextRefillingDate: new Date(new Date().setFullYear(new Date().getFullYear() + 1)).toISOString().split('T')[0],
@@ -66,12 +71,16 @@ export default function ClientEquipmentModal({
               {
                 ...createDefaultRow(2),
                 location: 'First Floor Server Room',
-                itemName: 'CO2 Type Fire Extinguisher (4.5 Kg)'
+                itemName: 'CO2 Type Fire Extinguisher (4.5 Kg)',
+                subType: 'CO2',
+                capacity: '4.5 Kg'
               },
               {
                 ...createDefaultRow(3),
                 location: 'Kitchen Pantry',
-                itemName: 'Mechanical Foam Fire Extinguisher (9 Ltr)'
+                itemName: 'Mechanical Foam Fire Extinguisher (9 Ltr)',
+                subType: 'ABC',
+                capacity: '9 Ltr'
               }
             ]);
           }
@@ -109,7 +118,7 @@ export default function ClientEquipmentModal({
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`
         },
-        body: JSON.stringify({ items: equipmentList })
+        body: JSON.stringify({ items: equipmentList, reportType: 'FIRE_EXTINGUISHER' })
       });
 
       if (!res.ok) throw new Error('Failed to save client equipment master');
@@ -200,7 +209,12 @@ export default function ClientEquipmentModal({
                     <th className="p-2.5 text-left min-w-[140px]">Location</th>
                     <th className="p-2.5 min-w-[110px]">Client ID No</th>
                     <th className="p-2.5 text-left min-w-[190px]">Fire Ext. Description</th>
-                    <th className="p-2.5 w-16">MFG</th>
+                    <th className="p-2.5 w-20 bg-indigo-100 text-indigo-950">Sub-Type</th>
+                    <th className="p-2.5 w-16 bg-indigo-100 text-indigo-950">Capacity</th>
+                    <th className="p-2.5 w-16">MFG Yr</th>
+                    <th className="p-2.5 min-w-[100px] bg-indigo-100 text-indigo-950">Manufacturer</th>
+                    <th className="p-2.5 min-w-[100px] bg-indigo-100 text-indigo-950">Serial No</th>
+                    <th className="p-2.5 min-w-[100px] bg-indigo-100 text-indigo-950">Cylinder No</th>
                     <th className="p-2.5 min-w-[110px]">Refilling Dt</th>
                     <th className="p-2.5 min-w-[110px]">Next Refill Dt</th>
                     <th className="p-2.5 min-w-[110px]">HPT Dt</th>
@@ -217,7 +231,10 @@ export default function ClientEquipmentModal({
                       return (
                         (it.clientIdNo || '').toLowerCase().includes(q) ||
                         (it.itemName || '').toLowerCase().includes(q) ||
-                        (it.location || '').toLowerCase().includes(q)
+                        (it.location || '').toLowerCase().includes(q) ||
+                        (it.serialNo || '').toLowerCase().includes(q) ||
+                        (it.mfgName || '').toLowerCase().includes(q) ||
+                        (it.cylinderNo || '').toLowerCase().includes(q)
                       );
                     })
                     .map((it, idx) => (
@@ -263,7 +280,36 @@ export default function ClientEquipmentModal({
                           />
                         </td>
 
-                        {/* MFG */}
+                        {/* Sub-Type (ABC vs CO2 — drives which checkpoints the equipment editor shows) */}
+                        <td className="p-2 bg-indigo-50/40">
+                          <select
+                            value={it.subType || 'ABC'}
+                            onChange={e => {
+                              const val = e.target.value;
+                              setEquipmentList(prev => prev.map((row, i) => i === idx ? { ...row, subType: val } : row));
+                            }}
+                            className="w-full text-center bg-transparent border-b border-indigo-200 focus:outline-none font-bold text-indigo-900 text-[10px]"
+                          >
+                            <option value="ABC">ABC</option>
+                            <option value="CO2">CO2</option>
+                          </select>
+                        </td>
+
+                        {/* Capacity, e.g. "6 Kg" — feeds the statistics breakdown by sub-type + capacity */}
+                        <td className="p-2 bg-indigo-50/40">
+                          <input
+                            type="text"
+                            value={it.capacity || ''}
+                            placeholder="6 Kg"
+                            onChange={e => {
+                              const val = e.target.value;
+                              setEquipmentList(prev => prev.map((row, i) => i === idx ? { ...row, capacity: val } : row));
+                            }}
+                            className="w-full text-center bg-transparent border-b border-indigo-200 focus:outline-none font-semibold text-indigo-900 text-[10px]"
+                          />
+                        </td>
+
+                        {/* MFG Year */}
                         <td className="p-2">
                           <input
                             type="text"
@@ -273,6 +319,45 @@ export default function ClientEquipmentModal({
                               setEquipmentList(prev => prev.map((row, i) => i === idx ? { ...row, mfgYear: val } : row));
                             }}
                             className="w-full text-center bg-transparent border-b border-slate-200 focus:outline-none text-[10px]"
+                          />
+                        </td>
+
+                        {/* Manufacturer name — searchable identity field for the field-visit search box */}
+                        <td className="p-2 bg-indigo-50/40">
+                          <input
+                            type="text"
+                            value={it.mfgName || ''}
+                            onChange={e => {
+                              const val = e.target.value;
+                              setEquipmentList(prev => prev.map((row, i) => i === idx ? { ...row, mfgName: val } : row));
+                            }}
+                            className="w-full text-center bg-transparent border-b border-indigo-200 focus:outline-none font-semibold text-indigo-900 text-[10px]"
+                          />
+                        </td>
+
+                        {/* Serial No — searchable identity field for the field-visit search box */}
+                        <td className="p-2 bg-indigo-50/40">
+                          <input
+                            type="text"
+                            value={it.serialNo || ''}
+                            onChange={e => {
+                              const val = e.target.value;
+                              setEquipmentList(prev => prev.map((row, i) => i === idx ? { ...row, serialNo: val } : row));
+                            }}
+                            className="w-full text-center bg-transparent border-b border-indigo-200 focus:outline-none font-semibold text-indigo-900 text-[10px]"
+                          />
+                        </td>
+
+                        {/* Cylinder No — searchable identity field for the field-visit search box */}
+                        <td className="p-2 bg-indigo-50/40">
+                          <input
+                            type="text"
+                            value={it.cylinderNo || ''}
+                            onChange={e => {
+                              const val = e.target.value;
+                              setEquipmentList(prev => prev.map((row, i) => i === idx ? { ...row, cylinderNo: val } : row));
+                            }}
+                            className="w-full text-center bg-transparent border-b border-indigo-200 focus:outline-none font-semibold text-indigo-900 text-[10px]"
                           />
                         </td>
 

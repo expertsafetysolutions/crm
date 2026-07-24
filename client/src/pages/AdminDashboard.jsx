@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import ClientEquipmentModal from '../components/ClientEquipmentModal';
+import ServiceReportStatsPanel from '../components/servicereport/ServiceReportStatsPanel';
 import { getAccurateGpsPosition } from '../utils/gpsHelper';
 import {
   formatDateDDMMYYYY,
@@ -76,6 +77,8 @@ import { QRCodeCanvas } from 'qrcode.react';
 
 const REMARK_TAGS = [
   'Call',
+  'Call Received',
+  'WhatsApp',
   'Pickup',
   'Delivery',
   'Meeting',
@@ -152,7 +155,7 @@ export default function AdminDashboard() {
       localStorage.setItem('expert_safety_custom_remark_tags', JSON.stringify(updatedCustom));
     } catch {}
     if (remarkForm.type === tagToDelete) {
-      setRemarkForm({ ...remarkForm, type: 'Call' });
+      setRemarkForm({ ...remarkForm, type: '' });
     }
     if (interactionForm.type === tagToDelete) {
       setInteractionForm({ ...interactionForm, type: 'Call' });
@@ -327,7 +330,7 @@ export default function AdminDashboard() {
   const [showRemarksModal, setShowRemarksModal] = useState(false);
   const [remarkTask, setRemarkTask] = useState(null);
   const [remarkForm, setRemarkForm] = useState({
-    type: 'Call',
+    type: '',
     remarks: ''
   });
   const [historySearchText, setHistorySearchText] = useState('');
@@ -354,6 +357,7 @@ export default function AdminDashboard() {
   const [dragOverTaskId, setDragOverTaskId] = useState(null);
   const [reorderingTaskId, setReorderingTaskId] = useState(null);
   const [contactModal, setContactModal] = useState({ isOpen: false, mode: 'CALL', customer: null, task: null });
+  const [callReceivedContactPicker, setCallReceivedContactPicker] = useState({ isOpen: false, contacts: [] });
 
   // Admin Task Action Modal State (Reschedule / Advance / Status / Reactivate)
   const [selectedTask, setSelectedTask] = useState(null);
@@ -523,6 +527,23 @@ export default function AdminDashboard() {
   const toggleRemarkExpand = (taskId) => {
     setExpandedRemarkTaskIds(prev => ({ ...prev, [taskId]: !prev[taskId] }));
   };
+
+  // Auto-collapse the expanded remark/interaction history box when the user taps anywhere outside it.
+  useEffect(() => {
+    const handleOutsideTap = (e) => {
+      setExpandedRemarkTaskIds(prev => {
+        if (!Object.values(prev).some(Boolean)) return prev;
+        if (e.target.closest && e.target.closest('[data-remark-history-box]')) return prev;
+        return {};
+      });
+    };
+    document.addEventListener('mousedown', handleOutsideTap);
+    document.addEventListener('touchstart', handleOutsideTap);
+    return () => {
+      document.removeEventListener('mousedown', handleOutsideTap);
+      document.removeEventListener('touchstart', handleOutsideTap);
+    };
+  }, []);
 
   const handleApproveRemoval = async (taskId, desc) => {
     if (!window.confirm(`Approve removal and permanently delete task "${desc}"?`)) return;
@@ -1432,16 +1453,61 @@ export default function AdminDashboard() {
     }
   };
 
+  // Opens the Discussion Log modal pre-tagged as 'Call'/'WhatsApp' with a prefilled title line,
+  // and expands the task's remark history so it's visible right away — admin/staff just add
+  // their notes below the title and save (no need to hunt for the tag in the dropdown).
+  const triggerQuickInteraction = (type, task, contactName) => {
+    if (!task) return;
+    const staffName = user?.Name || user?.Staff_ID || 'Staff';
+    const label = type === 'WhatsApp' ? 'WhatsApp Messaged' : 'Call Dialed';
+    setRemarkTask(task);
+    setRemarkForm({ type, remarks: `${label}: ${staffName} - ${contactName || 'Contact'}\n` });
+    setShowTagList(false);
+    setShowRemarkInputs(true);
+    setShowRemarksModal(true);
+    setExpandedRemarkTaskIds(prev => ({ ...prev, [task.Task_ID]: true }));
+  };
+
+  // Fills the Discussion Log's remarks with a title line for a client-initiated call, e.g.
+  // "Call Received: Parth - Nilesh" — contact name first (they called), staff name second.
+  const applyCallReceivedTag = (contactName) => {
+    const staffName = user?.Name || user?.Staff_ID || 'Staff';
+    setRemarkForm({ type: 'Call Received', remarks: `Call Received: ${contactName} - ${staffName}\n` });
+    setShowTagList(false);
+    setCallReceivedContactPicker({ isOpen: false, contacts: [] });
+  };
+
+  // Tag-dropdown click handler for the Discussion Log modal. 'Call Received' needs to know which
+  // client contact called in, so when the customer has more than one contact on file it opens a
+  // small picker first instead of assigning the tag immediately.
+  const handleRemarkTagSelect = (tag) => {
+    if (tag === 'Call Received') {
+      const custObj = customersById.get(String(remarkTask?.Customer_ID || '').trim().toLowerCase()) || {};
+      const contacts = getAvailableContacts(custObj, remarkTask);
+      if (contacts.length > 1) {
+        setCallReceivedContactPicker({ isOpen: true, contacts });
+        return;
+      }
+      const contactName = contacts[0]?.name || custObj.Auth_Person || custObj.Company_Name || remarkTask?.Customer_Name || 'Client';
+      applyCallReceivedTag(contactName);
+      return;
+    }
+    setRemarkForm({ ...remarkForm, type: tag });
+    setShowTagList(false);
+  };
+
   const handlePhoneButtonClick = (custObj, task = null) => {
     const contacts = getAvailableContacts(custObj, task);
     if (contacts.length === 0) {
       alert('No contact number found for this customer');
       return;
     }
-    if (custObj?.Customer_ID) {
-      handleLogCustomerCall(custObj);
-    }
     if (contacts.length === 1) {
+      if (task) {
+        triggerQuickInteraction('Call', task, contacts[0].name);
+      } else if (custObj?.Customer_ID) {
+        handleLogCustomerCall(custObj);
+      }
       window.location.href = `tel:${formatDialerNumber(contacts[0].cleanPhone)}`;
       return;
     }
@@ -1662,7 +1728,7 @@ export default function AdminDashboard() {
         })
       });
       if (!res.ok) throw new Error('Failed to save remark');
-      setRemarkForm({ type: 'Call Discussion', remarks: '' });
+      setRemarkForm({ type: '', remarks: '' });
       setShowTagList(true);
       setShowRemarkInputs(false);
       loadAdminData();
@@ -3108,6 +3174,7 @@ export default function AdminDashboard() {
 
                       return (
                         <div
+                          data-remark-history-box="true"
                           onClick={() => toggleRemarkExpand(task.Task_ID)}
                           className="mt-1 cursor-pointer select-none text-[11px] text-amber-900 bg-amber-50/90 hover:bg-amber-100/90 border border-amber-200/80 rounded-xl px-2.5 py-1.5 max-w-full shadow-2xs transition"
                           title="Tap to expand / collapse full remark history"
@@ -3125,6 +3192,7 @@ export default function AdminDashboard() {
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   setRemarkTask(task);
+                                  setRemarkForm({ type: '', remarks: '' });
                                   setShowTagList(true);
                                   setShowRemarkInputs(true);
                                   setShowRemarksModal(true);
@@ -3148,6 +3216,7 @@ export default function AdminDashboard() {
                                     onClick={(e) => {
                                       e.stopPropagation();
                                       setRemarkTask(task);
+                                      setRemarkForm({ type: '', remarks: '' });
                                       setShowTagList(true);
                                       setShowRemarkInputs(true);
                                       setShowRemarksModal(true);
@@ -3198,6 +3267,7 @@ export default function AdminDashboard() {
                           onClick={(e) => {
                             e.stopPropagation();
                             setRemarkTask(task);
+                            setRemarkForm({ type: '', remarks: '' });
                             setShowTagList(true);
                             setShowRemarkInputs(true);
                             setShowRemarksModal(true);
@@ -4399,11 +4469,19 @@ export default function AdminDashboard() {
                               className="flex-1 min-w-0 flex items-center justify-between px-3.5 py-2.5 bg-white border-2 border-slate-300 hover:border-amber-500 rounded-xl text-xs font-bold text-slate-800 shadow-2xs transition cursor-pointer text-left"
                             >
                               <span className="flex items-center gap-2 min-w-0 flex-1">
-                                <span className="px-2.5 py-0.5 rounded-lg bg-amber-600 text-white font-extrabold text-xs shrink-0 shadow-2xs">
-                                  {remarkForm.type || 'Select Tag'}
-                                </span>
+                                {remarkForm.type ? (
+                                  <span className="px-2.5 py-0.5 rounded-lg bg-amber-600 text-white font-extrabold text-xs shrink-0 shadow-2xs">
+                                    {remarkForm.type}
+                                  </span>
+                                ) : (
+                                  <span className="px-2.5 py-0.5 rounded-lg bg-slate-100 text-slate-500 font-bold text-xs shrink-0 border border-dashed border-slate-300">
+                                    Select Tag
+                                  </span>
+                                )}
                                 <span className="text-slate-500 font-normal truncate">
-                                  {!showTagList ? '(Click to change tag or correct mistake)' : '(Choose tag from dropdown below)'}
+                                  {remarkForm.type
+                                    ? (!showTagList ? '(Click to change tag or correct mistake)' : '(Choose tag from dropdown below)')
+                                    : '(Tap to search & select a tag)'}
                                 </span>
                               </span>
                               <ChevronDown className={`w-4 h-4 text-slate-400 shrink-0 transition-transform ${showTagList ? 'rotate-180 text-amber-600' : ''}`} />
@@ -4440,10 +4518,7 @@ export default function AdminDashboard() {
                                   return (
                                     <div
                                       key={tag}
-                                      onClick={() => {
-                                        setRemarkForm({ ...remarkForm, type: tag });
-                                        setShowTagList(false);
-                                      }}
+                                      onClick={() => handleRemarkTagSelect(tag)}
                                       className={`flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-bold cursor-pointer transition group ${remarkForm.type === tag
                                         ? 'bg-amber-600 text-white font-extrabold shadow-sm'
                                         : 'hover:bg-amber-50 text-slate-700'
@@ -4497,7 +4572,7 @@ export default function AdminDashboard() {
                       </div>
 
                       {/* 2. DISCUSSION DETAILS & REMARKS FIELD (Opens once tag is selected) */}
-                      {!showTagList && (
+                      {!showTagList && remarkForm.type && (
                         <div className="space-y-2.5 animate-fadeIn pt-3 border-t border-amber-200/60">
                           <div className="flex items-center justify-between flex-wrap gap-1">
                             <label className="block text-xs font-bold text-slate-800">
@@ -5992,15 +6067,26 @@ export default function AdminDashboard() {
                   Review, edit/overwrite technician field observations, approve service reports, and export multi-page A4 Landscape PDF documents with repeating company seals &amp; signatures.
                 </p>
               </div>
-              <button
-                onClick={() => navigate('/certificate/new')}
-                className="px-5 py-3 rounded-xl bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 text-white font-extrabold text-xs flex items-center gap-2 shadow-lg transition hover:scale-105 active:scale-95 shrink-0"
-              >
-                <PlusCircle className="w-4 h-4" />
-                <span>+ Create New Service Report</span>
-              </button>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  onClick={() => navigate('/field-visit/new')}
+                  className="px-5 py-3 rounded-xl bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 text-white font-extrabold text-xs flex items-center gap-2 shadow-lg transition hover:scale-105 active:scale-95"
+                >
+                  <PlusCircle className="w-4 h-4" />
+                  <span>+ Start Field Visit</span>
+                </button>
+                <button
+                  onClick={() => navigate('/certificate/new')}
+                  className="px-3 py-3 rounded-xl bg-white/10 hover:bg-white/20 border border-white/20 text-indigo-100 font-bold text-xs transition"
+                  title="Single-type report (skip the guided field visit)"
+                >
+                  Single-Type Report
+                </button>
+              </div>
             </div>
           </div>
+
+          <ServiceReportStatsPanel token={token} />
 
           {/* Pending Queue & All Reports Table */}
           <div className="bg-white rounded-2xl border border-slate-200 p-4 sm:p-5 shadow-xs space-y-4">
@@ -6046,9 +6132,20 @@ export default function AdminDashboard() {
                       if (serviceReportFilter === 'APPROVED') return r.Status === 'Approved';
                       return true;
                     })
+                    // Group sibling reports from the same field visit next to each other (stable
+                    // sort keeps everything else in its original order).
+                    .slice()
+                    .sort((a, b) => String(a.Visit_ID || '').localeCompare(String(b.Visit_ID || '')))
                     .map(r => (
                       <tr key={r.Report_ID} className="hover:bg-slate-50/80 font-medium">
-                        <td className="p-3 font-bold text-indigo-900">{r.Report_ID}</td>
+                        <td className="p-3 font-bold text-indigo-900">
+                          {r.Report_ID}
+                          {r.Visit_ID && (
+                            <div className="text-[9px] font-bold text-indigo-400 mt-0.5" title="Reports created from the same field visit share this tag">
+                              Visit #{String(r.Visit_ID).slice(-6)}
+                            </div>
+                          )}
+                        </td>
                         <td className="p-3 font-bold text-slate-900">
                           {r.customerName}
                           <div className="text-[10px] text-slate-400 font-normal truncate max-w-xs">{r.address}</div>
@@ -7585,6 +7682,39 @@ export default function AdminDashboard() {
         </div>
       )}
 
+      {/* CALL RECEIVED — CONTACT PICKER (which client contact called in, when there's more than one on file) */}
+      {callReceivedContactPicker.isOpen && (
+        <div className="fixed inset-0 z-[60] bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 animate-fadeIn">
+          <div className="bg-white rounded-2xl w-full max-w-sm shadow-2xl overflow-hidden flex flex-col max-h-[80vh]">
+            <div className="p-4 bg-slate-900 flex items-center justify-between">
+              <h3 className="text-white font-bold flex items-center gap-2 text-sm">
+                <PhoneCall className="w-4 h-4 text-emerald-400" /> Who Called?
+              </h3>
+              <button onClick={() => setCallReceivedContactPicker({ isOpen: false, contacts: [] })} className="text-slate-400 hover:text-white">✕</button>
+            </div>
+            <div className="p-4 overflow-y-auto flex-1 space-y-2">
+              <p className="text-xs text-slate-500 mb-1 font-medium">Select which contact person called in</p>
+              {callReceivedContactPicker.contacts.map((contact, idx) => (
+                <button
+                  key={idx}
+                  type="button"
+                  onClick={() => applyCallReceivedTag(contact.name)}
+                  className="w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl border-2 border-slate-200 hover:border-amber-500 hover:bg-amber-50 text-left transition"
+                >
+                  <span className="min-w-0">
+                    <span className="block font-bold text-slate-800 text-sm truncate">{contact.name || 'Unknown Contact'}</span>
+                    {(contact.designation || contact.phone) && (
+                      <span className="block text-[11px] text-slate-500 truncate">{contact.designation ? `${contact.designation} • ` : ''}{contact.phone}</span>
+                    )}
+                  </span>
+                  {contact.isPrimary && <span className="shrink-0 text-[9px] px-1.5 py-0.5 bg-indigo-100 text-indigo-700 rounded font-bold uppercase">Primary</span>}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* CONTACT CHOICE MODAL */}
       {contactModal.isOpen && contactModal.customer && (
         <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 animate-fadeIn">
@@ -7620,27 +7750,46 @@ export default function AdminDashboard() {
                       </div>
 
                       {contactModal.mode === 'CALL' ? (
-                        <a href={`tel:${formatDialerNumber(cleanPhone)}`} onClick={() => setContactModal({ isOpen: false, mode: 'CALL', customer: null, task: null })} className="w-full flex items-center justify-center gap-2 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold transition shadow-sm">
+                        <a href={`tel:${formatDialerNumber(cleanPhone)}`} onClick={() => {
+                          if (contactModal.task) {
+                            triggerQuickInteraction('Call', contactModal.task, contact.name);
+                          } else if (contactModal.customer?.Customer_ID) {
+                            handleLogCustomerCall(contactModal.customer);
+                          }
+                          setContactModal({ isOpen: false, mode: 'CALL', customer: null, task: null });
+                        }} className="w-full flex items-center justify-center gap-2 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold transition shadow-sm">
                           <PhoneCall className="w-3.5 h-3.5" />
                           Call Now
                         </a>
                       ) : (
                         <div className="space-y-2">
-                          <p className="text-[10px] font-bold text-slate-400 uppercase">Choose App (Android OS):</p>
-                          <div className="grid grid-cols-2 gap-2">
-                            <a href={`intent://send?phone=${waPhone}#Intent;package=com.whatsapp;scheme=whatsapp;end;`} className="flex items-center justify-center gap-1.5 py-2 rounded-lg bg-green-500 hover:bg-green-600 text-white text-[10px] font-bold transition shadow-sm">
-                              <MessageCircle className="w-3.5 h-3.5" />
-                              WhatsApp
-                            </a>
-                            <a href={`intent://send?phone=${waPhone}#Intent;package=com.whatsapp.w4b;scheme=whatsapp;end;`} className="flex items-center justify-center gap-1.5 py-2 rounded-lg bg-teal-600 hover:bg-teal-700 text-white text-[10px] font-bold transition shadow-sm">
-                              <Briefcase className="w-3.5 h-3.5" />
-                              WA Business
-                            </a>
-                          </div>
-                          <p className="text-[10px] font-bold text-slate-400 uppercase mt-2">iOS / Web Desktop:</p>
-                          <a href={`https://wa.me/${waPhone}`} target="_blank" rel="noopener noreferrer" className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 border border-slate-200 text-slate-700 text-[10px] font-bold transition shadow-sm">
-                            Open Standard Web Link
-                          </a>
+                          {(() => {
+                            const handleWaLinkClick = () => {
+                              if (contactModal.task) {
+                                triggerQuickInteraction('WhatsApp', contactModal.task, contact.name);
+                              }
+                              setContactModal({ isOpen: false, mode: 'WHATSAPP', customer: null, task: null });
+                            };
+                            return (
+                              <>
+                                <p className="text-[10px] font-bold text-slate-400 uppercase">Choose App (Android OS):</p>
+                                <div className="grid grid-cols-2 gap-2">
+                                  <a href={`intent://send?phone=${waPhone}#Intent;package=com.whatsapp;scheme=whatsapp;end;`} onClick={handleWaLinkClick} className="flex items-center justify-center gap-1.5 py-2 rounded-lg bg-green-500 hover:bg-green-600 text-white text-[10px] font-bold transition shadow-sm">
+                                    <MessageCircle className="w-3.5 h-3.5" />
+                                    WhatsApp
+                                  </a>
+                                  <a href={`intent://send?phone=${waPhone}#Intent;package=com.whatsapp.w4b;scheme=whatsapp;end;`} onClick={handleWaLinkClick} className="flex items-center justify-center gap-1.5 py-2 rounded-lg bg-teal-600 hover:bg-teal-700 text-white text-[10px] font-bold transition shadow-sm">
+                                    <Briefcase className="w-3.5 h-3.5" />
+                                    WA Business
+                                  </a>
+                                </div>
+                                <p className="text-[10px] font-bold text-slate-400 uppercase mt-2">iOS / Web Desktop:</p>
+                                <a href={`https://wa.me/${waPhone}`} target="_blank" rel="noopener noreferrer" onClick={handleWaLinkClick} className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 border border-slate-200 text-slate-700 text-[10px] font-bold transition shadow-sm">
+                                  Open Standard Web Link
+                                </a>
+                              </>
+                            );
+                          })()}
                         </div>
                       )}
                     </div>

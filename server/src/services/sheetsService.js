@@ -21,7 +21,8 @@ const models = {
   Service_Reports: createModel('Service_Reports'),
   Client_Equipment_Master: createModel('Client_Equipment_Master'),
   Document_Settings: createModel('Document_Settings'),
-  Tag_Master: createModel('Tag_Master')
+  Tag_Master: createModel('Tag_Master'),
+  Field_Visits: createModel('Field_Visits')
 };
 
 class MongoService {

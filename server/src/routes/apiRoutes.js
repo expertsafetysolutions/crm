@@ -1,6 +1,7 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const sheetsService = require('../services/sheetsService');
+const { computeServiceReportStats } = require('../services/serviceReportStats');
 const workflowEngine = require('../services/workflowEngine');
 const attendanceService = require('../services/attendanceService');
 const driveService = require('../services/driveService');
@@ -199,6 +200,26 @@ router.get('/service-reports', async (req, res) => {
   }
 });
 
+// Due-date / sub-type-capacity counts / Not-OK punch list — the Statistics/Summary feature.
+// Registered before the /:id route below so "stats" is never swallowed as a Report_ID lookup.
+router.get('/service-reports/stats', async (req, res) => {
+  try {
+    const { reportType, subType, customerId, from, to, notOkOnly } = req.query;
+    const stats = await computeServiceReportStats({
+      reportType,
+      subType,
+      customerId,
+      from,
+      to,
+      notOkOnly: notOkOnly === 'true' || notOkOnly === '1'
+    });
+    res.json(stats);
+  } catch (err) {
+    console.error('Service report stats failed:', err);
+    res.status(500).json({ error: 'Failed to compute service report statistics' });
+  }
+});
+
 router.get('/service-reports/:id', async (req, res) => {
   try {
     const reports = await sheetsService.getAllServiceReports();
@@ -312,6 +333,69 @@ router.post('/client-equipment/:customerId', async (req, res) => {
   }
 });
 
+// One call for every equipment family a client has on file, keyed by Report_Type — used by the
+// Field Visit flow to decide which family tabs to show and to build the merged cross-type search
+// index, instead of one request per family via ?reportType=.
+router.get('/client-equipment/:customerId/all', async (req, res) => {
+  try {
+    const rows = await sheetsService.getTab('Client_Equipment_Master');
+    const customerId = req.params.customerId;
+    const byType = {};
+    rows
+      .filter(x => String(x.Customer_ID || x.customerId || '').toLowerCase() === String(customerId).toLowerCase())
+      .forEach(row => {
+        const type = String(row.Report_Type || DEFAULT_CLIENT_EQUIPMENT_TYPE).toUpperCase();
+        // Keep the latest record per type, matching the single-type endpoint's "take the last match".
+        byType[type] = row.items || [];
+      });
+    res.json(byType);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch client equipment for all report types' });
+  }
+});
+
+// --- FIELD VISITS: groups the sibling per-family Service_Reports one field visit produces ---
+router.post('/field-visits', async (req, res) => {
+  try {
+    const { Customer_ID } = req.body;
+    if (!Customer_ID) return res.status(400).json({ error: 'Customer_ID is required' });
+    const visit = {
+      Visit_ID: `VISIT_${Date.now()}`,
+      Customer_ID,
+      Staff_ID: req.user.staffId || req.user.name || 'Technician',
+      Status: 'IN_PROGRESS',
+      Started_At: new Date().toISOString(),
+      reportIds: []
+    };
+    const inserted = await sheetsService.insertRow('Field_Visits', visit);
+    res.json({ success: true, visit: inserted });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to start field visit' });
+  }
+});
+
+router.get('/field-visits/:id', async (req, res) => {
+  try {
+    const rows = await sheetsService.getTab('Field_Visits');
+    const visit = rows.find(v => String(v.Visit_ID) === String(req.params.id));
+    if (!visit) return res.status(404).json({ error: 'Field visit not found' });
+    res.json(visit);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch field visit' });
+  }
+});
+
+router.put('/field-visits/:id', async (req, res) => {
+  try {
+    const patch = { ...req.body };
+    if (patch.Status === 'COMPLETED' && !patch.Completed_At) patch.Completed_At = new Date().toISOString();
+    const updated = await sheetsService.updateRow('Field_Visits', 'Visit_ID', req.params.id, patch);
+    if (!updated) return res.status(404).json({ error: 'Field visit not found' });
+    res.json({ success: true, visit: updated });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to update field visit' });
+  }
+});
 
 router.get('/equipment-master', async (req, res) => {
   try {

@@ -1,5 +1,6 @@
 import React, { useState, Suspense, lazy } from 'react';
 import { Routes, Route, useLocation, useParams } from 'react-router-dom';
+import { ArrowLeft } from 'lucide-react';
 import { useAuth } from './context/AuthContext';
 import { DocSettingsProvider } from './context/DocSettingsContext';
 import Navbar from './components/Navbar';
@@ -14,6 +15,7 @@ const AdminDashboard = lazy(() => import('./pages/AdminDashboard'));
 const CertificateGeneratorPage = lazy(() => import('./pages/CertificateGeneratorPage'));
 const CertificateComplianceGeneratorPage = lazy(() => import('./pages/CertificateComplianceGeneratorPage'));
 const DocSettingsPage = lazy(() => import('./pages/DocSettingsPage'));
+const FieldVisitPage = lazy(() => import('./pages/FieldVisitPage'));
 
 // Keyed so switching report type (or new-vs-edit) remounts the page with fresh state, since
 // React Router otherwise reuses the same instance when only the URL params change.
@@ -50,7 +52,7 @@ export default function App() {
   // Determine active role & view based on whether impersonating or switcher
   const activeRole = realUser?.Role || user?.Role;
   const isViewingAdmin = !impersonatedStaff && activeRole === 'Admin' && (currentView === 'admin' || currentView === 'default');
-  const isCertificatePage = location.pathname.startsWith('/certificate/') || location.pathname.startsWith('/certificate-compliance/') || location.pathname.startsWith('/service-report/');
+  const isCertificatePage = location.pathname.startsWith('/certificate/') || location.pathname.startsWith('/certificate-compliance/') || location.pathname.startsWith('/service-report/') || location.pathname.startsWith('/field-visit/');
   const isSettingsPage = location.pathname.startsWith('/settings/');
 
   return (
@@ -58,30 +60,26 @@ export default function App() {
       <div className="min-h-screen bg-slate-50 text-slate-800 flex flex-col selection:bg-rose-500 selection:text-white">
         {!isCertificatePage && !isSettingsPage && <OfflineBanner />}
         {!isCertificatePage && !isSettingsPage && impersonatedStaff && (
-          <div className="bg-gradient-to-r from-rose-600 via-indigo-600 to-emerald-600 text-white px-3 sm:px-6 py-2.5 shadow-lg flex flex-wrap items-center justify-between gap-3 z-50 sticky top-0 animate-fadeIn border-b border-white/20">
-            <div className="flex items-center gap-2.5 min-w-0">
-              <span className="px-2 py-0.5 rounded-lg bg-white/20 text-white font-extrabold text-[10px] tracking-wider uppercase shrink-0">
-                🛡️ Staff Access Mode
+          <div className="bg-gradient-to-r from-rose-600 via-indigo-600 to-emerald-600 text-white px-3 sm:px-4 py-1.5 shadow-md flex items-center justify-between gap-2 z-50 sticky top-0 animate-fadeIn border-b border-white/20">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="px-1.5 py-0.5 rounded-md bg-white/20 text-white font-extrabold text-[9px] tracking-wider uppercase shrink-0">
+                Staff Access
               </span>
-              <span className="text-xs sm:text-sm font-bold truncate">
-                Using interface & account of: <span className="underline decoration-2 font-extrabold">{impersonatedStaff.Name} ({impersonatedStaff.Staff_ID || impersonatedStaff.id})</span>
+              <span className="text-xs font-bold truncate">
+                {impersonatedStaff.Name}
               </span>
             </div>
-            <div className="flex items-center gap-2.5 shrink-0">
-              <span className="text-[11px] bg-black/25 px-2.5 py-1 rounded-lg font-semibold hidden md:inline">
-                ⚡ Add / remove data synced directly as {impersonatedStaff.Name}
-              </span>
-              <button
-                type="button"
-                onClick={() => {
-                  stopImpersonating();
-                  handleSetCurrentView('admin');
-                }}
-                className="px-3.5 py-1.5 rounded-xl bg-white hover:bg-slate-100 text-slate-900 font-extrabold text-xs shadow-md transition flex items-center gap-1.5 shrink-0 active:scale-95"
-              >
-                <span>← Exit & Return to Admin Panel</span>
-              </button>
-            </div>
+            <button
+              type="button"
+              onClick={() => {
+                stopImpersonating();
+                handleSetCurrentView('admin');
+              }}
+              className="w-6 h-6 rounded-md bg-white/20 hover:bg-white/30 active:scale-95 flex items-center justify-center transition shrink-0"
+              title="Exit & Return to Admin Panel"
+            >
+              <ArrowLeft className="w-3.5 h-3.5" />
+            </button>
           </div>
         )}
         {!isCertificatePage && !isSettingsPage && (
@@ -102,6 +100,9 @@ export default function App() {
               <Route path="/certificate/:reportId" element={<CertificateGeneratorPage />} />
               <Route path="/certificate-compliance/new" element={<CertificateComplianceGeneratorPage />} />
               <Route path="/certificate-compliance/task/:taskId" element={<CertificateComplianceGeneratorPage />} />
+              {/* One field visit = one client, every equipment family searchable together */}
+              <Route path="/field-visit/new" element={<FieldVisitPage />} />
+              <Route path="/field-visit/:visitId" element={<FieldVisitPage />} />
               <Route path="/settings/documents" element={<DocSettingsPage />} />
               <Route path="/*" element={isViewingAdmin ? <AdminDashboard /> : <StaffDashboard />} />
             </Routes>

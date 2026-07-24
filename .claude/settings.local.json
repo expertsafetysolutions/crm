@@ -16,7 +16,10 @@
       "PowerShell(Get-NetTCPConnection -LocalPort 5000 -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object { Get-Process -Id $_ | Select-Object Id, StartTime })",
       "Bash(git remote *)",
       "Bash(git branch *)",
-      "Bash(git push *)"
+      "Bash(git push *)",
+      "Bash(npx vite *)",
+      "Bash(node -e \"require\\('./src/routes/apiRoutes.js'\\); require\\('./src/services/serviceReportStats.js'\\); require\\('./src/services/sheetsService.js'\\); console.log\\('OK: all server modules load without syntax errors'\\)\")",
+      "Bash(git add *)"
     ]
   }
 }

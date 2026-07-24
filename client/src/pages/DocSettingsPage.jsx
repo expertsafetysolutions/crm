@@ -7,7 +7,7 @@ import { REPORT_TYPE_LIST, resolveNumbering, buildReportId } from '../utils/repo
 import ReportTypeChecklistEditor from '../components/settings/ReportTypeChecklistEditor';
 import {
   ChevronLeft, Save, RefreshCw, Image, FileText, Award,
-  Eye, EyeOff, CheckSquare, Square, AlertCircle, CheckCircle2,
+  Eye, EyeOff, AlertCircle, CheckCircle2,
   Settings, Palette, LayoutTemplate, Stamp, Pen, Layers
 } from 'lucide-react';
 
@@ -29,24 +29,6 @@ function Toggle({ checked, onChange, label, description }) {
         {description && <div className="text-xs text-slate-400 mt-0.5 leading-snug">{description}</div>}
       </div>
     </label>
-  );
-}
-
-// ─── Reusable Checkbox ───────────────────────────────────────────────────────
-function Checkbox({ checked, onChange, label }) {
-  return (
-    <button
-      type="button"
-      onClick={() => onChange(!checked)}
-      className={`flex items-center gap-2.5 px-3 py-2 rounded-lg border text-sm font-medium transition-all ${
-        checked
-          ? 'bg-amber-50 border-amber-300 text-amber-900'
-          : 'bg-white border-slate-200 text-slate-500 hover:border-slate-300'
-      }`}
-    >
-      {checked ? <CheckSquare className="w-4 h-4 text-amber-600 shrink-0" /> : <Square className="w-4 h-4 text-slate-400 shrink-0" />}
-      <span>{label}</span>
-    </button>
   );
 }
 
@@ -186,14 +168,27 @@ export default function DocSettingsPage() {
   };
 
   // Per-report-type column list (the checklist builder). Passing columns = null clears the override
-  // so the report falls back to the built-in defaults.
-  const updateReportTypeColumns = (typeId, columns) => {
+  // so the report falls back to the built-in defaults. Pass subTypeId for a module with sub-types
+  // (Fire Extinguisher ABC/CO2, System Hose/Pump House) to edit that sub-type's own checklist
+  // instead — modules with no sub-types are unaffected since subTypeId is simply omitted for them.
+  const updateReportTypeColumns = (typeId, columns, subTypeId) => {
     setLocalSettings(prev => {
       const srCfg = prev.document_configs?.SERVICE_REPORT || {};
       const reportTypes = srCfg.report_types || {};
       const typeCfg = { ...(reportTypes[typeId] || {}) };
-      if (columns === null) delete typeCfg.columns;
-      else typeCfg.columns = columns;
+
+      if (subTypeId) {
+        const subtypes = { ...(typeCfg.subtypes || {}) };
+        const subCfg = { ...(subtypes[subTypeId] || {}) };
+        if (columns === null) delete subCfg.columns;
+        else subCfg.columns = columns;
+        subtypes[subTypeId] = subCfg;
+        typeCfg.subtypes = subtypes;
+      } else {
+        if (columns === null) delete typeCfg.columns;
+        else typeCfg.columns = columns;
+      }
+
       return {
         ...prev,
         document_configs: {
@@ -220,6 +215,9 @@ export default function DocSettingsPage() {
               ...reportTypes,
               [typeId]: {
                 ...typeCfg,
+                // Recommendation defaults are keyed by checkpoint id, not sub-type — ABC and CO2
+                // share most ids (bodyValve, valve, safetyPin, seal) and a shared default reads
+                // fine for both, so this stays one library per report type rather than per sub-type.
                 recommendation_library: { ...(typeCfg.recommendation_library || {}), [colId]: text }
               }
             }
@@ -236,20 +234,6 @@ export default function DocSettingsPage() {
       document_configs: {
         ...prev.document_configs,
         CERTIFICATE: { ...prev.document_configs.CERTIFICATE, [key]: val }
-      }
-    }));
-    setIsDirty(true);
-  };
-
-  const updateCertColumn = (col, val) => {
-    setLocalSettings(prev => ({
-      ...prev,
-      document_configs: {
-        ...prev.document_configs,
-        CERTIFICATE: {
-          ...prev.document_configs.CERTIFICATE,
-          visible_columns: { ...prev.document_configs.CERTIFICATE.visible_columns, [col]: val }
-        }
       }
     }));
     setIsDirty(true);
@@ -625,24 +609,11 @@ export default function DocSettingsPage() {
 
               {/* Equipment Table Columns */}
               <SectionCard title="📋 Equipment Table Columns">
-                <p className="text-xs text-slate-400 mb-3">Select which columns appear in the certificate equipment list table:</p>
-                <div className="flex flex-wrap gap-2">
-                  {[
-                    { key: 'sr_no', label: 'Sr. No.' },
-                    { key: 'item_name', label: 'Item Name' },
-                    { key: 'capacity', label: 'Capacity' },
-                    { key: 'qty', label: 'Qty (Nos.)' },
-                    { key: 'refill_date', label: 'Service Date' },
-                    { key: 'valid_until', label: 'Valid Until' },
-                  ].map(col => (
-                    <Checkbox
-                      key={col.key}
-                      checked={cert.visible_columns?.[col.key] ?? true}
-                      onChange={v => updateCertColumn(col.key, v)}
-                      label={col.label}
-                    />
-                  ))}
-                </div>
+                <p className="text-xs text-slate-500">
+                  Column visibility and order is now configured <strong>per certificate type</strong> —
+                  open a certificate, pick its type from the Certificate Type selector, and use its
+                  own Settings tab ("Equipment Table Fields") to tick fields on/off and reorder them.
+                </p>
               </SectionCard>
 
               {/* Equipment Table Titles */}

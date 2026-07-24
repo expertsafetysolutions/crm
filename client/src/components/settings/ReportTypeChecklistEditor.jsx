@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { Plus, Trash2, ChevronUp, ChevronDown, RotateCcw, ListChecks, Type as TypeIcon } from 'lucide-react';
 import {
   REPORT_TYPE_LIST,
   getDefaultColumns,
+  getSubTypeList,
   COLUMN_TYPES
 } from '../../utils/reportTypeSchemas';
 
@@ -27,13 +28,22 @@ const newColId = () => 'col-' + Date.now() + '-' + Math.random().toString(36).sl
 
 export default function ReportTypeChecklistEditor({ serviceReportConfig, onChangeColumns, onChangeRecommendation }) {
   const [activeType, setActiveType] = useState(REPORT_TYPE_LIST[0].id);
+  const [activeSubType, setActiveSubType] = useState(null);
+
+  const subTypeOptions = useMemo(() => getSubTypeList(activeType), [activeType]);
+  useEffect(() => {
+    // Default to the module's first sub-type tab (if it has any) whenever the module changes.
+    setActiveSubType(subTypeOptions[0]?.id ?? null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeType]);
 
   const typeCfg = serviceReportConfig?.report_types?.[activeType] || {};
-  const configured = typeCfg.columns;
-  const columns = Array.isArray(configured) && configured.length > 0 ? configured : getDefaultColumns(activeType);
+  const subCfg = activeSubType ? (typeCfg.subtypes?.[activeSubType] || {}) : null;
+  const configured = activeSubType ? subCfg.columns : typeCfg.columns;
+  const columns = Array.isArray(configured) && configured.length > 0 ? configured : getDefaultColumns(activeType, activeSubType || undefined);
   const library = typeCfg.recommendation_library || {};
 
-  const commit = (nextColumns) => onChangeColumns(activeType, nextColumns);
+  const commit = (nextColumns) => onChangeColumns(activeType, nextColumns, activeSubType || undefined);
 
   const updateColumn = (idx, patch) => commit(columns.map((c, i) => (i === idx ? { ...c, ...patch } : c)));
 
@@ -53,8 +63,8 @@ export default function ReportTypeChecklistEditor({ serviceReportConfig, onChang
   };
 
   const resetType = () => {
-    if (window.confirm('Reset this report type’s columns back to the built-in defaults?')) {
-      onChangeColumns(activeType, null);
+    if (window.confirm('Reset this checklist back to the built-in default columns?')) {
+      onChangeColumns(activeType, null, activeSubType || undefined);
     }
   };
 
@@ -76,10 +86,30 @@ export default function ReportTypeChecklistEditor({ serviceReportConfig, onChang
         ))}
       </div>
 
+      {/* Sub-type picker (ABC/CO2, Hydrant-Hose/Pump House) — only shown for modules that have one */}
+      {subTypeOptions.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 mb-3">
+          {subTypeOptions.map(s => (
+            <button
+              key={s.id}
+              type="button"
+              onClick={() => setActiveSubType(s.id)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition ${
+                s.id === activeSubType ? 'bg-emerald-600 text-white shadow-sm' : 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200'
+              }`}
+            >
+              {s.label}
+            </button>
+          ))}
+        </div>
+      )}
+
       <div className="flex items-center justify-between mb-2">
         <p className="text-xs text-slate-400">
-          Columns for <span className="font-bold text-slate-600">{REPORT_TYPE_LIST.find(t => t.id === activeType)?.shortLabel}</span>.
-          Checks appear as tap-to-toggle OK / Not OK cells.
+          Columns for <span className="font-bold text-slate-600">
+            {REPORT_TYPE_LIST.find(t => t.id === activeType)?.shortLabel}
+            {activeSubType ? ` — ${subTypeOptions.find(s => s.id === activeSubType)?.label}` : ''}
+          </span>. Checks appear as tap-to-toggle OK / Not OK cells.
         </p>
         <button
           type="button"

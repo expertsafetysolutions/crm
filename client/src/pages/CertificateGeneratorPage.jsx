@@ -19,6 +19,9 @@ import {
   collectNotOkIssues,
   composeIssueSummary,
   issueEquipmentLabel,
+  getSubTypeList,
+  getDefaultSubType,
+  getRowSubType,
   REPORT_TYPE_LIST,
   DEFAULT_REPORT_TYPE,
   TABLE_SCHEMA_LEGACY,
@@ -298,18 +301,51 @@ export default function CertificateGeneratorPage() {
     };
   });
 
-  // Columns the schema-driven preview renders. Legacy reports ignore this and use the frozen table.
+  // Sub-types this report's module has (e.g. ABC/CO2 for Fire Extinguisher, Hose/Pump House for
+  // System). Editing works one sub-type "tab" at a time; the print/PDF preview shows every
+  // sub-type's rows together, grouped into their own sub-tables (see Step 4 below).
+  const subTypeList = useMemo(() => getSubTypeList(reportForm.reportType), [reportForm.reportType]);
+  const hasSubTypes = subTypeList.length > 0;
+  // A module with no defaultSubType (System) treats rows with no subType as legacy data rather
+  // than guessing — those rows get their own "Unclassified" tab instead of being folded into one.
+  const editorTabs = useMemo(() => {
+    if (!hasSubTypes) return [];
+    const tabs = [...subTypeList];
+    if (!getDefaultSubType(reportForm.reportType)) tabs.push({ id: null, label: 'Unclassified (Legacy)' });
+    return tabs;
+  }, [hasSubTypes, subTypeList, reportForm.reportType]);
+  const [activeSubType, setActiveSubType] = useState(() => getDefaultSubType(routedReportType) ?? (getSubTypeList(routedReportType)[0]?.id ?? null));
+  useEffect(() => {
+    setActiveSubType(getDefaultSubType(reportForm.reportType) ?? (subTypeList[0]?.id ?? null));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reportForm.reportType]);
+
+  // Columns for the sub-type tab currently being edited. Legacy reports ignore this and use the
+  // frozen table. When the module has no sub-types, activeSubType is null and this resolves
+  // identically to the pre-sub-type 2-arg call — no behavior change for those modules.
   const previewColumns = useMemo(
-    () => resolveColumns(reportForm.reportType, srCfg),
-    [reportForm.reportType, srCfg]
+    () => resolveColumns(reportForm.reportType, srCfg, activeSubType),
+    [reportForm.reportType, srCfg, activeSubType]
   );
 
-  // Every checkpoint currently marked NOT OK, with its recommendation — drives the issues panel and
-  // the auto-composed recommendation summary.
-  const notOkIssues = useMemo(
-    () => collectNotOkIssues(reportForm.itemsList || [], previewColumns),
-    [reportForm.itemsList, previewColumns]
-  );
+  // Rows belonging to the active sub-type tab (all rows, when the module has none).
+  const activeGroupItems = useMemo(() => {
+    if (!hasSubTypes) return reportForm.itemsList || [];
+    return (reportForm.itemsList || []).filter(row => (getRowSubType(reportForm.reportType, row) ?? null) === activeSubType);
+  }, [hasSubTypes, reportForm.itemsList, reportForm.reportType, activeSubType]);
+
+  // Every checkpoint currently marked NOT OK across the WHOLE report (every sub-type group, not
+  // just the active tab), with its recommendation — drives the issues panel and the auto-composed
+  // recommendation summary, since both must reflect everything captured, not just one tab.
+  const notOkIssues = useMemo(() => {
+    if (!hasSubTypes) return collectNotOkIssues(reportForm.itemsList || [], previewColumns);
+    const issues = [];
+    editorTabs.forEach(tab => {
+      const items = (reportForm.itemsList || []).filter(row => (getRowSubType(reportForm.reportType, row) ?? null) === tab.id);
+      if (items.length) issues.push(...collectNotOkIssues(items, resolveColumns(reportForm.reportType, srCfg, tab.id)));
+    });
+    return issues;
+  }, [hasSubTypes, editorTabs, reportForm.itemsList, reportForm.reportType, srCfg, previewColumns]);
 
   // Auto-compose the recommendations field from the NOT OK issues (item 4), until the user edits
   // that field by hand (autoSummary flips false). The string compare stops this from looping.
@@ -574,10 +610,13 @@ export default function CertificateGeneratorPage() {
       return;
     }
     if (!window.confirm(`Mark all ${rowCount} item(s) as healthy? Every check will be set to OK and every row marked checked.`)) return;
-    const checkpointIds = previewColumns.filter(c => c.type === 'checkpoint').map(c => c.id);
+    // Each row may belong to a different sub-type (ABC vs CO2, Hose vs Pump House), so its
+    // checkpoint ids are resolved per-row rather than from the single active tab's columns.
     setReportForm(prev => ({
       ...prev,
       itemsList: (prev.itemsList || []).map(row => {
+        const rowSubType = hasSubTypes ? (getRowSubType(prev.reportType, row) ?? null) : undefined;
+        const checkpointIds = resolveColumns(prev.reportType, srCfg, rowSubType).filter(c => c.type === 'checkpoint').map(c => c.id);
         const next = { ...row, serviced: true, recommendations: {} };
         checkpointIds.forEach(id => { next[id] = 'OK'; });
         return next;
@@ -654,12 +693,12 @@ export default function CertificateGeneratorPage() {
   // extinguishers, pre-fill the common dates and an auto client id, mirroring the old behaviour.
   const handleAddEquipmentRow = () => {
     const nextNo = (reportForm.itemsList || []).length + 1;
-    const row = createEmptyRow(reportForm.reportType, srCfg, nextNo);
+    const row = createEmptyRow(reportForm.reportType, srCfg, nextNo, activeSubType ?? undefined);
     if (reportForm.reportType === DEFAULT_REPORT_TYPE) {
       Object.assign(row, {
         location: 'Ground Floor',
         clientIdNo: `CYL-${new Date().getFullYear()}-${String(nextNo).padStart(3, '0')}`,
-        itemName: 'DCP ABC Type Fire Extinguisher (6 Kg)',
+        itemName: activeSubType === 'CO2' ? 'CO2 Type Fire Extinguisher (4.5 Kg)' : 'DCP ABC Type Fire Extinguisher (6 Kg)',
         mfgYear: String(new Date().getFullYear()),
         refillingDate: reportForm.serviceDate,
         nextRefillingDate: reportForm.nextServiceDue,
@@ -795,11 +834,13 @@ export default function CertificateGeneratorPage() {
 
   // Export the current equipment table to CSV, columns matching this report type (plus any
   // per-client custom columns), so it can be edited in a spreadsheet and imported back.
+  // Exports the active sub-type tab only (its own column set) — for a module with no sub-types
+  // this is the whole itemsList, same as before sub-types existed.
   const handleExportEquipmentCsv = async () => {
     try {
       setEquipmentBusy('export');
       const { default: Papa } = await import('papaparse');
-      const objects = itemsToCsvObjects(reportForm.itemsList || [], previewColumns, reportForm.customColumns || []);
+      const objects = itemsToCsvObjects(activeGroupItems, previewColumns, reportForm.customColumns || []);
       const csv = Papa.unparse(objects);
       const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
       const url = URL.createObjectURL(blob);
@@ -848,16 +889,21 @@ export default function CertificateGeneratorPage() {
         alert('That CSV had no data rows.');
         return;
       }
+      // Imported rows replace only the active sub-type tab's rows — other tabs' equipment (e.g.
+      // CO2 rows while importing into the ABC tab) are kept as-is, not wiped.
       const { items, addedCustomColumns } = csvObjectsToItems(rows, previewColumns, reportForm.customColumns || []);
+      if (hasSubTypes && activeSubType) items.forEach(it => { it.subType = activeSubType; });
+      const otherGroupItems = (reportForm.itemsList || []).filter(row => (getRowSubType(reportForm.reportType, row) ?? null) !== activeSubType);
+      const mergedItems = [...otherGroupItems, ...items];
       setReportForm(prev => ({
         ...prev,
-        itemsList: items,
+        itemsList: mergedItems,
         customColumns: [...(prev.customColumns || []), ...addedCustomColumns]
       }));
 
       let savedNote = '';
       try {
-        const { skipped } = await saveEquipmentToRegistry(items);
+        const { skipped } = await saveEquipmentToRegistry(mergedItems);
         savedNote = skipped
           ? '\n\nTip: select a client first to also save this list to their registry for next time.'
           : '\n\nSaved to this client’s equipment registry for future reports.';
@@ -1437,6 +1483,29 @@ export default function CertificateGeneratorPage() {
                 </div>
               )}
 
+              {/* Sub-type tabs (e.g. ABC vs CO2, Hydrant/Hose vs Pump House) — editing works one
+                  tab at a time since each sub-type has its own checkpoint set; the final print
+                  preview below shows every tab's rows together, grouped into their own tables. */}
+              {hasSubTypes && (
+                <div className="flex flex-wrap gap-1.5 bg-slate-100 p-1.5 rounded-xl">
+                  {editorTabs.map(tab => {
+                    const count = (reportForm.itemsList || []).filter(row => (getRowSubType(reportForm.reportType, row) ?? null) === tab.id).length;
+                    return (
+                      <button
+                        key={tab.id ?? '__none__'}
+                        type="button"
+                        onClick={() => { setActiveSubType(tab.id); setGuidedSelectedId(null); }}
+                        className={`px-3 py-1.5 rounded-lg font-bold text-xs transition ${
+                          activeSubType === tab.id ? 'bg-indigo-600 text-white shadow-sm' : 'bg-white text-slate-600 hover:bg-slate-200'
+                        }`}
+                      >
+                        {tab.label}{count > 0 ? ` (${count})` : ''}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
               {/* Guided one-at-a-time inspection toggle (best on a phone) */}
               <button
                 type="button"
@@ -1463,7 +1532,7 @@ export default function CertificateGeneratorPage() {
                     </div>
                   )}
                   <GuidedInspection
-                    items={reportForm.itemsList || []}
+                    items={activeGroupItems}
                     columns={previewColumns}
                     customColumns={reportForm.customColumns || []}
                     selectedId={guidedSelectedId}
@@ -1592,10 +1661,10 @@ export default function CertificateGeneratorPage() {
                 {/* Pre-populated Interactive Inspection Table */}
                 <div className="bg-white border border-slate-300 rounded-xl overflow-hidden shadow-2xs">
                   <div className="px-3 py-2 bg-slate-100 border-b border-slate-200 font-extrabold text-slate-800 text-xs flex flex-wrap justify-between items-center gap-2">
-                    <span>Equipment Table ({(reportForm.itemsList || []).length} Items)</span>
+                    <span>Equipment Table ({activeGroupItems.length} Item{activeGroupItems.length === 1 ? '' : 's'}{hasSubTypes ? ` — ${editorTabs.find(t => t.id === activeSubType)?.label || ''}` : ''})</span>
                     {(() => {
-                      const total = (reportForm.itemsList || []).length;
-                      const done = (reportForm.itemsList || []).filter(r => r.serviced).length;
+                      const total = activeGroupItems.length;
+                      const done = activeGroupItems.filter(r => r.serviced).length;
                       const pct = total ? Math.round((done / total) * 100) : 0;
                       return (
                         <span className="flex items-center gap-2">
@@ -1611,7 +1680,7 @@ export default function CertificateGeneratorPage() {
                   </div>
 
                   <EquipmentEditorTable
-                    items={reportForm.itemsList || []}
+                    items={activeGroupItems}
                     columns={previewColumns}
                     customColumns={reportForm.customColumns || []}
                     searchQuery={tableSearchQuery}
@@ -1879,17 +1948,39 @@ export default function CertificateGeneratorPage() {
                     </tbody>
                   </table>
 
-                  {/* 16-Column Default Equipment Table Schema */}
+                  {/* Equipment table(s) for print/PDF. A module with sub-types (ABC/CO2, Hose/Pump
+                      House) prints one sub-table per sub-type with its own heading, so one visit's
+                      report still separates them clearly even though they were captured together. */}
                   {(reportForm.itemsList || []).length > 0 && (
-                    <div className="mb-2">
-                      <EquipmentPreviewTable
-                        items={reportForm.itemsList || []}
-                        columns={previewColumns}
-                        customColumns={reportForm.customColumns || []}
-                        schemaVersion={reportForm.tableSchemaVersion || TABLE_SCHEMA_LEGACY}
-                        srCols={srCols}
-                        srCps={srCps}
-                      />
+                    <div className="mb-2 space-y-3">
+                      {hasSubTypes && (reportForm.tableSchemaVersion || TABLE_SCHEMA_LEGACY) === TABLE_SCHEMA_CURRENT ? (
+                        editorTabs.map(tab => {
+                          const items = (reportForm.itemsList || []).filter(row => (getRowSubType(reportForm.reportType, row) ?? null) === tab.id);
+                          if (!items.length) return null;
+                          return (
+                            <div key={tab.id ?? '__none__'}>
+                              <div className="text-[9px] font-black uppercase tracking-wide text-amber-900 bg-amber-50 border border-amber-200 rounded px-2 py-1 mb-1">
+                                {tab.label}
+                              </div>
+                              <EquipmentPreviewTable
+                                items={items}
+                                columns={resolveColumns(reportForm.reportType, srCfg, tab.id)}
+                                customColumns={reportForm.customColumns || []}
+                                schemaVersion={TABLE_SCHEMA_CURRENT}
+                              />
+                            </div>
+                          );
+                        })
+                      ) : (
+                        <EquipmentPreviewTable
+                          items={reportForm.itemsList || []}
+                          columns={previewColumns}
+                          customColumns={reportForm.customColumns || []}
+                          schemaVersion={reportForm.tableSchemaVersion || TABLE_SCHEMA_LEGACY}
+                          srCols={srCols}
+                          srCps={srCps}
+                        />
+                      )}
                     </div>
                   )}
 

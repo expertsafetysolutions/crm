@@ -20,7 +20,8 @@
       "Bash(npx vite *)",
       "Bash(node -e \"require\\('./src/routes/apiRoutes.js'\\); require\\('./src/services/serviceReportStats.js'\\); require\\('./src/services/sheetsService.js'\\); console.log\\('OK: all server modules load without syntax errors'\\)\")",
       "Bash(git add *)",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Bash(git checkout *)"
     ]
   }
 }

@@ -7,7 +7,7 @@ import { REPORT_TYPE_LIST, resolveNumbering, buildReportId } from '../utils/repo
 import ReportTypeChecklistEditor from '../components/settings/ReportTypeChecklistEditor';
 import {
   ChevronLeft, Save, RefreshCw, Image, FileText, Award,
-  Eye, EyeOff, AlertCircle, CheckCircle2,
+  Eye, EyeOff, CheckSquare, Square, AlertCircle, CheckCircle2,
   Settings, Palette, LayoutTemplate, Stamp, Pen, Layers
 } from 'lucide-react';
 
@@ -29,6 +29,24 @@ function Toggle({ checked, onChange, label, description }) {
         {description && <div className="text-xs text-slate-400 mt-0.5 leading-snug">{description}</div>}
       </div>
     </label>
+  );
+}
+
+// ─── Reusable Checkbox ───────────────────────────────────────────────────────
+function Checkbox({ checked, onChange, label }) {
+  return (
+    <button
+      type="button"
+      onClick={() => onChange(!checked)}
+      className={`flex items-center gap-2.5 px-3 py-2 rounded-lg border text-sm font-medium transition-all ${
+        checked
+          ? 'bg-amber-50 border-amber-300 text-amber-900'
+          : 'bg-white border-slate-200 text-slate-500 hover:border-slate-300'
+      }`}
+    >
+      {checked ? <CheckSquare className="w-4 h-4 text-amber-600 shrink-0" /> : <Square className="w-4 h-4 text-slate-400 shrink-0" />}
+      <span>{label}</span>
+    </button>
   );
 }
 
@@ -239,24 +257,17 @@ export default function DocSettingsPage() {
     setIsDirty(true);
   };
 
-  const updateCertTableTitle = (formatType, val) => {
-    setLocalSettings(prev => {
-      const certConfig = prev.document_configs?.CERTIFICATE || {};
-      const currentTitles = certConfig.equipment_table_titles || {};
-      return {
-        ...prev,
-        document_configs: {
-          ...prev.document_configs,
-          CERTIFICATE: {
-            ...certConfig,
-            equipment_table_titles: {
-              ...currentTitles,
-              [formatType]: val
-            }
-          }
+  const updateCertColumn = (col, val) => {
+    setLocalSettings(prev => ({
+      ...prev,
+      document_configs: {
+        ...prev.document_configs,
+        CERTIFICATE: {
+          ...prev.document_configs.CERTIFICATE,
+          visible_columns: { ...prev.document_configs.CERTIFICATE.visible_columns, [col]: val }
         }
-      };
-    });
+      }
+    }));
     setIsDirty(true);
   };
 
@@ -609,42 +620,22 @@ export default function DocSettingsPage() {
 
               {/* Equipment Table Columns */}
               <SectionCard title="📋 Equipment Table Columns">
-                <p className="text-xs text-slate-500">
-                  Column visibility and order is now configured <strong>per certificate type</strong> —
-                  open a certificate, pick its type from the Certificate Type selector, and use its
-                  own Settings tab ("Equipment Table Fields") to tick fields on/off and reorder them.
-                </p>
-              </SectionCard>
-
-              {/* Equipment Table Titles */}
-              <SectionCard title="✏️ Equipment Table Titles (per Certificate Type)" className="md:col-span-2">
-                <p className="text-xs text-slate-400 mb-3">Customize the title displayed above the equipment table for each certificate format:</p>
-                <div className="space-y-3">
+                <p className="text-xs text-slate-400 mb-3">Select which columns appear in the certificate equipment list table:</p>
+                <div className="flex flex-wrap gap-2">
                   {[
-                    { key: 'Refilling', label: 'Refilling Certificate' },
-                    { key: 'HP Testing', label: 'HP Testing Certificate' },
-                    { key: 'New Fire Extinguisher', label: 'New Fire Extinguisher' },
-                    { key: 'System Installation', label: 'System Installation' },
-                    { key: 'AMC Certificate', label: 'AMC Certificate' },
-                    { key: 'Visit Report', label: 'Visit Report' },
-                  ].map(format => (
-                    <div key={format.key} className="flex flex-col sm:flex-row sm:items-center gap-2">
-                      <span className="text-xs font-bold text-slate-600 sm:w-1/3 truncate">{format.label}</span>
-                      <input
-                        type="text"
-                        className="flex-1 px-3 py-1.5 rounded-lg border border-slate-300 focus:outline-hidden focus:ring-1 focus:ring-rose-500 font-bold text-xs"
-                        value={cert.equipment_table_titles?.[format.key] ?? ''}
-                        placeholder={
-                          format.key === 'HP Testing' ? 'Certified Equipment & HPT Summary' :
-                          format.key === 'New Fire Extinguisher' ? 'Certified Equipment Warranty & Summary' :
-                          format.key === 'System Installation' ? 'Installed Systems & Equipment Summary' :
-                          format.key === 'AMC Certificate' ? 'Certified Equipment & AMC Schedule Summary' :
-                          format.key === 'Visit Report' ? 'Inspected Equipment & Observations Summary' :
-                          'Certified Equipment & Schedule Summary'
-                        }
-                        onChange={e => updateCertTableTitle(format.key, e.target.value)}
-                      />
-                    </div>
+                    { key: 'sr_no', label: 'Sr. No.' },
+                    { key: 'item_name', label: 'Item Name' },
+                    { key: 'capacity', label: 'Capacity' },
+                    { key: 'qty', label: 'Qty (Nos.)' },
+                    { key: 'refill_date', label: 'Service Date' },
+                    { key: 'valid_until', label: 'Valid Until' },
+                  ].map(col => (
+                    <Checkbox
+                      key={col.key}
+                      checked={cert.visible_columns?.[col.key] ?? true}
+                      onChange={v => updateCertColumn(col.key, v)}
+                      label={col.label}
+                    />
                   ))}
                 </div>
               </SectionCard>

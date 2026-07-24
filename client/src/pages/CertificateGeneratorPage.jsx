@@ -14,6 +14,10 @@ import {
   createEmptyRow,
   getReportType,
   getReportTypeByRoute,
+  getRecommendationDefault,
+  collectNotOkIssues,
+  composeIssueSummary,
+  issueEquipmentLabel,
   REPORT_TYPE_LIST,
   DEFAULT_REPORT_TYPE,
   TABLE_SCHEMA_LEGACY,
@@ -185,7 +189,7 @@ export default function CertificateGeneratorPage() {
   const userRole = user?.Role === 'Admin' ? 'Admin' : 'Staff';
   const currentStaffName = user?.Name || (userRole === 'Admin' ? 'Admin' : 'Technician');
 
-  const { docSettings } = useDocSettings();
+  const { docSettings, updateDocSettings } = useDocSettings();
   const srCfg = docSettings?.document_configs?.SERVICE_REPORT || {};
   const srCols = srCfg.visible_columns || {};
   const srCps = srCfg.enabled_checkpoints || {};
@@ -285,6 +289,8 @@ export default function CertificateGeneratorPage() {
     // Fire Extinguisher keeps its sample rows; other modules start with an empty table.
     itemsList: routedReportType === DEFAULT_REPORT_TYPE ? DEFAULT_CLIENT_EQUIPMENT_TEMPLATE : [],
     reportType: routedReportType,
+    // Auto-compose the recommendations text from NOT OK checks until the user edits it by hand.
+    autoSummary: true,
     // New reports print through the schema-driven table. Reports saved before this field existed
     // stay on TABLE_SCHEMA_LEGACY so a reprint matches the PDF the customer already has.
     tableSchemaVersion: TABLE_SCHEMA_CURRENT
@@ -296,6 +302,21 @@ export default function CertificateGeneratorPage() {
     () => resolveColumns(reportForm.reportType, srCfg),
     [reportForm.reportType, srCfg]
   );
+
+  // Every checkpoint currently marked NOT OK, with its recommendation — drives the issues panel and
+  // the auto-composed recommendation summary.
+  const notOkIssues = useMemo(
+    () => collectNotOkIssues(reportForm.itemsList || [], previewColumns),
+    [reportForm.itemsList, previewColumns]
+  );
+
+  // Auto-compose the recommendations field from the NOT OK issues (item 4), until the user edits
+  // that field by hand (autoSummary flips false). The string compare stops this from looping.
+  useEffect(() => {
+    if (!reportForm.autoSummary) return;
+    const summary = composeIssueSummary(notOkIssues);
+    setReportForm(prev => (prev.recommendations === summary ? prev : { ...prev, recommendations: summary }));
+  }, [notOkIssues, reportForm.autoSummary]);
 
   const [allReports, setAllReports] = useState([]);
 
@@ -382,6 +403,8 @@ export default function CertificateGeneratorPage() {
                  itemsList: (reportData.itemsList && reportData.itemsList.length > 0) ? reportData.itemsList : DEFAULT_CLIENT_EQUIPMENT_TEMPLATE,
                  customColumns: reportData.customColumns || [],
                  reportType: reportData.reportType || DEFAULT_REPORT_TYPE,
+                 // Respect the saved recommendation text on an existing report; don't auto-rewrite it.
+                 autoSummary: false,
                  // Absent on every report saved before the schema refactor — those must keep
                  // printing through the legacy table, so never inherit the new default here.
                  tableSchemaVersion: reportData.tableSchemaVersion || TABLE_SCHEMA_LEGACY
@@ -466,16 +489,59 @@ export default function CertificateGeneratorPage() {
   };
 
   // Toggle a checkpoint OK <-> NOT OK for one row, addressed by row id (not list position, so a
-  // toggle lands on the right row even while the table is filtered by search).
+  // toggle lands on the right row even while the table is filtered by search). When a checkpoint
+  // turns NOT OK and has no recommendation yet, seed it from the admin library default.
   const toggleCheckpoint = (rowId, checkpointKey) => {
+    setReportForm(prev => ({
+      ...prev,
+      itemsList: prev.itemsList.map(row => {
+        if (row.id !== rowId) return row;
+        const nextVal = (row[checkpointKey] || 'OK') === 'OK' ? 'NOT OK' : 'OK';
+        const next = { ...row, [checkpointKey]: nextVal };
+        if (nextVal === 'NOT OK' && !row.recommendations?.[checkpointKey]) {
+          const def = getRecommendationDefault(prev.reportType, srCfg, checkpointKey);
+          if (def) next.recommendations = { ...(row.recommendations || {}), [checkpointKey]: def };
+        }
+        return next;
+      })
+    }));
+  };
+
+  // Edit the recommendation text for one NOT OK issue (row + checkpoint).
+  const setIssueRecommendation = (rowId, checkpointId, text) => {
     setReportForm(prev => ({
       ...prev,
       itemsList: prev.itemsList.map(row =>
         row.id === rowId
-          ? { ...row, [checkpointKey]: (row[checkpointKey] || 'OK') === 'OK' ? 'NOT OK' : 'OK' }
+          ? { ...row, recommendations: { ...(row.recommendations || {}), [checkpointId]: text } }
           : row
       )
     }));
+  };
+
+  // Save a recommendation as the admin default for this report type + checkpoint, so it auto-fills
+  // on every future report (the "applies to all reports" tick). Admin only.
+  const saveRecommendationDefault = async (checkpointId, text) => {
+    if (userRole !== 'Admin') {
+      alert('Only an admin can save a recommendation as the default for all reports.');
+      return;
+    }
+    const existingLib = srCfg.report_types?.[reportForm.reportType]?.recommendation_library || {};
+    const patch = {
+      document_configs: {
+        SERVICE_REPORT: {
+          report_types: {
+            [reportForm.reportType]: {
+              recommendation_library: { ...existingLib, [checkpointId]: text }
+            }
+          }
+        }
+      }
+    };
+    const result = await updateDocSettings(patch);
+    alert(result?.success === false
+      ? 'Could not save default: ' + (result.error || 'unknown error')
+      : 'Saved as the default recommendation for this check on all future reports.');
   };
 
   // Edit any plain data cell (text / date / number), addressed by row id.
@@ -1285,6 +1351,55 @@ export default function CertificateGeneratorPage() {
               ═══════════════════════════════════════════════════════════ */}
           {wizardStep === 3 && (
             <div className="space-y-3 pt-1 text-xs">
+              {/* Issues Found — every checkpoint marked NOT OK, each with its own recommendation */}
+              <div className={`rounded-xl p-3.5 shadow-2xs border ${notOkIssues.length ? 'bg-rose-50/70 border-rose-300' : 'bg-emerald-50/70 border-emerald-300'}`}>
+                <div className="flex items-center gap-2 mb-2">
+                  {notOkIssues.length ? <AlertTriangle className="w-4 h-4 text-rose-600" /> : <CheckCircle2 className="w-4 h-4 text-emerald-600" />}
+                  <span className="text-[11px] font-black uppercase tracking-wide text-slate-800">
+                    {notOkIssues.length
+                      ? `${notOkIssues.length} Issue${notOkIssues.length > 1 ? 's' : ''} Found (Not OK)`
+                      : 'No Issues — All Checkpoints OK'}
+                  </span>
+                </div>
+                {notOkIssues.length > 0 && (
+                  <div className="space-y-2">
+                    {notOkIssues.map(issue => (
+                      <div key={`${issue.rowId}-${issue.checkpointId}`} className="bg-white border border-rose-200 rounded-lg p-2">
+                        <div className="flex items-center justify-between gap-2 mb-1">
+                          <span className="text-[11px] font-bold text-slate-800">
+                            <span className="text-indigo-800">[{issueEquipmentLabel(issue)}]</span> {issue.checkpointLabel}
+                            <span className="ml-1.5 text-[9px] font-black text-rose-700 bg-rose-100 px-1.5 py-0.5 rounded">NOT OK</span>
+                          </span>
+                          {userRole === 'Admin' && (
+                            <button
+                              type="button"
+                              onClick={() => saveRecommendationDefault(issue.checkpointId, issue.recommendation)}
+                              disabled={!issue.recommendation}
+                              title="Save this as the default recommendation for this check on all future reports"
+                              className="shrink-0 flex items-center gap-1 text-[10px] font-bold text-emerald-700 hover:text-emerald-900 disabled:opacity-40"
+                            >
+                              <Check className="w-3.5 h-3.5" />
+                              <span className="hidden sm:inline">Apply to all</span>
+                            </button>
+                          )}
+                        </div>
+                        <input
+                          type="text"
+                          value={issue.recommendation}
+                          onChange={e => setIssueRecommendation(issue.rowId, issue.checkpointId, e.target.value)}
+                          placeholder="Recommendation for this issue…"
+                          className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-medium focus:ring-2 focus:ring-amber-500 focus:outline-none"
+                        />
+                      </div>
+                    ))}
+                    <p className="text-[10px] text-slate-500 italic">
+                      These lines fill the Recommendations box automatically. Editing that box by hand
+                      switches auto-fill off.
+                    </p>
+                  </div>
+                )}
+              </div>
+
               <div className="bg-amber-50/80 border border-amber-300 rounded-xl p-3.5 space-y-3.5 shadow-2xs">
                 <div>
                   <label className="block text-[11px] font-bold text-slate-700 uppercase mb-1">
@@ -1306,10 +1421,13 @@ export default function CertificateGeneratorPage() {
                   <textarea
                     rows={3}
                     value={reportForm.recommendations}
-                    onChange={e => setReportForm(prev => ({ ...prev, recommendations: e.target.value }))}
+                    onChange={e => setReportForm(prev => ({ ...prev, recommendations: e.target.value, autoSummary: false }))}
                     className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs font-medium focus:ring-2 focus:ring-amber-500 focus:outline-none"
                     placeholder="Enter recommendations..."
                   />
+                  {reportForm.autoSummary && notOkIssues.length > 0 && (
+                    <p className="text-[10px] text-emerald-700 font-semibold mt-1">Auto-filled from the {notOkIssues.length} issue(s) above.</p>
+                  )}
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">

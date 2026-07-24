@@ -224,6 +224,62 @@ export function nextSequenceForType(typeId, serviceReportConfig, reports = []) {
   return `${start.letters}${maxNum + 1}`;
 }
 
+/**
+ * Admin-configured default recommendation for a given checkpoint column, e.g. "Replace missing
+ * safety pin" for the safetyPin checkpoint. Empty string when none is set. Stored per report type
+ * under report_types[TYPE].recommendation_library keyed by column id.
+ */
+export function getRecommendationDefault(typeId, serviceReportConfig, checkpointId) {
+  const type = getReportType(typeId);
+  const lib = serviceReportConfig?.report_types?.[type.id]?.recommendation_library || {};
+  return lib[checkpointId] || '';
+}
+
+/**
+ * Collects the issues on a report: every checkpoint currently marked NOT OK, across all rows,
+ * with the identifying label and the recommendation captured for it. Drives the auto-composed
+ * observation summary and the issues panel.
+ */
+export function collectNotOkIssues(items = [], columns = []) {
+  const checkpoints = columns.filter(c => c.type === COLUMN_TYPES.CHECKPOINT);
+  const issues = [];
+  items.forEach((row, idx) => {
+    checkpoints.forEach(cp => {
+      if ((row[cp.id] || CHECKPOINT_OK) === CHECKPOINT_NOT_OK) {
+        issues.push({
+          rowId: row.id,
+          rowIndex: idx,
+          srNo: idx + 1,
+          checkpointId: cp.id,
+          checkpointLabel: cp.label,
+          clientIdNo: row.clientIdNo || '',
+          location: row.location || '',
+          itemName: row.itemName || '',
+          recommendation: row.recommendations?.[cp.id] || ''
+        });
+      }
+    });
+  });
+  return issues;
+}
+
+/** Human label for an issue's equipment: prefers Client ID, falls back to Sr No / location. */
+export function issueEquipmentLabel(issue) {
+  return issue.clientIdNo || issue.location || `Sr ${issue.srNo}`;
+}
+
+/** Composes the observation/recommendation summary text from the NOT OK issues (item 4). */
+export function composeIssueSummary(issues = []) {
+  if (!issues.length) return '';
+  return issues
+    .map(i => {
+      const who = issueEquipmentLabel(i);
+      const rec = i.recommendation ? ` — ${i.recommendation}` : '';
+      return `• [${who}] ${i.checkpointLabel}: NOT OK${rec}`;
+    })
+    .join('\n');
+}
+
 /** Builds a blank row for a module, with every checkpoint defaulted to OK. */
 export function createEmptyRow(typeId, serviceReportConfig = {}, srNo = 1) {
   const row = {

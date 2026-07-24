@@ -1,5 +1,5 @@
 import React, { useState, Suspense, lazy } from 'react';
-import { Routes, Route, useLocation } from 'react-router-dom';
+import { Routes, Route, useLocation, useParams } from 'react-router-dom';
 import { useAuth } from './context/AuthContext';
 import { DocSettingsProvider } from './context/DocSettingsContext';
 import Navbar from './components/Navbar';
@@ -14,6 +14,13 @@ const AdminDashboard = lazy(() => import('./pages/AdminDashboard'));
 const CertificateGeneratorPage = lazy(() => import('./pages/CertificateGeneratorPage'));
 const CertificateComplianceGeneratorPage = lazy(() => import('./pages/CertificateComplianceGeneratorPage'));
 const DocSettingsPage = lazy(() => import('./pages/DocSettingsPage'));
+
+// Keyed so switching report type (or new-vs-edit) remounts the page with fresh state, since
+// React Router otherwise reuses the same instance when only the URL params change.
+function ServiceReportRoute() {
+  const { typeRoute, reportId } = useParams();
+  return <CertificateGeneratorPage key={`${typeRoute || 'certificate'}:${reportId || 'new'}`} />;
+}
 
 function RouteLoadingFallback() {
   return (
@@ -43,7 +50,7 @@ export default function App() {
   // Determine active role & view based on whether impersonating or switcher
   const activeRole = realUser?.Role || user?.Role;
   const isViewingAdmin = !impersonatedStaff && activeRole === 'Admin' && (currentView === 'admin' || currentView === 'default');
-  const isCertificatePage = location.pathname.startsWith('/certificate/') || location.pathname.startsWith('/certificate-compliance/');
+  const isCertificatePage = location.pathname.startsWith('/certificate/') || location.pathname.startsWith('/certificate-compliance/') || location.pathname.startsWith('/service-report/');
   const isSettingsPage = location.pathname.startsWith('/settings/');
 
   return (
@@ -87,6 +94,10 @@ export default function App() {
         <main className={(isCertificatePage || isSettingsPage) ? 'flex-1' : 'flex-1 pb-16'}>
           <Suspense fallback={<RouteLoadingFallback />}>
             <Routes>
+              {/* Typed service-report routes, one URL per report module */}
+              <Route path="/service-report/:typeRoute/new" element={<ServiceReportRoute />} />
+              <Route path="/service-report/:typeRoute/:reportId" element={<ServiceReportRoute />} />
+              {/* Legacy fire-extinguisher aliases, kept so existing links keep working */}
               <Route path="/certificate/new" element={<CertificateGeneratorPage />} />
               <Route path="/certificate/:reportId" element={<CertificateGeneratorPage />} />
               <Route path="/certificate-compliance/new" element={<CertificateComplianceGeneratorPage />} />

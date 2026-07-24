@@ -4,11 +4,16 @@ import { useAuth } from '../context/AuthContext';
 import { useDocSettings } from '../context/DocSettingsContext';
 import { formatDateDDMMYYYY } from '../utils/dateUtils';
 import EquipmentPreviewTable from '../components/servicereport/EquipmentPreviewTable';
+import EquipmentEditorTable from '../components/servicereport/EquipmentEditorTable';
 import {
   resolveColumns,
   resolveNumbering,
   nextSequenceForType,
   buildReportId,
+  createEmptyRow,
+  getReportType,
+  getReportTypeByRoute,
+  REPORT_TYPE_LIST,
   DEFAULT_REPORT_TYPE,
   TABLE_SCHEMA_LEGACY,
   TABLE_SCHEMA_CURRENT
@@ -165,9 +170,13 @@ async function fetchAsBase64(...urls) {
 }
 
 export default function CertificateGeneratorPage() {
-  const { reportId } = useParams();
+  const { reportId, typeRoute } = useParams();
   const navigate = useNavigate();
   const { user, token } = useAuth();
+
+  // Report module for this screen, from the URL (/service-report/:typeRoute/...). Legacy
+  // /certificate/* routes carry no typeRoute and fall back to Fire Extinguisher.
+  const routedReportType = getReportTypeByRoute(typeRoute)?.id || DEFAULT_REPORT_TYPE;
 
   const userRole = user?.Role === 'Admin' ? 'Admin' : 'Staff';
   const currentStaffName = user?.Name || (userRole === 'Admin' ? 'Admin' : 'Technician');
@@ -239,12 +248,15 @@ export default function CertificateGeneratorPage() {
   };
 
   // Form State
-  const [reportForm, setReportForm] = useState({
-    certPrefix: 'Expert/',
-    certPeriod: '26-27',
-    certSequence: 'SR310',
-    Report_ID: 'Expert/26-27/SR310',
-    title: 'INSPECTION REPORT FOR FIRE EXTINGUISHER',
+  const [reportForm, setReportForm] = useState(() => {
+    const type = getReportType(routedReportType);
+    const numbering = type.numbering || { prefix: 'Expert/', period: '26-27', sequence: 'SR310' };
+    return {
+    certPrefix: numbering.prefix,
+    certPeriod: numbering.period,
+    certSequence: numbering.sequence,
+    Report_ID: buildReportId(numbering),
+    title: type.title,
     customerName: '',
     address: '',
     gstin: '',
@@ -266,11 +278,13 @@ export default function CertificateGeneratorPage() {
     fieldObservations: 'All fire safety installations inspected on-site. Extinguishers hydro-tested, pressure checked, and in compliance.',
     recommendations: 'Recommended periodic quarterly check of pressure gauges and emergency exit signage functionality.',
     customColumns: [], // Array of extra custom columns: [{ id: 'col-1', label: 'Make' }]
-    itemsList: DEFAULT_CLIENT_EQUIPMENT_TEMPLATE,
-    reportType: DEFAULT_REPORT_TYPE,
+    // Fire Extinguisher keeps its sample rows; other modules start with an empty table.
+    itemsList: routedReportType === DEFAULT_REPORT_TYPE ? DEFAULT_CLIENT_EQUIPMENT_TEMPLATE : [],
+    reportType: routedReportType,
     // New reports print through the schema-driven table. Reports saved before this field existed
     // stay on TABLE_SCHEMA_LEGACY so a reprint matches the PDF the customer already has.
     tableSchemaVersion: TABLE_SCHEMA_CURRENT
+    };
   });
 
   // Columns the schema-driven preview renders. Legacy reports ignore this and use the frozen table.
@@ -445,47 +459,65 @@ export default function CertificateGeneratorPage() {
     }));
   };
 
-  // Toggle Checkpoint Value (OK <-> NOT OK) with 1 Click
-  const toggleCheckpoint = (rowIndex, checkpointKey) => {
-    setReportForm(prev => {
-      const updatedItems = prev.itemsList.map((row, idx) => {
-        if (idx === rowIndex) {
-          const currentVal = row[checkpointKey] || 'OK';
-          const nextVal = currentVal === 'OK' ? 'NOT OK' : 'OK';
-          return { ...row, [checkpointKey]: nextVal };
-        }
-        return row;
-      });
-      return { ...prev, itemsList: updatedItems };
-    });
-  };
-
-  // Add Row to Pre-populated Table
-  const handleAddEquipmentRow = () => {
-    const nextNo = (reportForm.itemsList || []).length + 1;
-    const newRow = {
-      id: 'eq-' + Date.now(),
-      srNo: nextNo,
-      location: 'Ground Floor',
-      clientIdNo: `CYL-${new Date().getFullYear()}-${String(nextNo).padStart(3, '0')}`,
-      itemName: 'DCP ABC Type Fire Extinguisher (6 Kg)',
-      mfgYear: String(new Date().getFullYear()),
-      refillingDate: reportForm.serviceDate,
-      nextRefillingDate: reportForm.nextServiceDue,
-      hptDate: reportForm.serviceDate,
-      hptDueDate: new Date(new Date().setFullYear(new Date().getFullYear() + 3)).toISOString().split('T')[0],
-      bodyValve: 'OK',
-      valve: 'OK',
-      safetyPin: 'OK',
-      pressureWeight: 'OK',
-      hoseHorn: 'OK',
-      seal: 'OK',
-      remarks: 'Satisfactory'
-    };
+  // Toggle a checkpoint OK <-> NOT OK for one row, addressed by row id (not list position, so a
+  // toggle lands on the right row even while the table is filtered by search).
+  const toggleCheckpoint = (rowId, checkpointKey) => {
     setReportForm(prev => ({
       ...prev,
-      itemsList: [...(prev.itemsList || []), newRow]
+      itemsList: prev.itemsList.map(row =>
+        row.id === rowId
+          ? { ...row, [checkpointKey]: (row[checkpointKey] || 'OK') === 'OK' ? 'NOT OK' : 'OK' }
+          : row
+      )
     }));
+  };
+
+  // Edit any plain data cell (text / date / number), addressed by row id.
+  const updateItemField = (rowId, field, val) => {
+    setReportForm(prev => ({
+      ...prev,
+      itemsList: prev.itemsList.map(row => row.id === rowId ? { ...row, [field]: val } : row)
+    }));
+  };
+
+  // Edit a per-client custom-column value, addressed by row id.
+  const updateItemCustomValue = (rowId, colId, val) => {
+    setReportForm(prev => ({
+      ...prev,
+      itemsList: prev.itemsList.map(row =>
+        row.id === rowId
+          ? { ...row, customValues: { ...(row.customValues || {}), [colId]: val } }
+          : row
+      )
+    }));
+  };
+
+  const deleteItemRow = (rowId) => {
+    setReportForm(prev => ({
+      ...prev,
+      itemsList: (prev.itemsList || []).filter(row => row.id !== rowId).map((row, i) => ({ ...row, srNo: i + 1 }))
+    }));
+  };
+
+  // Add a blank row shaped for the active report type (every checkpoint defaults to OK). For fire
+  // extinguishers, pre-fill the common dates and an auto client id, mirroring the old behaviour.
+  const handleAddEquipmentRow = () => {
+    const nextNo = (reportForm.itemsList || []).length + 1;
+    const row = createEmptyRow(reportForm.reportType, srCfg, nextNo);
+    if (reportForm.reportType === DEFAULT_REPORT_TYPE) {
+      Object.assign(row, {
+        location: 'Ground Floor',
+        clientIdNo: `CYL-${new Date().getFullYear()}-${String(nextNo).padStart(3, '0')}`,
+        itemName: 'DCP ABC Type Fire Extinguisher (6 Kg)',
+        mfgYear: String(new Date().getFullYear()),
+        refillingDate: reportForm.serviceDate,
+        nextRefillingDate: reportForm.nextServiceDue,
+        hptDate: reportForm.serviceDate,
+        hptDueDate: new Date(new Date().setFullYear(new Date().getFullYear() + 3)).toISOString().split('T')[0],
+        remarks: 'Satisfactory'
+      });
+    }
+    setReportForm(prev => ({ ...prev, itemsList: [...(prev.itemsList || []), row] }));
     setActiveMobileTab('preview');
   };
 
@@ -676,9 +708,29 @@ export default function CertificateGeneratorPage() {
                 {reportForm.Status}
               </span>
             </h3>
-            <p className="text-xs text-slate-500 font-medium">Auto-Prepopulated Inventory &amp; One-Click Inspection Engine</p>
+            <p className="text-xs text-slate-500 font-medium">{getReportType(reportForm.reportType).label}</p>
           </div>
         </div>
+
+        {/* Report-type switcher — only when creating a new report; each pill is its own route */}
+        {!reportId && (
+          <div className="flex flex-wrap items-center gap-1.5 justify-end">
+            {REPORT_TYPE_LIST.map(t => (
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => { if (t.id !== reportForm.reportType) navigate(`/service-report/${t.route}/new`); }}
+                className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition ${
+                  t.id === reportForm.reportType
+                    ? 'bg-indigo-600 text-white shadow-sm'
+                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                }`}
+              >
+                {t.shortLabel}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* 3-Step Wizard Navigation Stepper Bar */}
@@ -1020,320 +1072,17 @@ export default function CertificateGeneratorPage() {
                     </span>
                   </div>
 
-                  <div className="overflow-x-auto max-h-[55vh]">
-                    <table className="w-full text-left text-[11px] border-collapse">
-                      <thead>
-                        <tr className="bg-amber-100 text-amber-950 font-black border-b border-slate-300 text-center">
-                          <th className="p-2 w-8">Sr.</th>
-                          <th className="p-2 text-left min-w-[140px]">Location</th>
-                          <th className="p-2 min-w-[100px]">Client ID No</th>
-                          <th className="p-2 text-left min-w-[180px]">Fire Ext. Description</th>
-                          <th className="p-2 w-16">MFG</th>
-                          <th className="p-2 min-w-[100px]">Refilling Dt</th>
-                          <th className="p-2 min-w-[100px]">Next Refill Dt</th>
-                          <th className="p-2 min-w-[100px]">HPT Dt</th>
-                          <th className="p-2 min-w-[100px]">HPT Due Dt</th>
-                          <th className="p-2 w-16">Body</th>
-                          <th className="p-2 w-16">Valve</th>
-                          <th className="p-2 w-16">Safety Pin</th>
-                          <th className="p-2 w-16">Pressure / Wt</th>
-                          <th className="p-2 w-16">Hose &amp; Horn</th>
-                          <th className="p-2 w-16">Seal</th>
-                          {(reportForm.customColumns || []).map(col => (
-                            <th key={col.id} className="p-2 bg-indigo-100 text-indigo-950 border-l border-indigo-200 min-w-[90px]">
-                              <div className="flex items-center justify-between gap-1">
-                                <span>{col.label}</span>
-                                <button type="button" onClick={() => handleRemoveCustomColumn(col.id)} className="text-rose-600 hover:font-bold">×</button>
-                              </div>
-                            </th>
-                          ))}
-                          <th className="p-2 text-left min-w-[140px]">Remarks</th>
-                          <th className="p-2 w-8"></th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100">
-                        {(reportForm.itemsList || [])
-                          .filter(it => {
-                            if (!tableSearchQuery.trim()) return true;
-                            const q = tableSearchQuery.toLowerCase();
-                            return (
-                              (it.clientIdNo || '').toLowerCase().includes(q) ||
-                              (it.itemName || '').toLowerCase().includes(q) ||
-                              (it.location || '').toLowerCase().includes(q) ||
-                              (it.remarks || '').toLowerCase().includes(q)
-                            );
-                          })
-                          .map((it, idx) => (
-                            <tr key={it.id || idx} className="hover:bg-amber-50/70 transition text-center font-medium">
-                              <td className="p-2 font-bold text-slate-800">{idx + 1}</td>
-
-                              {/* Location */}
-                              <td className="p-2 text-left">
-                                <input
-                                  type="text"
-                                  value={it.location}
-                                  onChange={e => {
-                                    const val = e.target.value;
-                                    setReportForm(prev => ({
-                                      ...prev,
-                                      itemsList: prev.itemsList.map((row, i) => i === idx ? { ...row, location: val } : row)
-                                    }));
-                                  }}
-                                  className="w-full bg-transparent border-b border-transparent hover:border-slate-300 focus:border-amber-500 focus:outline-none font-semibold text-slate-800"
-                                />
-                              </td>
-
-                              {/* Client ID No */}
-                              <td className="p-2 font-extrabold text-indigo-950 bg-slate-50/50">
-                                <input
-                                  type="text"
-                                  value={it.clientIdNo}
-                                  onChange={e => {
-                                    const val = e.target.value;
-                                    setReportForm(prev => ({
-                                      ...prev,
-                                      itemsList: prev.itemsList.map((row, i) => i === idx ? { ...row, clientIdNo: val } : row)
-                                    }));
-                                  }}
-                                  className="w-full text-center bg-transparent border-b border-transparent hover:border-slate-300 focus:border-amber-500 focus:outline-none font-extrabold text-indigo-950"
-                                />
-                              </td>
-
-                              {/* Item Description */}
-                              <td className="p-2 text-left">
-                                <input
-                                  type="text"
-                                  value={it.itemName}
-                                  onChange={e => {
-                                    const val = e.target.value;
-                                    setReportForm(prev => ({
-                                      ...prev,
-                                      itemsList: prev.itemsList.map((row, i) => i === idx ? { ...row, itemName: val } : row)
-                                    }));
-                                  }}
-                                  className="w-full bg-transparent border-b border-transparent hover:border-slate-300 focus:border-amber-500 focus:outline-none font-bold text-slate-900"
-                                />
-                              </td>
-
-                              {/* MFG */}
-                              <td className="p-2">
-                                <input
-                                  type="text"
-                                  value={it.mfgYear}
-                                  onChange={e => {
-                                    const val = e.target.value;
-                                    setReportForm(prev => ({
-                                      ...prev,
-                                      itemsList: prev.itemsList.map((row, i) => i === idx ? { ...row, mfgYear: val } : row)
-                                    }));
-                                  }}
-                                  className="w-full text-center bg-transparent border-b border-transparent hover:border-slate-300 focus:border-amber-500 focus:outline-none text-[10px]"
-                                />
-                              </td>
-
-                              {/* Refilling Dt */}
-                              <td className="p-2">
-                                <input
-                                  type="date"
-                                  value={it.refillingDate}
-                                  onChange={e => {
-                                    const val = e.target.value;
-                                    setReportForm(prev => ({
-                                      ...prev,
-                                      itemsList: prev.itemsList.map((row, i) => i === idx ? { ...row, refillingDate: val } : row)
-                                    }));
-                                  }}
-                                  className="w-full text-center bg-transparent border-b border-transparent hover:border-slate-300 focus:border-amber-500 focus:outline-none text-[10px]"
-                                />
-                              </td>
-
-                              {/* Next Refill Dt */}
-                              <td className="p-2 font-bold text-rose-700">
-                                <input
-                                  type="date"
-                                  value={it.nextRefillingDate}
-                                  onChange={e => {
-                                    const val = e.target.value;
-                                    setReportForm(prev => ({
-                                      ...prev,
-                                      itemsList: prev.itemsList.map((row, i) => i === idx ? { ...row, nextRefillingDate: val } : row)
-                                    }));
-                                  }}
-                                  className="w-full text-center bg-transparent border-b border-transparent hover:border-slate-300 focus:border-amber-500 focus:outline-none font-bold text-rose-700 text-[10px]"
-                                />
-                              </td>
-
-                              {/* HPT Dt */}
-                              <td className="p-2">
-                                <input
-                                  type="date"
-                                  value={it.hptDate}
-                                  onChange={e => {
-                                    const val = e.target.value;
-                                    setReportForm(prev => ({
-                                      ...prev,
-                                      itemsList: prev.itemsList.map((row, i) => i === idx ? { ...row, hptDate: val } : row)
-                                    }));
-                                  }}
-                                  className="w-full text-center bg-transparent border-b border-transparent hover:border-slate-300 focus:border-amber-500 focus:outline-none text-[10px]"
-                                />
-                              </td>
-
-                              {/* HPT Due Dt */}
-                              <td className="p-2 font-bold text-indigo-900">
-                                <input
-                                  type="date"
-                                  value={it.hptDueDate}
-                                  onChange={e => {
-                                    const val = e.target.value;
-                                    setReportForm(prev => ({
-                                      ...prev,
-                                      itemsList: prev.itemsList.map((row, i) => i === idx ? { ...row, hptDueDate: val } : row)
-                                    }));
-                                  }}
-                                  className="w-full text-center bg-transparent border-b border-transparent hover:border-slate-300 focus:border-amber-500 focus:outline-none font-bold text-indigo-900 text-[10px]"
-                                />
-                              </td>
-
-                              {/* 6 ONE-CLICK TOGGLE CHECKPOINTS (DEFAULT: OK in Green) */}
-                              <td className="p-1">
-                                <button
-                                  type="button"
-                                  onClick={() => toggleCheckpoint(idx, 'bodyValve')}
-                                  className={`w-full py-1 rounded text-[10px] font-black transition cursor-pointer ${
-                                    (it.bodyValve || 'OK') === 'OK'
-                                      ? 'bg-emerald-100 text-emerald-800 border border-emerald-300 hover:bg-emerald-200'
-                                      : 'bg-rose-100 text-rose-800 border border-rose-300 hover:bg-rose-200'
-                                  }`}
-                                >
-                                  {it.bodyValve || 'OK'}
-                                </button>
-                              </td>
-
-                              <td className="p-1">
-                                <button
-                                  type="button"
-                                  onClick={() => toggleCheckpoint(idx, 'valve')}
-                                  className={`w-full py-1 rounded text-[10px] font-black transition cursor-pointer ${
-                                    (it.valve || 'OK') === 'OK'
-                                      ? 'bg-emerald-100 text-emerald-800 border border-emerald-300 hover:bg-emerald-200'
-                                      : 'bg-rose-100 text-rose-800 border border-rose-300 hover:bg-rose-200'
-                                  }`}
-                                >
-                                  {it.valve || 'OK'}
-                                </button>
-                              </td>
-
-                              <td className="p-1">
-                                <button
-                                  type="button"
-                                  onClick={() => toggleCheckpoint(idx, 'safetyPin')}
-                                  className={`w-full py-1 rounded text-[10px] font-black transition cursor-pointer ${
-                                    (it.safetyPin || 'OK') === 'OK'
-                                      ? 'bg-emerald-100 text-emerald-800 border border-emerald-300 hover:bg-emerald-200'
-                                      : 'bg-rose-100 text-rose-800 border border-rose-300 hover:bg-rose-200'
-                                  }`}
-                                >
-                                  {it.safetyPin || 'OK'}
-                                </button>
-                              </td>
-
-                              <td className="p-1">
-                                <button
-                                  type="button"
-                                  onClick={() => toggleCheckpoint(idx, 'pressureWeight')}
-                                  className={`w-full py-1 rounded text-[10px] font-black transition cursor-pointer ${
-                                    (it.pressureWeight || 'OK') === 'OK'
-                                      ? 'bg-emerald-100 text-emerald-800 border border-emerald-300 hover:bg-emerald-200'
-                                      : 'bg-rose-100 text-rose-800 border border-rose-300 hover:bg-rose-200'
-                                  }`}
-                                >
-                                  {it.pressureWeight || 'OK'}
-                                </button>
-                              </td>
-
-                              <td className="p-1">
-                                <button
-                                  type="button"
-                                  onClick={() => toggleCheckpoint(idx, 'hoseHorn')}
-                                  className={`w-full py-1 rounded text-[10px] font-black transition cursor-pointer ${
-                                    (it.hoseHorn || 'OK') === 'OK'
-                                      ? 'bg-emerald-100 text-emerald-800 border border-emerald-300 hover:bg-emerald-200'
-                                      : 'bg-rose-100 text-rose-800 border border-rose-300 hover:bg-rose-200'
-                                  }`}
-                                >
-                                  {it.hoseHorn || 'OK'}
-                                </button>
-                              </td>
-
-                              <td className="p-1">
-                                <button
-                                  type="button"
-                                  onClick={() => toggleCheckpoint(idx, 'seal')}
-                                  className={`w-full py-1 rounded text-[10px] font-black transition cursor-pointer ${
-                                    (it.seal || 'OK') === 'OK'
-                                      ? 'bg-emerald-100 text-emerald-800 border border-emerald-300 hover:bg-emerald-200'
-                                      : 'bg-rose-100 text-rose-800 border border-rose-300 hover:bg-rose-200'
-                                  }`}
-                                >
-                                  {it.seal || 'OK'}
-                                </button>
-                              </td>
-
-                              {/* Custom Columns Cells */}
-                              {(reportForm.customColumns || []).map(col => (
-                                <td key={col.id} className="p-1 bg-indigo-50/50 border-l border-indigo-100">
-                                  <input
-                                    type="text"
-                                    value={it.customValues?.[col.id] || ''}
-                                    onChange={e => {
-                                      const val = e.target.value;
-                                      setReportForm(prev => ({
-                                        ...prev,
-                                        itemsList: prev.itemsList.map((row, i) => i === idx ? { ...row, customValues: { ...(row.customValues || {}), [col.id]: val } } : row)
-                                      }));
-                                    }}
-                                    className="w-full text-center bg-transparent border-b border-transparent focus:border-indigo-500 focus:outline-none font-bold text-indigo-900"
-                                  />
-                                </td>
-                              ))}
-
-                              {/* Remarks */}
-                              <td className="p-2 text-left">
-                                <input
-                                  type="text"
-                                  value={it.remarks || 'Satisfactory'}
-                                  onChange={e => {
-                                    const val = e.target.value;
-                                    setReportForm(prev => ({
-                                      ...prev,
-                                      itemsList: prev.itemsList.map((row, i) => i === idx ? { ...row, remarks: val } : row)
-                                    }));
-                                  }}
-                                  className="w-full bg-transparent border-b border-transparent hover:border-slate-300 focus:border-amber-500 focus:outline-none text-slate-700 italic"
-                                />
-                              </td>
-
-                              {/* Delete Row Action */}
-                              <td className="p-2">
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setReportForm(prev => ({
-                                      ...prev,
-                                      itemsList: (prev.itemsList || []).filter((_, i) => i !== idx).map((row, i) => ({ ...row, srNo: i + 1 }))
-                                    }));
-                                  }}
-                                  className="p-1 text-slate-300 hover:text-rose-600 transition"
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                </button>
-                              </td>
-                            </tr>
-                          ))}
-                      </tbody>
-                    </table>
-                  </div>
+                  <EquipmentEditorTable
+                    items={reportForm.itemsList || []}
+                    columns={previewColumns}
+                    customColumns={reportForm.customColumns || []}
+                    searchQuery={tableSearchQuery}
+                    onCellChange={updateItemField}
+                    onToggleCheckpoint={toggleCheckpoint}
+                    onCustomValueChange={updateItemCustomValue}
+                    onRemoveCustomColumn={handleRemoveCustomColumn}
+                    onDeleteRow={deleteItemRow}
+                  />
                 </div>
 
                 {/* Step 2 Navigation Action */}

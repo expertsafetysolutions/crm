@@ -1737,7 +1737,7 @@ export default function AdminDashboard() {
       setShowRemarkInputs(false);
       loadAdminData();
     } catch (err) {
-      alert(err.message);
+      alert(err instanceof TypeError ? "Couldn't reach the server. Check your internet connection and try again in a moment." : err.message);
     } finally {
       setSubmittingRemark(false);
     }

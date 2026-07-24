@@ -281,8 +281,15 @@ app.get('/api/health', (req, res) => {
 
 const attendanceService = require('./services/attendanceService');
 
-// Initiate MongoDB Atlas connection immediately for serverless environments
-sheetsService.connect(process.env.MONGO_URI);
+// Initiate MongoDB Atlas connection immediately for serverless environments.
+// Must not be left as an unhandled rejection — a connection failure here (e.g.
+// Atlas IP whitelist) would otherwise crash the whole serverless process before
+// Express can respond, turning a normal DB outage into a raw client-side
+// "Failed to fetch" instead of a proper error response. Per-request calls in
+// sheetsService.js each await connect() again and will retry cleanly.
+sheetsService.connect(process.env.MONGO_URI).catch(err => {
+  console.error('Initial MongoDB connection attempt failed (will retry on next request):', err.message);
+});
 
 if (require.main === module) {
   const uri = process.env.MONGO_URI;
@@ -305,6 +312,8 @@ if (require.main === module) {
       }
     }, 60 * 1000 * 5); // Check every 5 mins
   });
+}).catch(err => {
+  console.error('Could not connect to MongoDB — server not started:', err.message);
 });
 }
 

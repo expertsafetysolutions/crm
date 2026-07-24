@@ -2,7 +2,11 @@ const mongoose = require('mongoose');
 const fs = require('fs');
 const path = require('path');
 
-const uri = 'mongodb+srv://vortexxx421_db_user:xGPUPuzdzXilB3Ix@expertcrm.wpxo9jh.mongodb.net/?appName=ExpertCRM';
+const uri = process.env.MONGO_URI;
+if (!uri) {
+  console.error('MONGO_URI is not set. Set it in the environment before running this migration.');
+  process.exit(1);
+}
 const dataFile = path.join(__dirname, 'data', 'mock_sheets.json');
 
 const createModel = (name) => {

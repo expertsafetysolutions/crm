@@ -32,7 +32,10 @@ class MongoService {
   }
 
   async connect(uri) {
-    const targetUri = uri || process.env.MONGO_URI || 'mongodb+srv://vortexxx421_db_user:xGPUPuzdzXilB3Ix@expertcrm.wpxo9jh.mongodb.net/?appName=ExpertCRM';
+    const targetUri = uri || process.env.MONGO_URI;
+    if (!targetUri) {
+      throw new Error('MONGO_URI is not set. Configure it in the environment (Vercel env vars / server/.env).');
+    }
     if (mongoose.connection.readyState === 1) {
       this.isConnected = true;
       return;

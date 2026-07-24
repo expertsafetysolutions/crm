@@ -285,7 +285,7 @@ const attendanceService = require('./services/attendanceService');
 sheetsService.connect(process.env.MONGO_URI);
 
 if (require.main === module) {
-  const uri = process.env.MONGO_URI || 'mongodb+srv://vortexxx421_db_user:xGPUPuzdzXilB3Ix@expertcrm.wpxo9jh.mongodb.net/?appName=ExpertCRM';
+  const uri = process.env.MONGO_URI;
   sheetsService.connect(uri).then(() => {
     app.listen(PORT, () => {
       console.log(`Expert Safety Solutions Server running on port ${PORT}`);

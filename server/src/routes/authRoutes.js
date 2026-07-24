@@ -5,7 +5,10 @@ const sheetsService = require('../services/sheetsService');
 const { verifyStaffPassword, validatePasswordPolicy } = require('../utils/passwordUtils');
 
 const router = express.Router();
-const JWT_SECRET = process.env.JWT_SECRET || 'expert_safety_secret_key_2026';
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  throw new Error('JWT_SECRET is not set. Configure it in the environment (Vercel env vars / server/.env) — the app will not sign or verify logins without it.');
+}
 
 // POST /api/auth/login
 router.post('/login', async (req, res) => {

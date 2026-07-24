@@ -1,5 +1,5 @@
 import React from 'react';
-import { Trash2 } from 'lucide-react';
+import { Trash2, Check } from 'lucide-react';
 import { COLUMN_TYPES, CHECKPOINT_OK, CHECKPOINT_NOT_OK } from '../../utils/reportTypeSchemas';
 
 /**
@@ -34,10 +34,11 @@ function CheckpointCell({ col, row, onToggle }) {
   const ok = (row[col.id] || CHECKPOINT_OK) === CHECKPOINT_OK;
   return (
     <td className="p-1">
+      {/* min-height keeps this an easy phone tap target */}
       <button
         type="button"
         onClick={() => onToggle(row.id, col.id)}
-        className={`w-full py-1 rounded text-[10px] font-black transition cursor-pointer ${
+        className={`w-full min-h-[36px] py-1.5 rounded-lg text-[10px] font-black transition cursor-pointer active:scale-95 ${
           ok
             ? 'bg-emerald-100 text-emerald-800 border border-emerald-300 hover:bg-emerald-200'
             : 'bg-rose-100 text-rose-800 border border-rose-300 hover:bg-rose-200'
@@ -56,6 +57,7 @@ export default function EquipmentEditorTable({
   searchQuery = '',
   onCellChange,
   onToggleCheckpoint,
+  onToggleServiced,
   onCustomValueChange,
   onRemoveCustomColumn,
   onDeleteRow
@@ -76,6 +78,7 @@ export default function EquipmentEditorTable({
         <thead>
           <tr className="bg-amber-100 text-amber-950 font-black border-b border-slate-300 text-center">
             <th className="p-2 w-8">Sr.</th>
+            <th className="p-2 w-10" title="Mark row as checked / serviced">✓</th>
             {columns.map(col => (
               <th
                 key={col.id}
@@ -97,8 +100,30 @@ export default function EquipmentEditorTable({
         </thead>
         <tbody className="divide-y divide-slate-100">
           {visibleItems.map((it, idx) => (
-            <tr key={it.id || idx} className="hover:bg-amber-50/70 transition text-center font-medium">
+            <tr
+              key={it.id || idx}
+              className={`transition text-center font-medium border-l-4 ${
+                it.serviced
+                  ? 'bg-emerald-50 border-emerald-400 hover:bg-emerald-100/70'
+                  : 'border-transparent hover:bg-amber-50/70'
+              }`}
+            >
               <td className="p-2 font-bold text-slate-800">{idx + 1}</td>
+              <td className="p-1">
+                {/* Per-row "checked / serviced" toggle — turns the row green (item 10) */}
+                <button
+                  type="button"
+                  onClick={() => onToggleServiced(it.id)}
+                  title={it.serviced ? 'Checked — tap to unmark' : 'Mark this row as checked'}
+                  className={`w-8 h-8 rounded-full flex items-center justify-center mx-auto transition active:scale-95 ${
+                    it.serviced
+                      ? 'bg-emerald-500 text-white shadow-sm'
+                      : 'bg-slate-100 text-slate-400 border border-slate-300 hover:bg-slate-200'
+                  }`}
+                >
+                  <Check className="w-4 h-4" />
+                </button>
+              </td>
               {columns.map(col =>
                 col.type === COLUMN_TYPES.CHECKPOINT ? (
                   <CheckpointCell key={col.id} col={col} row={it} onToggle={onToggleCheckpoint} />

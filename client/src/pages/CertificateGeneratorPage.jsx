@@ -497,7 +497,8 @@ export default function CertificateGeneratorPage() {
       itemsList: prev.itemsList.map(row => {
         if (row.id !== rowId) return row;
         const nextVal = (row[checkpointKey] || 'OK') === 'OK' ? 'NOT OK' : 'OK';
-        const next = { ...row, [checkpointKey]: nextVal };
+        // Interacting with a checkpoint counts as having reviewed the row (turns it green).
+        const next = { ...row, [checkpointKey]: nextVal, serviced: true };
         if (nextVal === 'NOT OK' && !row.recommendations?.[checkpointKey]) {
           const def = getRecommendationDefault(prev.reportType, srCfg, checkpointKey);
           if (def) next.recommendations = { ...(row.recommendations || {}), [checkpointKey]: def };
@@ -505,6 +506,35 @@ export default function CertificateGeneratorPage() {
         return next;
       })
     }));
+  };
+
+  // Mark a whole row as checked / serviced (or unmark it).
+  const toggleRowServiced = (rowId) => {
+    setReportForm(prev => ({
+      ...prev,
+      itemsList: prev.itemsList.map(row => row.id === rowId ? { ...row, serviced: !row.serviced } : row)
+    }));
+  };
+
+  // "System is healthy" bypass (item 9): set every checkpoint OK, clear per-row recommendations,
+  // and mark every row checked — one tap to report a clean inspection.
+  const markAllHealthy = () => {
+    const rowCount = (reportForm.itemsList || []).length;
+    if (!rowCount) {
+      alert('Add or load equipment first.');
+      return;
+    }
+    if (!window.confirm(`Mark all ${rowCount} item(s) as healthy? Every check will be set to OK and every row marked checked.`)) return;
+    const checkpointIds = previewColumns.filter(c => c.type === 'checkpoint').map(c => c.id);
+    setReportForm(prev => ({
+      ...prev,
+      itemsList: (prev.itemsList || []).map(row => {
+        const next = { ...row, serviced: true, recommendations: {} };
+        checkpointIds.forEach(id => { next[id] = 'OK'; });
+        return next;
+      })
+    }));
+    setActiveMobileTab('preview');
   };
 
   // Edit the recommendation text for one NOT OK issue (row + checkpoint).
@@ -1271,6 +1301,15 @@ export default function CertificateGeneratorPage() {
                     <FileSpreadsheet className="w-3.5 h-3.5" />
                     <span>{equipmentBusy === 'export' ? 'Exporting…' : 'Export CSV'}</span>
                   </button>
+                  <button
+                    type="button"
+                    onClick={markAllHealthy}
+                    className="ml-auto px-3 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg font-black text-xs flex items-center gap-1.5 shadow-sm transition"
+                    title="Mark every item OK and checked — report the whole system as healthy"
+                  >
+                    <ShieldCheck className="w-3.5 h-3.5" />
+                    <span>All Healthy</span>
+                  </button>
                   <input
                     ref={csvFileInputRef}
                     type="file"
@@ -1303,11 +1342,23 @@ export default function CertificateGeneratorPage() {
 
                 {/* Pre-populated Interactive Inspection Table */}
                 <div className="bg-white border border-slate-300 rounded-xl overflow-hidden shadow-2xs">
-                  <div className="px-3 py-2 bg-slate-100 border-b border-slate-200 font-extrabold text-slate-800 text-xs flex justify-between items-center">
-                    <span>Pre-loaded Client Equipment Table ({(reportForm.itemsList || []).length} Items)</span>
-                    <span className="text-[10px] text-emerald-800 font-bold bg-emerald-100 px-2 py-0.5 rounded">
-                      ✔ All checkpoints default to OK. Click any badge to toggle.
-                    </span>
+                  <div className="px-3 py-2 bg-slate-100 border-b border-slate-200 font-extrabold text-slate-800 text-xs flex flex-wrap justify-between items-center gap-2">
+                    <span>Equipment Table ({(reportForm.itemsList || []).length} Items)</span>
+                    {(() => {
+                      const total = (reportForm.itemsList || []).length;
+                      const done = (reportForm.itemsList || []).filter(r => r.serviced).length;
+                      const pct = total ? Math.round((done / total) * 100) : 0;
+                      return (
+                        <span className="flex items-center gap-2">
+                          <span className="w-24 h-2 bg-slate-200 rounded-full overflow-hidden">
+                            <span className="block h-full bg-emerald-500 transition-all" style={{ width: `${pct}%` }} />
+                          </span>
+                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${done === total && total > 0 ? 'text-emerald-800 bg-emerald-100' : 'text-slate-600 bg-slate-200'}`}>
+                            {done}/{total} checked
+                          </span>
+                        </span>
+                      );
+                    })()}
                   </div>
 
                   <EquipmentEditorTable
@@ -1317,6 +1368,7 @@ export default function CertificateGeneratorPage() {
                     searchQuery={tableSearchQuery}
                     onCellChange={updateItemField}
                     onToggleCheckpoint={toggleCheckpoint}
+                    onToggleServiced={toggleRowServiced}
                     onCustomValueChange={updateItemCustomValue}
                     onRemoveCustomColumn={handleRemoveCustomColumn}
                     onDeleteRow={deleteItemRow}

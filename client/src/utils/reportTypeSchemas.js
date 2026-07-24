@@ -10,6 +10,8 @@
  *   label      column heading, shown in the table, the PDF and the CSV export
  *   type       'text' | 'date' | 'number' | 'checkpoint'
  *   align      optional cell alignment: 'left' | 'center' (default 'center')
+ *   emphasis   optional semantic styling hint the renderer maps to classes, kept
+ *              non-visual here so admins can define columns without writing CSS
  *   legacyFlag optional path into the pre-schema docSettings toggles, so existing
  *              admin configuration keeps applying until it is migrated
  *
@@ -25,16 +27,31 @@ export const COLUMN_TYPES = {
   CHECKPOINT: 'checkpoint'
 };
 
+// Semantic styling hints. The renderer owns the actual classes.
+export const EMPHASIS = {
+  ID: 'id',
+  STRONG: 'strong',
+  DANGER: 'danger',
+  PRIMARY: 'primary',
+  MUTED: 'muted'
+};
+
+// Table-level schema version. v1 reports render through the frozen legacy table, which printed
+// a headerless `valve` value and so shifted every column to its right. New reports use the
+// schema-driven table, where headers and values come from one list and cannot drift apart.
+export const TABLE_SCHEMA_LEGACY = 1;
+export const TABLE_SCHEMA_CURRENT = 2;
+
 export const CHECKPOINT_OK = 'OK';
 export const CHECKPOINT_NOT_OK = 'NOT OK';
 
 // Columns common to every equipment-bearing module.
 const IDENTITY_COLUMNS = [
   { id: 'location', label: 'Location', type: COLUMN_TYPES.TEXT, align: 'left', legacyFlag: 'visible_columns.location' },
-  { id: 'clientIdNo', label: 'Client ID No', type: COLUMN_TYPES.TEXT, legacyFlag: 'visible_columns.client_id_no' }
+  { id: 'clientIdNo', label: 'Client ID No', type: COLUMN_TYPES.TEXT, emphasis: EMPHASIS.ID, legacyFlag: 'visible_columns.client_id_no' }
 ];
 
-const REMARKS_COLUMN = { id: 'remarks', label: 'Remarks', type: COLUMN_TYPES.TEXT, align: 'left' };
+const REMARKS_COLUMN = { id: 'remarks', label: 'Remarks', type: COLUMN_TYPES.TEXT, align: 'left', emphasis: EMPHASIS.MUTED };
 
 export const REPORT_TYPES = {
   FIRE_EXTINGUISHER: {
@@ -46,12 +63,12 @@ export const REPORT_TYPES = {
     // Mirrors the column order the module shipped with, so existing reports render unchanged.
     columns: [
       ...IDENTITY_COLUMNS,
-      { id: 'itemName', label: 'Fire Ext. Description', type: COLUMN_TYPES.TEXT, align: 'left' },
+      { id: 'itemName', label: 'Fire Ext. Description', type: COLUMN_TYPES.TEXT, align: 'left', emphasis: EMPHASIS.STRONG },
       { id: 'mfgYear', label: 'MFG', type: COLUMN_TYPES.TEXT, legacyFlag: 'visible_columns.mfg_year' },
       { id: 'refillingDate', label: 'Refilling Date', type: COLUMN_TYPES.DATE, legacyFlag: 'visible_columns.refill_date' },
-      { id: 'nextRefillingDate', label: 'Refilling Due Dt', type: COLUMN_TYPES.DATE, legacyFlag: 'visible_columns.next_refill_due' },
+      { id: 'nextRefillingDate', label: 'Refilling Due Dt', type: COLUMN_TYPES.DATE, emphasis: EMPHASIS.DANGER, legacyFlag: 'visible_columns.next_refill_due' },
       { id: 'hptDate', label: 'HP Testing Date', type: COLUMN_TYPES.DATE, legacyFlag: 'visible_columns.hpt_date' },
-      { id: 'hptDueDate', label: 'HP Testing Due Dt', type: COLUMN_TYPES.DATE, legacyFlag: 'visible_columns.hpt_due_date' },
+      { id: 'hptDueDate', label: 'HP Testing Due Dt', type: COLUMN_TYPES.DATE, emphasis: EMPHASIS.PRIMARY, legacyFlag: 'visible_columns.hpt_due_date' },
       { id: 'bodyValve', label: 'Body/Valve', type: COLUMN_TYPES.CHECKPOINT, legacyFlag: 'enabled_checkpoints.body_valve' },
       // Rendered as a value but had no header before the schema refactor, which shifted every
       // column to its right in the PDF. It is a real checkpoint (own toggle, own row field).

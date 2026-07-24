@@ -1,8 +1,15 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useDocSettings } from '../context/DocSettingsContext';
 import { formatDateDDMMYYYY } from '../utils/dateUtils';
+import EquipmentPreviewTable from '../components/servicereport/EquipmentPreviewTable';
+import {
+  resolveColumns,
+  DEFAULT_REPORT_TYPE,
+  TABLE_SCHEMA_LEGACY,
+  TABLE_SCHEMA_CURRENT
+} from '../utils/reportTypeSchemas';
 import {
   ChevronLeft,
   FileCheck,
@@ -256,8 +263,18 @@ export default function CertificateGeneratorPage() {
     fieldObservations: 'All fire safety installations inspected on-site. Extinguishers hydro-tested, pressure checked, and in compliance.',
     recommendations: 'Recommended periodic quarterly check of pressure gauges and emergency exit signage functionality.',
     customColumns: [], // Array of extra custom columns: [{ id: 'col-1', label: 'Make' }]
-    itemsList: DEFAULT_CLIENT_EQUIPMENT_TEMPLATE
+    itemsList: DEFAULT_CLIENT_EQUIPMENT_TEMPLATE,
+    reportType: DEFAULT_REPORT_TYPE,
+    // New reports print through the schema-driven table. Reports saved before this field existed
+    // stay on TABLE_SCHEMA_LEGACY so a reprint matches the PDF the customer already has.
+    tableSchemaVersion: TABLE_SCHEMA_CURRENT
   });
+
+  // Columns the schema-driven preview renders. Legacy reports ignore this and use the frozen table.
+  const previewColumns = useMemo(
+    () => resolveColumns(reportForm.reportType, srCfg),
+    [reportForm.reportType, srCfg]
+  );
 
   const [allReports, setAllReports] = useState([]);
 
@@ -364,7 +381,11 @@ export default function CertificateGeneratorPage() {
                  ...reportData,
                  amcSchedule: reportData.amcSchedule || calculateAmcSchedule(reportData.serviceDate, reportData.serviceFrequency || 3),
                  itemsList: (reportData.itemsList && reportData.itemsList.length > 0) ? reportData.itemsList : DEFAULT_CLIENT_EQUIPMENT_TEMPLATE,
-                 customColumns: reportData.customColumns || []
+                 customColumns: reportData.customColumns || [],
+                 reportType: reportData.reportType || DEFAULT_REPORT_TYPE,
+                 // Absent on every report saved before the schema refactor — those must keep
+                 // printing through the legacy table, so never inherit the new default here.
+                 tableSchemaVersion: reportData.tableSchemaVersion || TABLE_SCHEMA_LEGACY
                };
              });
              setClientSearch(reportData.customerName || '');
@@ -1536,55 +1557,14 @@ export default function CertificateGeneratorPage() {
                   {/* 16-Column Default Equipment Table Schema */}
                   {(reportForm.itemsList || []).length > 0 && (
                     <div className="mb-2">
-                      <table className="w-full text-[8px] border-collapse border border-slate-400 shadow-2xs">
-                        <thead>
-                          <tr className="bg-amber-100 text-amber-950 font-black text-center">
-                            <th className="border border-slate-400 p-1 w-6">Sr.</th>
-                            {(srCols.location !== false) && <th className="border border-slate-400 p-1 text-left">Location</th>}
-                            {(srCols.client_id_no !== false) && <th className="border border-slate-400 p-1">Client ID No</th>}
-                            <th className="border border-slate-400 p-1 text-left">Fire Ext. Description</th>
-                            {(srCols.mfg_year !== false) && <th className="border border-slate-400 p-1 w-8">MFG</th>}
-                            {(srCols.refill_date !== false) && <th className="border border-slate-400 p-1">Refilling Date</th>}
-                            {(srCols.next_refill_due !== false) && <th className="border border-slate-400 p-1">Refilling Due Dt</th>}
-                            {(srCols.hpt_date !== false) && <th className="border border-slate-400 p-1">HP Testing Date</th>}
-                            {(srCols.hpt_due_date !== false) && <th className="border border-slate-400 p-1">HP Testing Due Dt</th>}
-                            {(srCps.body_valve !== false) && <th className="border border-slate-400 p-1 w-8">Body/Valve</th>}
-                            {(srCps.safety_pin !== false) && <th className="border border-slate-400 p-1 w-8">Safety Pin</th>}
-                            {(srCps.pressure_gauge !== false) && <th className="border border-slate-400 p-1 w-8">Pressure / Wt</th>}
-                            {(srCps.hose_pipe !== false) && <th className="border border-slate-400 p-1 w-8">Hose &amp; Horn</th>}
-                            {(srCps.seal !== false) && <th className="border border-slate-400 p-1 w-8">Seal</th>}
-                            {(reportForm.customColumns || []).map(col => (
-                              <th key={col.id} className="border border-slate-400 p-1 bg-indigo-100 text-indigo-950">{col.label}</th>
-                            ))}
-                            <th className="border border-slate-400 p-1 text-left">Remarks</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {(reportForm.itemsList || []).map((it, idx) => (
-                            <tr key={it.id || idx} className="border border-slate-300 hover:bg-slate-50 font-semibold text-center">
-                              <td className="border border-slate-300 p-1 font-bold">{idx + 1}</td>
-                              {(srCols.location !== false) && <td className="border border-slate-300 p-1 text-left font-semibold">{it.location}</td>}
-                              {(srCols.client_id_no !== false) && <td className="border border-slate-300 p-1 font-bold text-indigo-950 bg-slate-50">{it.clientIdNo}</td>}
-                              <td className="border border-slate-300 p-1 text-left font-bold text-slate-950">{it.itemName}</td>
-                              {(srCols.mfg_year !== false) && <td className="border border-slate-300 p-1">{it.mfgYear}</td>}
-                              {(srCols.refill_date !== false) && <td className="border border-slate-300 p-1">{formatDateDDMMYYYY(it.refillingDate)}</td>}
-                              {(srCols.next_refill_due !== false) && <td className="border border-slate-300 p-1 font-bold text-rose-700">{formatDateDDMMYYYY(it.nextRefillingDate)}</td>}
-                              {(srCols.hpt_date !== false) && <td className="border border-slate-300 p-1">{formatDateDDMMYYYY(it.hptDate)}</td>}
-                              {(srCols.hpt_due_date !== false) && <td className="border border-slate-300 p-1 font-bold text-indigo-900">{formatDateDDMMYYYY(it.hptDueDate)}</td>}
-                              {(srCps.body_valve !== false) && <td className={`border border-slate-300 p-1 font-bold ${(it.bodyValve || 'OK') === 'OK' ? 'text-emerald-800' : 'text-rose-700 bg-rose-50'}`}>{it.bodyValve || 'OK'}</td>}
-                              {(srCps.body_valve !== false) && <td className={`border border-slate-300 p-1 font-bold ${(it.valve || 'OK') === 'OK' ? 'text-emerald-800' : 'text-rose-700 bg-rose-50'}`}>{it.valve || 'OK'}</td>}
-                              {(srCps.safety_pin !== false) && <td className={`border border-slate-300 p-1 font-bold ${(it.safetyPin || 'OK') === 'OK' ? 'text-emerald-800' : 'text-rose-700 bg-rose-50'}`}>{it.safetyPin || 'OK'}</td>}
-                              {(srCps.pressure_gauge !== false) && <td className={`border border-slate-300 p-1 font-bold ${(it.pressureWeight || 'OK') === 'OK' ? 'text-emerald-800' : 'text-rose-700 bg-rose-50'}`}>{it.pressureWeight || 'OK'}</td>}
-                              {(srCps.hose_pipe !== false) && <td className={`border border-slate-300 p-1 font-bold ${(it.hoseHorn || 'OK') === 'OK' ? 'text-emerald-800' : 'text-rose-700 bg-rose-50'}`}>{it.hoseHorn || 'OK'}</td>}
-                              {(srCps.seal !== false) && <td className={`border border-slate-300 p-1 font-bold ${(it.seal || 'OK') === 'OK' ? 'text-emerald-800' : 'text-rose-700 bg-rose-50'}`}>{it.seal || 'OK'}</td>}
-                              {(reportForm.customColumns || []).map(col => (
-                                <td key={col.id} className="border border-slate-300 p-1 text-indigo-950 font-bold">{it.customValues?.[col.id] || '—'}</td>
-                              ))}
-                              <td className="border border-slate-300 p-1 text-left italic text-slate-700">{it.remarks}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                      <EquipmentPreviewTable
+                        items={reportForm.itemsList || []}
+                        columns={previewColumns}
+                        customColumns={reportForm.customColumns || []}
+                        schemaVersion={reportForm.tableSchemaVersion || TABLE_SCHEMA_LEGACY}
+                        srCols={srCols}
+                        srCps={srCps}
+                      />
                     </div>
                   )}
 

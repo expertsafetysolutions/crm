@@ -157,6 +157,11 @@ export function getReportTypeByRoute(route) {
   return REPORT_TYPE_LIST.find(t => t.route === route) || null;
 }
 
+/** A module's built-in default columns (unfiltered), used to seed the settings checklist editor. */
+export function getDefaultColumns(typeId) {
+  return getReportType(typeId).columns;
+}
+
 /** Reads a dotted path like 'visible_columns.location' out of a module's docSettings config. */
 function readLegacyFlag(config, path) {
   if (!config || !path) return undefined;
@@ -164,15 +169,17 @@ function readLegacyFlag(config, path) {
 }
 
 /**
- * Resolves the column list actually rendered for a module: admin-configured columns when
- * present, otherwise the built-in defaults, minus any column switched off via the legacy
- * visible_columns / enabled_checkpoints toggles.
+ * Resolves the column list actually rendered for a module. When an admin has configured columns
+ * in the checklist builder those are authoritative and returned as-is (the builder can hide a
+ * column by removing it, so the legacy toggles no longer apply). Otherwise the built-in defaults
+ * are used, minus any column switched off via the legacy visible_columns / enabled_checkpoints
+ * toggles, so pre-builder admin configuration keeps working.
  */
 export function resolveColumns(typeId, serviceReportConfig = {}) {
   const type = getReportType(typeId);
   const configured = serviceReportConfig?.report_types?.[type.id]?.columns;
-  const columns = Array.isArray(configured) && configured.length > 0 ? configured : type.columns;
-  return columns.filter(col => readLegacyFlag(serviceReportConfig, col.legacyFlag) !== false);
+  if (Array.isArray(configured) && configured.length > 0) return configured;
+  return type.columns.filter(col => readLegacyFlag(serviceReportConfig, col.legacyFlag) !== false);
 }
 
 /** The subset of resolved columns a technician toggles OK / NOT OK. */

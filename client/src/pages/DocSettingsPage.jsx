@@ -4,6 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import { useDocSettings } from '../context/DocSettingsContext';
 import { DEFAULT_DOC_SETTINGS } from '../utils/defaultDocSettings';
 import { REPORT_TYPE_LIST, resolveNumbering, buildReportId } from '../utils/reportTypeSchemas';
+import ReportTypeChecklistEditor from '../components/settings/ReportTypeChecklistEditor';
 import {
   ChevronLeft, Save, RefreshCw, Image, FileText, Award,
   Eye, EyeOff, CheckSquare, Square, AlertCircle, CheckCircle2,
@@ -158,34 +159,6 @@ export default function DocSettingsPage() {
     setIsDirty(true);
   };
 
-  const updateSRColumn = (col, val) => {
-    setLocalSettings(prev => ({
-      ...prev,
-      document_configs: {
-        ...prev.document_configs,
-        SERVICE_REPORT: {
-          ...prev.document_configs.SERVICE_REPORT,
-          visible_columns: { ...prev.document_configs.SERVICE_REPORT.visible_columns, [col]: val }
-        }
-      }
-    }));
-    setIsDirty(true);
-  };
-
-  const updateSRCheckpoint = (cp, val) => {
-    setLocalSettings(prev => ({
-      ...prev,
-      document_configs: {
-        ...prev.document_configs,
-        SERVICE_REPORT: {
-          ...prev.document_configs.SERVICE_REPORT,
-          enabled_checkpoints: { ...prev.document_configs.SERVICE_REPORT.enabled_checkpoints, [cp]: val }
-        }
-      }
-    }));
-    setIsDirty(true);
-  };
-
   // Per-report-type report-number parts (prefix / period / starting sequence).
   const updateSRNumbering = (typeId, field, val) => {
     setLocalSettings(prev => {
@@ -203,6 +176,51 @@ export default function DocSettingsPage() {
               [typeId]: {
                 ...typeCfg,
                 numbering: { ...(typeCfg.numbering || {}), [field]: val }
+              }
+            }
+          }
+        }
+      };
+    });
+    setIsDirty(true);
+  };
+
+  // Per-report-type column list (the checklist builder). Passing columns = null clears the override
+  // so the report falls back to the built-in defaults.
+  const updateReportTypeColumns = (typeId, columns) => {
+    setLocalSettings(prev => {
+      const srCfg = prev.document_configs?.SERVICE_REPORT || {};
+      const reportTypes = srCfg.report_types || {};
+      const typeCfg = { ...(reportTypes[typeId] || {}) };
+      if (columns === null) delete typeCfg.columns;
+      else typeCfg.columns = columns;
+      return {
+        ...prev,
+        document_configs: {
+          ...prev.document_configs,
+          SERVICE_REPORT: { ...srCfg, report_types: { ...reportTypes, [typeId]: typeCfg } }
+        }
+      };
+    });
+    setIsDirty(true);
+  };
+
+  const updateReportTypeRecommendation = (typeId, colId, text) => {
+    setLocalSettings(prev => {
+      const srCfg = prev.document_configs?.SERVICE_REPORT || {};
+      const reportTypes = srCfg.report_types || {};
+      const typeCfg = reportTypes[typeId] || {};
+      return {
+        ...prev,
+        document_configs: {
+          ...prev.document_configs,
+          SERVICE_REPORT: {
+            ...srCfg,
+            report_types: {
+              ...reportTypes,
+              [typeId]: {
+                ...typeCfg,
+                recommendation_library: { ...(typeCfg.recommendation_library || {}), [colId]: text }
               }
             }
           }
@@ -534,48 +552,18 @@ export default function DocSettingsPage() {
                 </div>
               </SectionCard>
 
-              {/* Equipment Table Columns */}
-              <SectionCard title="📊 Equipment Table Columns">
-                <p className="text-xs text-slate-400 mb-3">Select which columns appear in the equipment inspection table:</p>
-                <div className="flex flex-wrap gap-2">
-                  {[
-                    { key: 'location', label: 'Location' },
-                    { key: 'mfg_year', label: 'Mfg. Year' },
-                    { key: 'refill_date', label: 'Refilling Date' },
-                    { key: 'next_refill_due', label: 'Next Refill Due' },
-                    { key: 'hpt_date', label: 'HPT Date' },
-                    { key: 'hpt_due_date', label: 'HPT Due Date' },
-                    { key: 'client_id_no', label: 'Client ID No.' },
-                  ].map(col => (
-                    <Checkbox
-                      key={col.key}
-                      checked={sr.visible_columns?.[col.key] ?? true}
-                      onChange={v => updateSRColumn(col.key, v)}
-                      label={col.label}
-                    />
-                  ))}
-                </div>
-              </SectionCard>
-
-              {/* Inspection Checkpoints */}
-              <SectionCard title="✅ Inspection Checkpoints" className="md:col-span-2">
-                <p className="text-xs text-slate-400 mb-3">Select which checkpoints appear in the equipment condition inspection columns:</p>
-                <div className="flex flex-wrap gap-2">
-                  {[
-                    { key: 'body_valve', label: 'Body / Valve' },
-                    { key: 'safety_pin', label: 'Safety Pin' },
-                    { key: 'pressure_gauge', label: 'Pressure / Weight' },
-                    { key: 'hose_pipe', label: 'Hose / Horn' },
-                    { key: 'seal', label: 'Seal' },
-                  ].map(cp => (
-                    <Checkbox
-                      key={cp.key}
-                      checked={sr.enabled_checkpoints?.[cp.key] ?? true}
-                      onChange={v => updateSRCheckpoint(cp.key, v)}
-                      label={cp.label}
-                    />
-                  ))}
-                </div>
+              {/* Checklist Builder — columns & checks per report type */}
+              <SectionCard title="🧩 Equipment Checklist (per report type)" className="md:col-span-2">
+                <p className="text-xs text-slate-400 mb-3">
+                  Build the equipment table for each report type: add data columns and OK / Not OK
+                  checks, reorder or remove them, and set the default recommendation that fills in
+                  when a check is marked Not OK.
+                </p>
+                <ReportTypeChecklistEditor
+                  serviceReportConfig={sr}
+                  onChangeColumns={updateReportTypeColumns}
+                  onChangeRecommendation={updateReportTypeRecommendation}
+                />
               </SectionCard>
             </div>
           </>

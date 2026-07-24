@@ -60,6 +60,9 @@ export const REPORT_TYPES = {
     shortLabel: 'Fire Extinguisher',
     route: 'fire-extinguisher',
     title: 'INSPECTION REPORT FOR FIRE EXTINGUISHER',
+    // Default report-number parts. Admins override these per type in Document Settings; each
+    // type counts its own sequence so numbers never collide across modules.
+    numbering: { prefix: 'Expert/', period: '26-27', sequence: 'SR310' },
     // Mirrors the column order the module shipped with, so existing reports render unchanged.
     columns: [
       ...IDENTITY_COLUMNS,
@@ -89,6 +92,7 @@ export const REPORT_TYPES = {
     shortLabel: 'System',
     route: 'system',
     title: 'INSPECTION REPORT FOR FIRE FIGHTING SYSTEM',
+    numbering: { prefix: 'Expert/', period: '26-27', sequence: 'SYS1' },
     columns: [
       ...IDENTITY_COLUMNS,
       { id: 'itemName', label: 'System Description', type: COLUMN_TYPES.TEXT, align: 'left' },
@@ -102,6 +106,7 @@ export const REPORT_TYPES = {
     shortLabel: 'Alarm System',
     route: 'alarm',
     title: 'INSPECTION REPORT FOR FIRE ALARM SYSTEM',
+    numbering: { prefix: 'Expert/', period: '26-27', sequence: 'AL1' },
     columns: [
       ...IDENTITY_COLUMNS,
       { id: 'itemName', label: 'Device Description', type: COLUMN_TYPES.TEXT, align: 'left' },
@@ -115,6 +120,7 @@ export const REPORT_TYPES = {
     shortLabel: 'General',
     route: 'general',
     title: 'GENERAL SERVICE REPORT',
+    numbering: { prefix: 'Expert/', period: '26-27', sequence: 'GEN1' },
     columns: [
       ...IDENTITY_COLUMNS,
       { id: 'itemName', label: 'Description', type: COLUMN_TYPES.TEXT, align: 'left' },
@@ -128,6 +134,7 @@ export const REPORT_TYPES = {
     shortLabel: 'Visit',
     route: 'visit',
     title: 'SITE VISIT REPORT',
+    numbering: { prefix: 'Expert/', period: '26-27', sequence: 'VR1' },
     columns: [
       ...IDENTITY_COLUMNS,
       { id: 'itemName', label: 'Description', type: COLUMN_TYPES.TEXT, align: 'left' },
@@ -171,6 +178,50 @@ export function resolveColumns(typeId, serviceReportConfig = {}) {
 /** The subset of resolved columns a technician toggles OK / NOT OK. */
 export function getCheckpointColumns(typeId, serviceReportConfig = {}) {
   return resolveColumns(typeId, serviceReportConfig).filter(c => c.type === COLUMN_TYPES.CHECKPOINT);
+}
+
+/**
+ * Report-number parts for a module: admin-configured values from settings when present,
+ * otherwise the module's built-in defaults. Returns { prefix, period, sequence }.
+ */
+export function resolveNumbering(typeId, serviceReportConfig = {}) {
+  const type = getReportType(typeId);
+  const configured = serviceReportConfig?.report_types?.[type.id]?.numbering || {};
+  return { ...type.numbering, ...configured };
+}
+
+/** Full report number string for a module, e.g. "Expert/26-27/SR310". */
+export function buildReportId(numbering) {
+  const { prefix = '', period = '', sequence = '' } = numbering || {};
+  return `${prefix}${period}/${sequence}`;
+}
+
+// Splits a sequence like "SR310" into its letter prefix ("SR") and number (310).
+function splitSequence(sequence) {
+  const letters = (sequence || '').match(/^[A-Za-z]+/)?.[0] || 'SR';
+  const num = parseInt((sequence || '').match(/\d+/)?.[0] || '0', 10);
+  return { letters, num: isNaN(num) ? 0 : num };
+}
+
+/**
+ * Next sequence for a module, counting only reports of that same type. Starts from the module's
+ * configured sequence and never goes backwards past a number already issued for the type.
+ */
+export function nextSequenceForType(typeId, serviceReportConfig, reports = []) {
+  const start = splitSequence(resolveNumbering(typeId, serviceReportConfig).sequence);
+  // Track the highest number already issued for this type. Seed one below the configured start so
+  // the first-ever report of a type gets the start number itself, not start+1, and so a report
+  // numbered below the configured start can never drag the sequence backwards.
+  let maxNum = start.num - 1;
+  reports
+    .filter(r => (r.reportType || DEFAULT_REPORT_TYPE) === typeId)
+    .forEach(r => {
+      const parts = String(r.Report_ID || '').split('/');
+      const seq = parts[parts.length - 1] || '';
+      const { num } = splitSequence(seq);
+      if (num > maxNum) maxNum = num;
+    });
+  return `${start.letters}${maxNum + 1}`;
 }
 
 /** Builds a blank row for a module, with every checkpoint defaulted to OK. */

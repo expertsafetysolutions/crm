@@ -6,6 +6,9 @@ import { formatDateDDMMYYYY } from '../utils/dateUtils';
 import EquipmentPreviewTable from '../components/servicereport/EquipmentPreviewTable';
 import {
   resolveColumns,
+  resolveNumbering,
+  nextSequenceForType,
+  buildReportId,
   DEFAULT_REPORT_TYPE,
   TABLE_SCHEMA_LEGACY,
   TABLE_SCHEMA_CURRENT
@@ -298,46 +301,24 @@ export default function CertificateGeneratorPage() {
     });
   };
 
-  const getLatestReportSequenceNumber = (reports) => {
-    let maxSeq = 310;
-    if (!reports || !Array.isArray(reports)) return maxSeq;
-    reports.forEach(r => {
-      const reportId = r.Report_ID || '';
-      const parts = reportId.split('/');
-      if (parts.length > 0) {
-        const suffix = parts[parts.length - 1];
-        const baseSuffix = suffix.split('-')[0];
-        const numMatch = baseSuffix.match(/\d+/);
-        if (numMatch) {
-          const num = parseInt(numMatch[0], 10);
-          if (!isNaN(num) && num > maxSeq) {
-            maxSeq = num;
-          }
-        }
-      }
-    });
-    return maxSeq;
-  };
-
   // Bumps the in-memory report number to the next unused sequence — called right after a brand-new
-  // report is successfully saved, so the number can never collide with the one just issued. Never
-  // runs when saving an edit to an already-existing report (reportId set).
+  // report is successfully saved, so the number can never collide with the one just issued. Counts
+  // only reports of the same type. Never runs when saving an edit to an existing report.
   const advanceToNextReportNumber = (justSavedReport) => {
     const updatedReports = [...allReports.filter(r =>
       (r.verificationGuid || r.Verification_GUID) !== (justSavedReport.verificationGuid || justSavedReport.Verification_GUID)
     ), justSavedReport];
-    const latestSeq = getLatestReportSequenceNumber(updatedReports);
-    const nextSeq = latestSeq + 1;
-    const prefixLetter = (reportForm.certSequence || '').match(/^[A-Za-z]+/)?.[0] || 'SR';
-    const nextSequence = `${prefixLetter}${nextSeq}`;
-    setReportForm(prev => ({
-      ...prev,
-      certSequence: nextSequence,
-      Report_ID: `${prev.certPrefix || 'Expert/'}${prev.certPeriod || '26-27'}/${nextSequence}`,
-      verificationGuid: 'SR-VER-' + Math.random().toString(36).substring(2, 8).toUpperCase(),
-      isLocked: false,
-      revision: 0
-    }));
+    setReportForm(prev => {
+      const nextSequence = nextSequenceForType(prev.reportType, srCfg, updatedReports);
+      return {
+        ...prev,
+        certSequence: nextSequence,
+        Report_ID: `${prev.certPrefix || 'Expert/'}${prev.certPeriod || '26-27'}/${nextSequence}`,
+        verificationGuid: 'SR-VER-' + Math.random().toString(36).substring(2, 8).toUpperCase(),
+        isLocked: false,
+        revision: 0
+      };
+    });
   };
 
   // Load customers, equipment master, and (if editing) the existing report
@@ -391,15 +372,19 @@ export default function CertificateGeneratorPage() {
              setClientSearch(reportData.customerName || '');
           }
         } else {
-          if (reportsData.length > 0) {
-            const latestSeq = getLatestReportSequenceNumber(reportsData);
-            const nextSeq = latestSeq + 1;
-            setReportForm(prev => ({
+          // New report: apply this type's admin-configured prefix/period and the next free
+          // sequence, counting only reports of the same type.
+          setReportForm(prev => {
+            const numbering = resolveNumbering(prev.reportType, srCfg);
+            const nextSequence = nextSequenceForType(prev.reportType, srCfg, reportsData);
+            return {
               ...prev,
-              certSequence: `SR${nextSeq}`,
-              Report_ID: `Expert/26-27/SR${nextSeq}`
-            }));
-          }
+              certPrefix: numbering.prefix,
+              certPeriod: numbering.period,
+              certSequence: nextSequence,
+              Report_ID: buildReportId({ ...numbering, sequence: nextSequence })
+            };
+          });
         }
       } catch (err) {
         if (!cancelled) setLoadError(err.message || 'Failed to load certificate data');

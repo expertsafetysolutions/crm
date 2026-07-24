@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useDocSettings } from '../context/DocSettingsContext';
 import { DEFAULT_DOC_SETTINGS } from '../utils/defaultDocSettings';
+import { REPORT_TYPE_LIST, resolveNumbering, buildReportId } from '../utils/reportTypeSchemas';
 import {
   ChevronLeft, Save, RefreshCw, Image, FileText, Award,
   Eye, EyeOff, CheckSquare, Square, AlertCircle, CheckCircle2,
@@ -182,6 +183,32 @@ export default function DocSettingsPage() {
         }
       }
     }));
+    setIsDirty(true);
+  };
+
+  // Per-report-type report-number parts (prefix / period / starting sequence).
+  const updateSRNumbering = (typeId, field, val) => {
+    setLocalSettings(prev => {
+      const srCfg = prev.document_configs?.SERVICE_REPORT || {};
+      const reportTypes = srCfg.report_types || {};
+      const typeCfg = reportTypes[typeId] || {};
+      return {
+        ...prev,
+        document_configs: {
+          ...prev.document_configs,
+          SERVICE_REPORT: {
+            ...srCfg,
+            report_types: {
+              ...reportTypes,
+              [typeId]: {
+                ...typeCfg,
+                numbering: { ...(typeCfg.numbering || {}), [field]: val }
+              }
+            }
+          }
+        }
+      };
+    });
     setIsDirty(true);
   };
 
@@ -418,6 +445,57 @@ export default function DocSettingsPage() {
                 <p className="text-xs text-indigo-200 mt-0.5">Control which sections, columns, and checkpoints appear on all Service Reports and Inspection documents.</p>
               </div>
             </div>
+
+            {/* Report Numbering — one row per report type */}
+            <SectionCard title="🔢 Report Numbering (per report type)">
+              <p className="text-xs text-slate-400 mb-3">
+                Set the prefix, period and starting number for each report type. Each type counts on
+                its own, so numbers never clash between types. New reports pick up the next number
+                automatically; staff can still type over it for special cases.
+              </p>
+              <div className="space-y-2.5">
+                {/* Column labels */}
+                <div className="hidden sm:grid grid-cols-[1.4fr_1fr_0.8fr_1fr_1.3fr] gap-2 px-1 text-[10px] font-bold text-slate-400 uppercase tracking-wide">
+                  <span>Report Type</span>
+                  <span>Prefix</span>
+                  <span>Period</span>
+                  <span>Start No.</span>
+                  <span>Preview</span>
+                </div>
+                {REPORT_TYPE_LIST.map(type => {
+                  const numbering = resolveNumbering(type.id, sr);
+                  return (
+                    <div key={type.id} className="grid grid-cols-2 sm:grid-cols-[1.4fr_1fr_0.8fr_1fr_1.3fr] gap-2 items-center">
+                      <span className="col-span-2 sm:col-span-1 text-xs font-bold text-slate-700">{type.shortLabel}</span>
+                      <input
+                        type="text"
+                        value={numbering.prefix}
+                        onChange={e => updateSRNumbering(type.id, 'prefix', e.target.value)}
+                        placeholder="Expert/"
+                        className="bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs font-mono text-slate-700 focus:outline-none focus:ring-2 focus:ring-amber-400/40 focus:border-amber-400 min-w-0"
+                      />
+                      <input
+                        type="text"
+                        value={numbering.period}
+                        onChange={e => updateSRNumbering(type.id, 'period', e.target.value)}
+                        placeholder="26-27"
+                        className="bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs font-mono text-slate-700 focus:outline-none focus:ring-2 focus:ring-amber-400/40 focus:border-amber-400 min-w-0"
+                      />
+                      <input
+                        type="text"
+                        value={numbering.sequence}
+                        onChange={e => updateSRNumbering(type.id, 'sequence', e.target.value)}
+                        placeholder="SR310"
+                        className="bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs font-mono text-slate-700 focus:outline-none focus:ring-2 focus:ring-amber-400/40 focus:border-amber-400 min-w-0"
+                      />
+                      <span className="col-span-2 sm:col-span-1 text-xs font-mono font-bold text-indigo-800 truncate" title={buildReportId(numbering)}>
+                        {buildReportId(numbering)}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </SectionCard>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {/* Document Sections */}

@@ -5,6 +5,7 @@ import { useDocSettings } from '../context/DocSettingsContext';
 import { formatDateDDMMYYYY } from '../utils/dateUtils';
 import EquipmentPreviewTable from '../components/servicereport/EquipmentPreviewTable';
 import EquipmentEditorTable from '../components/servicereport/EquipmentEditorTable';
+import { itemsToCsvObjects, csvObjectsToItems } from '../utils/serviceReportCsv';
 import {
   resolveColumns,
   resolveNumbering,
@@ -42,7 +43,10 @@ import {
   ChevronDown,
   Sparkles,
   Check,
-  Plus
+  Plus,
+  Upload,
+  FileSpreadsheet,
+  FolderDown
 } from 'lucide-react';
 import { QRCodeCanvas } from 'qrcode.react';
 // html2canvas/jspdf are loaded on demand inside handleDownloadPDF — ~590KB, only needed when
@@ -426,11 +430,13 @@ export default function CertificateGeneratorPage() {
     loadAllCertAssets();
   }, [userRole]);
 
-  // Select Client & Load Master Equipment Inventory Automatically
+  // Select Client. Captures Customer_ID so the equipment table can be loaded from / saved to that
+  // client's saved equipment registry.
   const handleSelectClient = (c) => {
     const custName = c.Company_Name || c.Customer_Name || '';
     setReportForm(prev => ({
       ...prev,
+      customerId: c.Customer_ID || c.customerId || '',
       customerName: custName,
       address: c.Address || c.Location || '',
       gstin: c.GSTIN || c.Gst_No || '',
@@ -540,6 +546,130 @@ export default function CertificateGeneratorPage() {
       ...prev,
       customColumns: (prev.customColumns || []).filter(c => c.id !== colId)
     }));
+  };
+
+  // ─── Equipment CSV import/export + client equipment registry ───────────────────────────────
+  const csvFileInputRef = useRef(null);
+  const [equipmentBusy, setEquipmentBusy] = useState('');
+
+  const equipmentCsvFilename = () => {
+    const type = getReportType(reportForm.reportType).route;
+    const client = (reportForm.customerName || 'client').replace(/[^a-z0-9]+/gi, '-').toLowerCase();
+    return `equipment-${type}-${client}.csv`;
+  };
+
+  // Export the current equipment table to CSV, columns matching this report type (plus any
+  // per-client custom columns), so it can be edited in a spreadsheet and imported back.
+  const handleExportEquipmentCsv = async () => {
+    try {
+      setEquipmentBusy('export');
+      const { default: Papa } = await import('papaparse');
+      const objects = itemsToCsvObjects(reportForm.itemsList || [], previewColumns, reportForm.customColumns || []);
+      const csv = Papa.unparse(objects);
+      const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', equipmentCsvFilename());
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      alert('Export failed: ' + err.message);
+    } finally {
+      setEquipmentBusy('');
+    }
+  };
+
+  // Persist the current equipment list to this client's saved registry, per report type, so future
+  // reports for the client load it automatically. No-op (with a note) when no client is selected.
+  const saveEquipmentToRegistry = async (items) => {
+    if (!reportForm.customerId) return { skipped: true };
+    const res = await fetch(`/api/client-equipment/${reportForm.customerId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ items, reportType: reportForm.reportType })
+    });
+    if (!res.ok) throw new Error('Could not save to client registry');
+    return { skipped: false };
+  };
+
+  const handleImportEquipmentCsv = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setEquipmentBusy('import');
+    try {
+      const { default: Papa } = await import('papaparse');
+      const rows = await new Promise((resolve, reject) => {
+        Papa.parse(file, {
+          header: true,
+          skipEmptyLines: true,
+          complete: (r) => resolve(r.data),
+          error: reject
+        });
+      });
+      if (!rows.length) {
+        alert('That CSV had no data rows.');
+        return;
+      }
+      const { items, addedCustomColumns } = csvObjectsToItems(rows, previewColumns, reportForm.customColumns || []);
+      setReportForm(prev => ({
+        ...prev,
+        itemsList: items,
+        customColumns: [...(prev.customColumns || []), ...addedCustomColumns]
+      }));
+
+      let savedNote = '';
+      try {
+        const { skipped } = await saveEquipmentToRegistry(items);
+        savedNote = skipped
+          ? '\n\nTip: select a client first to also save this list to their registry for next time.'
+          : '\n\nSaved to this client’s equipment registry for future reports.';
+      } catch (err) {
+        savedNote = '\n\n(Loaded into this report, but saving to the client registry failed: ' + err.message + ')';
+      }
+
+      const extraNote = addedCustomColumns.length
+        ? `\nAdded ${addedCustomColumns.length} extra column(s) from the file: ${addedCustomColumns.map(c => c.label).join(', ')}.`
+        : '';
+      setActiveMobileTab('preview');
+      alert(`Imported ${items.length} equipment row(s).${extraNote}${savedNote}`);
+    } catch (err) {
+      alert('Import failed: ' + err.message);
+    } finally {
+      setEquipmentBusy('');
+      if (csvFileInputRef.current) csvFileInputRef.current.value = '';
+    }
+  };
+
+  // Load this client's saved equipment (for this report type) from the registry into the table.
+  const handleLoadFromRegistry = async () => {
+    if (!reportForm.customerId) {
+      alert('Select a client first to load their saved equipment.');
+      return;
+    }
+    setEquipmentBusy('registry');
+    try {
+      const res = await fetch(`/api/client-equipment/${reportForm.customerId}?reportType=${encodeURIComponent(reportForm.reportType)}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!res.ok) throw new Error('Could not load client equipment');
+      const rows = await res.json();
+      const latest = Array.isArray(rows) && rows.length ? rows[rows.length - 1] : null;
+      const items = latest?.items || [];
+      if (!items.length) {
+        alert('No saved equipment found for this client yet. Import a CSV to create it.');
+        return;
+      }
+      setReportForm(prev => ({ ...prev, itemsList: items }));
+      setActiveMobileTab('preview');
+      alert(`Loaded ${items.length} saved equipment row(s) for this client.`);
+    } catch (err) {
+      alert('Load failed: ' + err.message);
+    } finally {
+      setEquipmentBusy('');
+    }
   };
 
   // Save Report Handler
@@ -1040,6 +1170,48 @@ export default function CertificateGeneratorPage() {
                       <span>{showAddColumnInput ? 'Cancel' : '+ Add Custom Column'}</span>
                     </button>
                   </div>
+                </div>
+
+                {/* Import / Export / Load-from-registry toolbar */}
+                <div className="flex flex-wrap items-center gap-2 border-b border-amber-200 pb-2">
+                  <span className="text-[10px] font-black text-slate-500 uppercase tracking-wide mr-1">Equipment data:</span>
+                  <button
+                    type="button"
+                    onClick={handleLoadFromRegistry}
+                    disabled={Boolean(equipmentBusy)}
+                    className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg font-bold text-xs flex items-center gap-1.5 shadow-sm transition"
+                    title="Load this client's saved equipment for this report type"
+                  >
+                    <FolderDown className="w-3.5 h-3.5" />
+                    <span>{equipmentBusy === 'registry' ? 'Loading…' : 'Load Saved'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => csvFileInputRef.current?.click()}
+                    disabled={Boolean(equipmentBusy)}
+                    className="px-3 py-1.5 bg-sky-600 hover:bg-sky-700 disabled:opacity-50 text-white rounded-lg font-bold text-xs flex items-center gap-1.5 shadow-sm transition"
+                    title="Import a filled CSV of this client's equipment"
+                  >
+                    <Upload className="w-3.5 h-3.5" />
+                    <span>{equipmentBusy === 'import' ? 'Importing…' : 'Import CSV'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleExportEquipmentCsv}
+                    disabled={Boolean(equipmentBusy)}
+                    className="px-3 py-1.5 bg-slate-600 hover:bg-slate-700 disabled:opacity-50 text-white rounded-lg font-bold text-xs flex items-center gap-1.5 shadow-sm transition"
+                    title="Export the current table to CSV to edit in a spreadsheet"
+                  >
+                    <FileSpreadsheet className="w-3.5 h-3.5" />
+                    <span>{equipmentBusy === 'export' ? 'Exporting…' : 'Export CSV'}</span>
+                  </button>
+                  <input
+                    ref={csvFileInputRef}
+                    type="file"
+                    accept=".csv,text/csv"
+                    onChange={handleImportEquipmentCsv}
+                    className="hidden"
+                  />
                 </div>
 
                 {/* Add Custom Column Drawer */}

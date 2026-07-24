@@ -2386,7 +2386,6 @@ export default function CertificateComplianceGeneratorPage() {
                       onClick={async () => {
                         try {
                           setAdminSubmitting('settings_save');
-                          await saveCertificateRecord({ isSettingsLocked: false });
                           if (updateDocSettings) {
                             const patch = {
                               certificate_types: {
@@ -2443,7 +2442,6 @@ export default function CertificateComplianceGeneratorPage() {
                         if (!window.confirm('Save and lock these settings in the system? Future certificates will be generated with this configuration.')) return;
                         try {
                           setAdminSubmitting('settings_lock');
-                          await saveCertificateRecord({ isSettingsLocked: true });
                           if (updateDocSettings) {
                             const patch = {
                               certificate_types: {

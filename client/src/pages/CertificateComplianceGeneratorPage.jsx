@@ -1392,7 +1392,7 @@ export default function CertificateComplianceGeneratorPage() {
                       />
                     </div>
                     <div className="space-y-1">
-                      <label className="block text-[11px] font-bold text-slate-600 uppercase tracking-wide">Challan Date (Refilling) *</label>
+                      <label className="block text-[11px] font-bold text-slate-600 uppercase tracking-wide">Challan Date (Refill) *</label>
                       <input
                         type="date"
                         value={certForm.challanDate || ''}

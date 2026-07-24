@@ -697,10 +697,20 @@ export default function CertificateGeneratorPage() {
   const [guidedMode, setGuidedMode] = useState(false);
   const [guidedSelectedId, setGuidedSelectedId] = useState(null);
   const [guidedSearch, setGuidedSearch] = useState('');
+  const [draftAvailable, setDraftAvailable] = useState(null); // an unsaved phone draft to resume
 
   // The report's server id once it exists (from the URL for edits, or set after the first save).
-  // Both auto-save and the manual save use this to decide create-vs-update, so no duplicate record.
+  // Both auto-save and the manual save read this (via the ref, to close fast-repeat races) to
+  // decide create-vs-update, so a background save can never create a duplicate report.
   const [savedReportId, setSavedReportId] = useState(reportId || null);
+  const savedReportIdRef = useRef(reportId || null);
+  const serverSaveInFlightRef = useRef(false);
+  const [autoSaveStatus, setAutoSaveStatus] = useState('idle'); // 'idle'|'saving'|'saved'|'error'
+
+  const rememberSavedReportId = (id) => {
+    savedReportIdRef.current = id;
+    setSavedReportId(id);
+  };
 
   // Phone auto-save: keep a local draft of the in-progress report so field work survives the app
   // closing or losing signal. Debounced; only once a client is chosen (i.e. real work has begun).
@@ -713,14 +723,64 @@ export default function CertificateGeneratorPage() {
     return () => clearTimeout(t);
   }, [reportForm, draftKey]);
 
-  // Save the current equipment as done and return to the list to pick/search the next one.
+  // On first load, offer to resume an unsaved phone draft if one exists for this report.
+  const draftCheckedRef = useRef(false);
+  useEffect(() => {
+    if (isPageLoading || draftCheckedRef.current) return;
+    draftCheckedRef.current = true;
+    try {
+      const raw = localStorage.getItem(draftKey);
+      if (!raw) return;
+      const draft = JSON.parse(raw);
+      if (draft?.form?.itemsList?.length && draft.form.customerName) setDraftAvailable(draft);
+    } catch (e) { /* ignore */ }
+  }, [isPageLoading, draftKey]);
+
+  // Best-effort background save to the server (item's "server when online"). Non-blocking: on a
+  // brand-new report it creates once as a Draft and remembers the id; after that it updates. Never
+  // downgrades an already-approved report, and stays silent on failure (the phone draft is the
+  // safety net).
+  const autoSaveToServer = async (form) => {
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+    if (!form?.customerName || serverSaveInFlightRef.current) return;
+    serverSaveInFlightRef.current = true;
+    setAutoSaveStatus('saving');
+    try {
+      const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
+      const existingId = reportId || savedReportIdRef.current;
+      const status = form.Status === 'Approved' ? form.Status : (existingId ? form.Status : 'Draft');
+      const payload = { ...form, Status: status };
+      let res;
+      if (existingId) {
+        // Report_ID contains slashes, so it must be encoded to stay a single path segment.
+        res = await fetch(`/api/service-reports/${encodeURIComponent(existingId)}`, { method: 'PUT', headers, body: JSON.stringify(payload) });
+      } else {
+        res = await fetch('/api/service-reports', { method: 'POST', headers, body: JSON.stringify(payload) });
+        if (res.ok) {
+          const data = await res.json().catch(() => null);
+          rememberSavedReportId(data?.report?.Report_ID || form.Report_ID);
+        }
+      }
+      setAutoSaveStatus(res && res.ok ? 'saved' : 'error');
+    } catch (e) {
+      setAutoSaveStatus('error');
+    } finally {
+      serverSaveInFlightRef.current = false;
+    }
+  };
+
+  // Save the current equipment as done and return to the list to pick/search the next one. Writes
+  // the phone draft immediately and kicks off a background server save (both, per the chosen mode).
   const handleGuidedSaveNext = (rowId) => {
-    setReportForm(prev => ({
-      ...prev,
-      itemsList: prev.itemsList.map(row => row.id === rowId ? { ...row, serviced: true } : row)
-    }));
+    const nextForm = {
+      ...reportForm,
+      itemsList: (reportForm.itemsList || []).map(row => row.id === rowId ? { ...row, serviced: true } : row)
+    };
+    setReportForm(nextForm);
     setGuidedSelectedId(null);
     setGuidedSearch('');
+    try { localStorage.setItem(draftKey, JSON.stringify({ savedAt: Date.now(), form: nextForm })); } catch (e) { /* quota */ }
+    autoSaveToServer(nextForm);
   };
 
   // ─── Equipment CSV import/export + client equipment registry ───────────────────────────────
@@ -858,9 +918,12 @@ export default function CertificateGeneratorPage() {
         isLocked: targetStatus === 'Approved' ? true : reportForm.isLocked
       };
 
+      // Reuse the id an earlier auto-save may have created, so this final save updates that record
+      // instead of creating a second one.
+      const existingId = reportId || savedReportIdRef.current;
       let res;
-      if (reportId) {
-        res = await fetch(`/api/service-reports/${reportId}`, {
+      if (existingId) {
+        res = await fetch(`/api/service-reports/${encodeURIComponent(existingId)}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
           body: JSON.stringify(payload)
@@ -874,7 +937,9 @@ export default function CertificateGeneratorPage() {
       }
 
       if (!res.ok) throw new Error('Failed to save service report');
-      if (!reportId) advanceToNextReportNumber(payload);
+      try { localStorage.removeItem(draftKey); } catch (e) { /* ignore */ }
+      // Only advance to the next number when this save actually created a brand-new record.
+      if (!existingId) advanceToNextReportNumber(payload);
       alert(`✅ Service Report ${targetStatus === 'Approved' ? 'Approved & Locked' : targetStatus === 'Pending Approval' ? 'Submitted for Approval' : 'Saved'}!`);
       handleBack();
     } catch (err) {
@@ -1101,6 +1166,32 @@ export default function CertificateGeneratorPage() {
               ═══════════════════════════════════════════════════════════ */}
           {wizardStep === 1 && (
             <div className="space-y-3 pt-1 text-xs">
+              {/* Resume an unsaved phone draft (auto-save recovery) */}
+              {draftAvailable && (
+                <div className="bg-amber-50 border border-amber-400 rounded-xl p-3 flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-[11px] font-bold text-amber-900">
+                    Unsaved inspection found on this device
+                    {draftAvailable.savedAt ? ` (saved ${new Date(draftAvailable.savedAt).toLocaleString()})` : ''}. Resume it?
+                  </span>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => { setReportForm(draftAvailable.form); setClientSearch(draftAvailable.form.customerName || ''); setDraftAvailable(null); }}
+                      className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-bold text-[11px]"
+                    >
+                      Resume
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { try { localStorage.removeItem(draftKey); } catch (e) { /* ignore */ } setDraftAvailable(null); }}
+                      className="px-3 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-lg font-bold text-[11px]"
+                    >
+                      Discard
+                    </button>
+                  </div>
+                </div>
+              )}
+
               <div className="bg-amber-50/80 border border-amber-300 rounded-xl p-3.5 space-y-3.5 shadow-2xs">
                 <div className="flex items-center justify-between border-b border-amber-200 pb-2">
                   <span className="font-extrabold text-amber-950 text-xs uppercase tracking-wide flex items-center gap-1.5">
@@ -1360,6 +1451,17 @@ export default function CertificateGeneratorPage() {
 
               {guidedMode && (
                 <div className="bg-white border border-indigo-200 rounded-xl p-3 shadow-2xs">
+                  {autoSaveStatus !== 'idle' && (
+                    <div className="flex justify-end mb-1">
+                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${
+                        autoSaveStatus === 'saving' ? 'text-slate-500 bg-slate-100'
+                        : autoSaveStatus === 'saved' ? 'text-emerald-700 bg-emerald-50'
+                        : 'text-amber-700 bg-amber-50'
+                      }`}>
+                        {autoSaveStatus === 'saving' ? 'Saving…' : autoSaveStatus === 'saved' ? '✓ Saved' : 'Saved on device (will sync when online)'}
+                      </span>
+                    </div>
+                  )}
                   <GuidedInspection
                     items={reportForm.itemsList || []}
                     columns={previewColumns}

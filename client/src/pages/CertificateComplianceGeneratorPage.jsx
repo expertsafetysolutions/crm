@@ -1063,6 +1063,62 @@ export default function CertificateComplianceGeneratorPage() {
     alert(`Loaded Certificate ${newCertNo} (Previous)`);
   };
 
+  const handleLoadNextCertificate = () => {
+    if (allCertificates.length === 0) {
+      alert("No certificates found in history.");
+      return;
+    }
+
+    const sortedCerts = [...allCertificates].sort((a, b) => {
+      const ta = getRecordCreatedAt(a)?.getTime();
+      const tb = getRecordCreatedAt(b)?.getTime();
+      if (ta === undefined && tb === undefined) return 0;
+      if (ta === undefined) return 1;
+      if (tb === undefined) return -1;
+      return tb - ta;
+    });
+
+    const currentIndex = sortedCerts.findIndex(c =>
+      (c.verificationGuid && c.verificationGuid === certForm.verificationGuid) || 
+      (c.Verification_GUID && c.Verification_GUID === certForm.verificationGuid)
+    );
+
+    if (currentIndex === -1 || currentIndex === 0) {
+      alert("You are already at the newest certificate.");
+      return;
+    }
+
+    const targetIndex = currentIndex - 1;
+    const targetCert = sortedCerts[targetIndex];
+    const newCertNo = targetCert.Certificate_No || targetCert.certificateNo || '';
+    const newRevision = (targetCert.Revision || targetCert.revision || 0);
+    const loadedChallanDate = targetCert.Challan_Date || targetCert.challanDate || targetCert.Issue_Date || targetCert.issueDate || getLocalDateStr();
+    const loadedValidUntil = targetCert.Valid_Until || targetCert.validUntil || '';
+
+    setCertForm({
+      ...targetCert,
+      certificateNo: newCertNo,
+      revision: newRevision,
+      isLocked: false,
+      isContentUnlocked: true,
+      customerName: targetCert.Customer_Name || targetCert.customerName || '',
+      address: targetCert.Address || targetCert.address || '',
+      gstin: targetCert.GSTIN || targetCert.gstin || '',
+      contact: targetCert.Contact || targetCert.contact || '',
+      authPerson: targetCert.Auth_Person || targetCert.authPerson || '',
+      issueDate: targetCert.Issue_Date || targetCert.issueDate || getLocalDateStr(),
+      validUntil: loadedValidUntil,
+      challanDate: loadedChallanDate,
+      verificationGuid: targetCert.Verification_GUID || targetCert.verificationGuid
+    });
+
+    setNewItemRefillDate(loadedChallanDate);
+    setNewItemNextDate(loadedValidUntil);
+    setCertCustomerSearch(targetCert.Customer_Name || targetCert.customerName || '');
+    setActiveMobileTab('edit');
+    alert(`Loaded Certificate ${newCertNo} (Next)`);
+  };
+
   const handleNewBlankCertificate = async () => {
     let updatedCerts = allCertificates;
     if (readyToFinalize) {
@@ -2430,7 +2486,15 @@ export default function CertificateComplianceGeneratorPage() {
                       className={`w-full py-2 px-4 rounded-xl text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-md transition ${isSettingsSetupComplete ? 'bg-amber-700 hover:bg-amber-800' : 'bg-amber-700/50 cursor-not-allowed opacity-50'}`}
                     >
                       <Lock className="w-4 h-4" />
-                      <span>{adminSubmitting === 'settings_lock' ? 'Locking…' : 'LOCK'}</span          {/* Final Action Buttons — Docked at the end of the form/configuration panel */}
+                      <span>{adminSubmitting === 'settings_lock' ? 'Locking…' : 'LOCK'}</span>
+                    </button>
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+          {/* Final Action Buttons — Docked at the end of the form/configuration panel */}
           <div className="pt-4 mt-2 border-t border-slate-200 shrink-0 space-y-2.5 lg:block hidden">
             <div className="flex flex-wrap gap-2 w-full">
               {/* Previous */}
@@ -2444,46 +2508,38 @@ export default function CertificateComplianceGeneratorPage() {
                 <span>Previous</span>
               </button>
 
-              {/* Save */}
+              {/* Next */}
               <button
                 type="button"
-                disabled={!readyToFinalize || Boolean(adminSubmitting)}
-                onClick={async () => {
-                  try {
-                    setAdminSubmitting('save');
-                    const result = await saveCertificateRecord();
-                    uploadToDriveBackground(null);
-                    if (!result.isExisting && result.certificate) advanceToNextCertNumber(result.certificate);
-                    alert('✅ Certificate saved.');
-                  } catch (err) { alert('Save failed: ' + err.message); }
-                  finally { setAdminSubmitting(''); }
-                }}
-                className="flex-1 min-w-[80px] py-2 px-2.5 rounded-xl bg-slate-700 hover:bg-slate-800 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50"
+                disabled={Boolean(adminSubmitting)}
+                onClick={handleLoadNextCertificate}
+                className="flex-1 min-w-[80px] py-2 px-2.5 rounded-xl bg-zinc-600 hover:bg-zinc-700 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50"
               >
-                <Save className="w-3.5 h-3.5" />
-                <span>{adminSubmitting === 'save' ? 'Saving…' : 'Save'}</span>
+                <ChevronRight className="w-3.5 h-3.5" />
+                <span>Next</span>
               </button>
 
-              {/* Download */}
+              {/* Save & Download */}
               <button
                 type="button"
                 disabled={!readyToFinalize || Boolean(adminSubmitting)}
                 onClick={async () => {
                   try {
-                    setAdminSubmitting('download');
+                    setAdminSubmitting('save_download');
                     const result = await saveCertificateRecord({ isLocked: true });
                     setCertForm(prev => ({ ...prev, isLocked: true }));
                     const { pdf } = await buildCertificatePdf();
                     pdf.save(`${getDownloadFilename(certForm.certificateNo, certForm.customerName, certForm.issueDate)}.pdf`);
                     uploadToDriveBackground(pdf);
                     if (!result.isExisting && result.certificate) advanceToNextCertNumber(result.certificate);
-                  } catch (err) { console.error(err); alert('PDF error: ' + err.message); }
+                    alert('✅ Certificate saved & downloaded.');
+                  } catch (err) { console.error(err); alert('Save & Download error: ' + err.message); }
                   finally { setAdminSubmitting(''); }
                 }}
-                className="flex-1 min-w-[80px] py-2 px-2.5 rounded-xl bg-amber-700 hover:bg-amber-800 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50"
+                className="flex-1 min-w-[120px] py-2 px-2.5 rounded-xl bg-amber-700 hover:bg-amber-800 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50"
               >
                 <Download className="w-3.5 h-3.5" />
-                <span>{adminSubmitting === 'download' ? 'Generating…' : 'Download'}</span>
+                <span>{adminSubmitting === 'save_download' ? 'Processing…' : 'Save & Download'}</span>
               </button>
 
               {/* Print */}
@@ -2801,7 +2857,17 @@ export default function CertificateComplianceGeneratorPage() {
                 <div className="mt-1 shrink-0">
                   <img src={certBase64Assets.footer||branding.footer_image_url||'/assets/Footer - Expert (2025).PNG'} alt="Expert Footer Branding" className={`w-full h-auto ${density.imgMaxH} object-contain mx-auto shrink-0`} onError={e=>{e.target.onerror=null;e.target.src='/assets/footer.png';}}/>
                 </div>
-                     {/* Sticky Bottom Actions Bar for Mobile */}
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+          </div>
+        </div>
+        </div>
+      </div>
+
+      {/* Sticky Bottom Actions Bar for Mobile */}
       <div className="lg:hidden fixed bottom-0 left-0 right-0 z-50 bg-white/95 backdrop-blur-md border-t border-slate-200 p-3 pb-safe shadow-[0_-8px_30px_rgba(0,0,0,0.12)] flex flex-col gap-2">
         {/* Row 1: Quick Actions */}
         <div className="flex gap-2 w-full">
@@ -2816,46 +2882,38 @@ export default function CertificateComplianceGeneratorPage() {
             <span>Prev</span>
           </button>
 
-          {/* Save */}
+          {/* Next */}
           <button
             type="button"
-            disabled={!readyToFinalize || Boolean(adminSubmitting)}
-            onClick={async () => {
-              try {
-                setAdminSubmitting('save');
-                const result = await saveCertificateRecord();
-                uploadToDriveBackground(null);
-                if (!result.isExisting && result.certificate) advanceToNextCertNumber(result.certificate);
-                alert('✅ Certificate saved.');
-              } catch (err) { alert('Save failed: ' + err.message); }
-              finally { setAdminSubmitting(''); }
-            }}
-            className="flex-1 py-2.5 px-2 rounded-xl bg-slate-700 active:scale-95 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50"
+            disabled={Boolean(adminSubmitting)}
+            onClick={handleLoadNextCertificate}
+            className="flex-1 py-2.5 px-2 rounded-xl bg-zinc-600 active:scale-95 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50"
           >
-            <Save className="w-3.5 h-3.5" />
-            <span>{adminSubmitting === 'save' ? 'Saving…' : 'Save'}</span>
+            <ChevronRight className="w-3.5 h-3.5" />
+            <span>Next</span>
           </button>
 
-          {/* Download */}
+          {/* Save & Download */}
           <button
             type="button"
             disabled={!readyToFinalize || Boolean(adminSubmitting)}
             onClick={async () => {
               try {
-                setAdminSubmitting('download');
+                setAdminSubmitting('save_download');
                 const result = await saveCertificateRecord({ isLocked: true });
                 setCertForm(prev => ({ ...prev, isLocked: true }));
                 const { pdf } = await buildCertificatePdf();
                 pdf.save(`${getDownloadFilename(certForm.certificateNo, certForm.customerName, certForm.issueDate)}.pdf`);
                 uploadToDriveBackground(pdf);
                 if (!result.isExisting && result.certificate) advanceToNextCertNumber(result.certificate);
-              } catch (err) { console.error(err); alert('PDF error: ' + err.message); }
+                alert('✅ Certificate saved & downloaded.');
+              } catch (err) { console.error(err); alert('Save & Download error: ' + err.message); }
               finally { setAdminSubmitting(''); }
             }}
             className="flex-1 py-2.5 px-2 rounded-xl bg-amber-700 active:scale-95 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50"
           >
             <Download className="w-3.5 h-3.5" />
-            <span>{adminSubmitting === 'download' ? 'Generating…' : 'Download'}</span>
+            <span>{adminSubmitting === 'save_download' ? 'Processing…' : 'Save & Download'}</span>
           </button>
 
           {/* Print */}

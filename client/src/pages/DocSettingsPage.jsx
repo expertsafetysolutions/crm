@@ -210,6 +210,27 @@ export default function DocSettingsPage() {
     setIsDirty(true);
   };
 
+  const updateCertTableTitle = (formatType, val) => {
+    setLocalSettings(prev => {
+      const certConfig = prev.document_configs?.CERTIFICATE || {};
+      const currentTitles = certConfig.equipment_table_titles || {};
+      return {
+        ...prev,
+        document_configs: {
+          ...prev.document_configs,
+          CERTIFICATE: {
+            ...certConfig,
+            equipment_table_titles: {
+              ...currentTitles,
+              [formatType]: val
+            }
+          }
+        }
+      };
+    });
+    setIsDirty(true);
+  };
+
   const handleSave = async () => {
     setSaveStatus('saving');
     const result = await updateDocSettings(localSettings);
@@ -554,6 +575,39 @@ export default function DocSettingsPage() {
                       onChange={v => updateCertColumn(col.key, v)}
                       label={col.label}
                     />
+                  ))}
+                </div>
+              </SectionCard>
+
+              {/* Equipment Table Titles */}
+              <SectionCard title="✏️ Equipment Table Titles (per Certificate Type)" className="md:col-span-2">
+                <p className="text-xs text-slate-400 mb-3">Customize the title displayed above the equipment table for each certificate format:</p>
+                <div className="space-y-3">
+                  {[
+                    { key: 'Refilling', label: 'Refilling Certificate' },
+                    { key: 'HP Testing', label: 'HP Testing Certificate' },
+                    { key: 'New Fire Extinguisher', label: 'New Fire Extinguisher' },
+                    { key: 'System Installation', label: 'System Installation' },
+                    { key: 'AMC Certificate', label: 'AMC Certificate' },
+                    { key: 'Visit Report', label: 'Visit Report' },
+                  ].map(format => (
+                    <div key={format.key} className="flex flex-col sm:flex-row sm:items-center gap-2">
+                      <span className="text-xs font-bold text-slate-600 sm:w-1/3 truncate">{format.label}</span>
+                      <input
+                        type="text"
+                        className="flex-1 px-3 py-1.5 rounded-lg border border-slate-300 focus:outline-hidden focus:ring-1 focus:ring-rose-500 font-bold text-xs"
+                        value={cert.equipment_table_titles?.[format.key] ?? ''}
+                        placeholder={
+                          format.key === 'HP Testing' ? 'Certified Equipment & HPT Summary' :
+                          format.key === 'New Fire Extinguisher' ? 'Certified Equipment Warranty & Summary' :
+                          format.key === 'System Installation' ? 'Installed Systems & Equipment Summary' :
+                          format.key === 'AMC Certificate' ? 'Certified Equipment & AMC Schedule Summary' :
+                          format.key === 'Visit Report' ? 'Inspected Equipment & Observations Summary' :
+                          'Certified Equipment & Schedule Summary'
+                        }
+                        onChange={e => updateCertTableTitle(format.key, e.target.value)}
+                      />
+                    </div>
                   ))}
                 </div>
               </SectionCard>

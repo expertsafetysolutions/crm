@@ -49,6 +49,14 @@ export const DEFAULT_DOC_SETTINGS = {
         qty: true,
         refill_date: true,
         valid_until: true
+      },
+      equipment_table_titles: {
+        Refilling: 'Certified Equipment & Schedule Summary',
+        'HP Testing': 'Certified Equipment & HPT Summary',
+        'New Fire Extinguisher': 'Certified Equipment Warranty & Summary',
+        'System Installation': 'Installed Systems & Equipment Summary',
+        'AMC Certificate': 'Certified Equipment & AMC Schedule Summary',
+        'Visit Report': 'Inspected Equipment & Observations Summary'
       }
     }
   }

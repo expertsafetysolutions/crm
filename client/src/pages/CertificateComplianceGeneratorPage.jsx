@@ -40,7 +40,6 @@ const CERT_SECTIONS = [
   { id: 'equipmentNotes', label: 'Custom Notes',             pdf: true  },
   { id: 'formatSpecific', label: 'Format-Specific Details',  pdf: true  },
   { id: 'title',          label: 'Certificate Title',        pdf: true  },
-  { id: 'tableHeaderTitle', label: 'Table Header Title',     pdf: true  },
   { id: 'statusBadge',    label: 'Compliance Status Badge',  pdf: false },
   { id: 'certNo',         label: 'Certificate No Structure', pdf: true  },
   { id: 'customColumns',  label: 'Custom Table Columns',     pdf: true  },
@@ -397,7 +396,6 @@ export default function CertificateComplianceGeneratorPage() {
     certificateNo: 'Expert/26-27/R310',
     editCoolingDays: 3,
     title: 'FIRE EXTINGUISHER REFILLING & MAINTENANCE CERTIFICATE',
-    tableHeaderTitle: 'Certified Equipment & Schedule Summary',
     customerName: '',
     address: '',
     gstin: '',
@@ -612,7 +610,6 @@ export default function CertificateComplianceGeneratorPage() {
   const handleCertFormatChange = (newFormat) => {
     let title = 'FIRE EXTINGUISHER REFILLING & MAINTENANCE CERTIFICATE';
     let details = 'Fire Extinguishers Refilling, Testing & Maintenance as per IS:2190 standards';
-    let tableHeaderTitle = 'Certified Equipment & Schedule Summary';
     let duration = '1 Year';
     let yearsToAdd = 1;
     let defaultBodyIntro = [];
@@ -660,7 +657,6 @@ export default function CertificateComplianceGeneratorPage() {
       seqSuffix = `TR${nextSeq}`;
       defaultBodyIntro = ["This is to certify that we have conducted practical fire extinguisher operation and basic fire safety training for the safety program participants."];
       defaultCustomCertify = ["The trainees participated in mock fire drill demonstrations and basic instruction on fire safety guidelines."];
-      tableHeaderTitle = 'Fire training Participate Employees detail is mention below:';
     } else {
       seqSuffix = `R${nextSeq}`;
       defaultBodyIntro = ["This is to certify that the under noted fire extinguisher/s has/have been refilled by us on as per below details."];
@@ -678,7 +674,6 @@ export default function CertificateComplianceGeneratorPage() {
 
     setCertForm(prev => {
       const nextTitle = systemSettings.title || title;
-      const nextTableHeaderTitle = systemSettings.tableHeaderTitle || tableHeaderTitle;
       const nextDetails = systemSettings.equipmentDetails || details;
       const nextPrefix = systemSettings.certPrefix || currentPrefix;
       const nextPeriod = systemSettings.certPeriod || currentPeriod;
@@ -709,9 +704,12 @@ export default function CertificateComplianceGeneratorPage() {
         visitObservations: systemSettings.visitObservations || '',
         
         // Settings-isolated properties
+        formatType: newFormat,
+        certPrefix: nextPrefix,
+        certPeriod: nextPeriod,
+        certSequence: nextSequence,
         certificateNo: nextCertNo,
         title: nextTitle,
-        tableHeaderTitle: nextTableHeaderTitle,
         equipmentDetails: nextDetails,
         validityDuration: nextValidityDuration,
         validUntil: nextValidUntil,
@@ -2030,19 +2028,6 @@ export default function CertificateComplianceGeneratorPage() {
                 </div>
                 );
 
-                certSectionBlocks.tableHeaderTitle = (
-                <div className="space-y-1">
-                  <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wide">Table Header Title</label>
-                  <input
-                    type="text"
-                    value={certForm.tableHeaderTitle || ''}
-                    onChange={e => setCertForm(prev => ({ ...prev, tableHeaderTitle: e.target.value }))}
-                    className="w-full px-3 py-2 bg-white border border-slate-350 rounded-lg font-bold text-slate-800 text-xs focus:ring-2 focus:ring-amber-500 focus:outline-none"
-                    placeholder="Enter Table Header Title (e.g. Certified Equipment & Schedule Summary)"
-                  />
-                </div>
-                );
-
                 certSectionBlocks.statusBadge = (
                 <div className="space-y-1">
                   <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wide">Compliance Status Badge</label>
@@ -2406,7 +2391,6 @@ export default function CertificateComplianceGeneratorPage() {
                               certificate_types: {
                                 [certForm.formatType]: {
                                   title: certForm.title,
-                                  tableHeaderTitle: certForm.tableHeaderTitle,
                                   bodyIntroLines: certForm.bodyIntroLines,
                                   customCertifyLines: certForm.customCertifyLines,
                                   customEquipmentNotes: certForm.customEquipmentNotes,
@@ -2463,7 +2447,6 @@ export default function CertificateComplianceGeneratorPage() {
                               certificate_types: {
                                 [certForm.formatType]: {
                                   title: certForm.title,
-                                  tableHeaderTitle: certForm.tableHeaderTitle,
                                   bodyIntroLines: certForm.bodyIntroLines,
                                   customCertifyLines: certForm.customCertifyLines,
                                   customEquipmentNotes: certForm.customEquipmentNotes,
@@ -2741,11 +2724,16 @@ export default function CertificateComplianceGeneratorPage() {
                   )}
                   {(!hideEquipmentSection && (certForm.itemsList||[]).length > 0) && (
                     <div className={density.tableMt}>
-                      {isSectionVisible('tableHeaderTitle') && (
-                        <div className="font-extrabold text-xs text-red-950 text-center border-b border-red-400 mb-2" style={{ paddingBottom: '10px', lineHeight: '1.2' }}>
-                          {certForm.tableHeaderTitle || 'Certified Equipment & Schedule Summary'}
-                        </div>
-                      )}
+                      <div className="font-extrabold text-xs text-red-950 text-center border-b border-red-400 mb-2" style={{ paddingBottom: '10px', lineHeight: '1.2' }}>
+                        {certCfg.equipment_table_titles?.[certForm.formatType] || (
+                          certForm.formatType === 'HP Testing' ? 'Certified Equipment & HPT Summary' :
+                          certForm.formatType === 'New Fire Extinguisher' ? 'Certified Equipment Warranty & Summary' :
+                          certForm.formatType === 'System Installation' ? 'Installed Systems & Equipment Summary' :
+                          certForm.formatType === 'AMC Certificate' ? 'Certified Equipment & AMC Schedule Summary' :
+                          certForm.formatType === 'Visit Report' ? 'Inspected Equipment & Observations Summary' :
+                          'Certified Equipment & Schedule Summary'
+                        )}
+                      </div>
                       <table className={`w-full ${density.cellText} border-collapse border border-slate-400 shadow-2xs`}>
                         <thead>
                           <tr className="bg-transparent text-red-950 font-extrabold text-left">

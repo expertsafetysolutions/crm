@@ -259,26 +259,54 @@ router.put('/service-reports/:id/status', async (req, res) => {
 });
 
 // --- CLIENT EQUIPMENT MASTER INVENTORY ENDPOINTS ---
+// Records written before report types existed carry no Report_Type and are all extinguisher data.
+const DEFAULT_CLIENT_EQUIPMENT_TYPE = 'FIRE_EXTINGUISHER';
+
+const matchesClientEquipment = (row, customerId, reportType) => {
+  const rowCustomer = String(row.Customer_ID || row.customerId || '').toLowerCase();
+  const rowType = String(row.Report_Type || DEFAULT_CLIENT_EQUIPMENT_TYPE).toUpperCase();
+  return rowCustomer === String(customerId).toLowerCase() && rowType === String(reportType).toUpperCase();
+};
+
 router.get('/client-equipment/:customerId', async (req, res) => {
   try {
-    const items = await sheetsService.getTab('Client_Equipment_Master');
-    const filtered = items.filter(x => String(x.Customer_ID || x.customerId || '').toLowerCase() === String(req.params.customerId).toLowerCase());
-    res.json(filtered);
+    const reportType = req.query.reportType || DEFAULT_CLIENT_EQUIPMENT_TYPE;
+    const rows = await sheetsService.getTab('Client_Equipment_Master');
+    res.json(rows.filter(x => matchesClientEquipment(x, req.params.customerId, reportType)));
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch client equipment master' });
   }
 });
 
+// Upsert: one equipment list per customer per report type. This previously inserted a new row on
+// every save, so the collection accumulated a duplicate per save and readers had to take the last
+// match to find current data.
 router.post('/client-equipment/:customerId', async (req, res) => {
   try {
-    const { items } = req.body;
+    const { items, reportType } = req.body;
     const customerId = req.params.customerId;
-    const inserted = await sheetsService.insertRow('Client_Equipment_Master', {
+    const type = String(reportType || DEFAULT_CLIENT_EQUIPMENT_TYPE).toUpperCase();
+
+    const rows = await sheetsService.getTab('Client_Equipment_Master');
+    const existing = rows.filter(x => matchesClientEquipment(x, customerId, type)).pop();
+
+    const payload = {
       Customer_ID: customerId,
+      Report_Type: type,
       items: items || [],
       Updated_At: new Date().toISOString()
+    };
+
+    if (existing && existing.id) {
+      const updated = await sheetsService.updateRow('Client_Equipment_Master', 'id', existing.id, payload);
+      return res.json({ success: true, record: updated, created: false });
+    }
+
+    const inserted = await sheetsService.insertRow('Client_Equipment_Master', {
+      id: `CEQ_${Date.now()}`,
+      ...payload
     });
-    res.json({ success: true, record: inserted });
+    res.json({ success: true, record: inserted, created: true });
   } catch (err) {
     res.status(500).json({ error: 'Failed to save client equipment master' });
   }

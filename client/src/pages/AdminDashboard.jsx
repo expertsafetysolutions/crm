@@ -651,7 +651,7 @@ export default function AdminDashboard() {
 
       if (filterSelectedUsers.length === 1) {
         const selectedStaffNameOrId = filterSelectedUsers[0];
-        const staffMember = staff.find(s => s.Name === selectedStaffNameOrId || s.Staff_ID === selectedStaffNameOrId);
+        const staffMember = staffList.find(s => s.Name === selectedStaffNameOrId || s.Staff_ID === selectedStaffNameOrId);
         if (staffMember?.Staff_ID) {
           const staffTaskIds = taskList
             .filter(t => t.Assigned_Staff === staffMember.Staff_ID || t.Assigned_Staff_Name === staffMember.Name)
@@ -663,7 +663,7 @@ export default function AdminDashboard() {
             body: JSON.stringify({ taskOrder: staffTaskIds })
           });
 
-          setStaff(prev => prev.map(s => s.Staff_ID === staffMember.Staff_ID ? { ...s, Task_Order: staffTaskIds } : s));
+          setStaffList(prev => prev.map(s => s.Staff_ID === staffMember.Staff_ID ? { ...s, Task_Order: staffTaskIds } : s));
         }
       }
     } catch { }
@@ -1806,7 +1806,7 @@ export default function AdminDashboard() {
 
     if (filterSelectedUsers.length === 1) {
       const selectedStaffNameOrId = filterSelectedUsers[0];
-      const staffMember = staff.find(s => s.Name === selectedStaffNameOrId || s.Staff_ID === selectedStaffNameOrId);
+      const staffMember = staffList.find(s => s.Name === selectedStaffNameOrId || s.Staff_ID === selectedStaffNameOrId);
       const taskOrder = staffMember?.Task_Order;
       if (Array.isArray(taskOrder) && taskOrder.length > 0) {
         list = [...list].sort((a, b) => {
@@ -1820,7 +1820,7 @@ export default function AdminDashboard() {
       }
     }
     return list;
-  }, [tasks, filterStatus, activeTagFilters, filterSelectedUsers, filterSelectedDates, filterStartDate, filterEndDate, searchQuery, customersById, customersByName, staff]);
+  }, [tasks, filterStatus, activeTagFilters, filterSelectedUsers, filterSelectedDates, filterStartDate, filterEndDate, searchQuery, customersById, customersByName, staffList]);
 
   const filteredCustomers = useMemo(() => customers.filter(c => {
     if (!searchQuery.trim()) return true;

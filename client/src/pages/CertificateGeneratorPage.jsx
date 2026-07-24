@@ -319,6 +319,8 @@ export default function CertificateGeneratorPage() {
   }, [notOkIssues, reportForm.autoSummary]);
 
   const [allReports, setAllReports] = useState([]);
+  // The client's most recent report of this type, offered as a starting point (item 8).
+  const [previousReport, setPreviousReport] = useState(null);
 
   // Client Search State
   const [clientSearch, setClientSearch] = useState('');
@@ -453,13 +455,52 @@ export default function CertificateGeneratorPage() {
     loadAllCertAssets();
   }, [userRole]);
 
-  // Select Client. Captures Customer_ID so the equipment table can be loaded from / saved to that
-  // client's saved equipment registry.
-  const handleSelectClient = (c) => {
-    const custName = c.Company_Name || c.Customer_Name || '';
+  // The client's most recent report of this type (by service date, then created date), excluding
+  // the report currently open. Used to carry last visit's equipment and statuses forward (item 8).
+  const findPreviousReport = (customerName, customerId) => {
+    const key = (customerName || '').trim().toLowerCase();
+    const idKey = (customerId || '').trim().toLowerCase();
+    const when = (r) => new Date(r.serviceDate || r.Created_At || r.Updated_At || 0).getTime() || 0;
+    return (allReports || [])
+      .filter(r => (r.Report_ID || '') !== reportForm.Report_ID)
+      .filter(r => (r.reportType || DEFAULT_REPORT_TYPE) === reportForm.reportType)
+      .filter(r => {
+        const rName = (r.customerName || '').trim().toLowerCase();
+        const rId = (r.customerId || '').trim().toLowerCase();
+        return (key && rName === key) || (idKey && rId === idKey);
+      })
+      .sort((a, b) => when(b) - when(a))[0] || null;
+  };
+
+  // Load the previous report's equipment into this report as the starting point. Statuses (incl.
+  // any NOT OK) carry over so the technician can confirm whether each was rectified; rows come in
+  // unchecked so they must be reviewed this visit.
+  const loadPreviousReportEquipment = (prevReport) => {
+    if (!prevReport?.itemsList?.length) return;
+    const stamp = Date.now();
+    const items = prevReport.itemsList.map((row, i) => ({
+      ...row,
+      id: 'eq-' + stamp + '-' + i + '-' + Math.random().toString(36).slice(2, 6),
+      serviced: false
+    }));
     setReportForm(prev => ({
       ...prev,
-      customerId: c.Customer_ID || c.customerId || '',
+      itemsList: items,
+      customColumns: (prevReport.customColumns && prevReport.customColumns.length)
+        ? prevReport.customColumns
+        : prev.customColumns
+    }));
+    setActiveMobileTab('preview');
+  };
+
+  // Select Client. Captures Customer_ID so the equipment table can be loaded from / saved to that
+  // client's registry, and (for a new report) offers the client's last report of this type.
+  const handleSelectClient = (c) => {
+    const custName = c.Company_Name || c.Customer_Name || '';
+    const custId = c.Customer_ID || c.customerId || '';
+    setReportForm(prev => ({
+      ...prev,
+      customerId: custId,
       customerName: custName,
       address: c.Address || c.Location || '',
       gstin: c.GSTIN || c.Gst_No || '',
@@ -469,6 +510,13 @@ export default function CertificateGeneratorPage() {
     setClientSearch(custName);
     setShowClientDropdown(false);
     setActiveMobileTab('preview');
+
+    // Only when creating a new report — don't disturb an existing report being edited.
+    if (!reportId) {
+      const prevReport = findPreviousReport(custName, custId);
+      setPreviousReport(prevReport);
+      if (prevReport) loadPreviousReportEquipment(prevReport);
+    }
   };
 
   // Frequency Change & Auto-Calculate Dates + Schedule
@@ -1231,6 +1279,42 @@ export default function CertificateGeneratorPage() {
               ═══════════════════════════════════════════════════════════ */}
           {wizardStep === 2 && (
             <div className="space-y-3 pt-1 text-xs">
+              {/* Previous-report banner — carried forward from the client's last visit (item 8) */}
+              {previousReport && (
+                <div className="bg-indigo-50 border border-indigo-300 rounded-xl p-3 flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-start gap-2">
+                    <RotateCcw className="w-4 h-4 text-indigo-600 mt-0.5 shrink-0" />
+                    <div className="text-[11px] text-slate-700">
+                      <span className="font-black text-indigo-900">Loaded last visit’s equipment</span>
+                      {' '}from <span className="font-bold">{previousReport.Report_ID}</span>
+                      {previousReport.serviceDate ? ` (${formatDateDDMMYYYY(previousReport.serviceDate)})` : ''}.
+                      {(() => {
+                        const prevIssues = collectNotOkIssues(previousReport.itemsList || [], previewColumns).length;
+                        return prevIssues > 0
+                          ? <span className="block text-rose-700 font-bold mt-0.5">⚠ {prevIssues} item(s) were NOT OK last time — confirm each is now rectified.</span>
+                          : <span className="block text-emerald-700 font-semibold mt-0.5">All items were OK last time.</span>;
+                      })()}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => loadPreviousReportEquipment(previousReport)}
+                      className="px-2.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-bold text-[11px]"
+                    >
+                      Reload
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setReportForm(prev => ({ ...prev, itemsList: [] })); setPreviousReport(null); }}
+                      className="px-2.5 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-lg font-bold text-[11px]"
+                    >
+                      Start Fresh
+                    </button>
+                  </div>
+                </div>
+              )}
+
               <div className="bg-amber-50/90 border border-amber-300 rounded-xl p-3.5 space-y-3 shadow-2xs">
 
                 {/* Rapid Search Bar & Add Column Bar */}

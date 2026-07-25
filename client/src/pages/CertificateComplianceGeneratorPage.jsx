@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useDocSettings } from '../context/DocSettingsContext';
-import { getLocalDateStr, formatDateDDMMYYYY } from '../utils/dateUtils';
+import { getLocalDateStr, formatDateDDMMYYYY, getRecordCreatedAt } from '../utils/dateUtils';
 import {
   ChevronLeft,
   ChevronRight,
@@ -365,6 +365,7 @@ export default function CertificateComplianceGeneratorPage() {
   };
 
   const [loadError, setLoadError] = useState(null);
+  const [customersLoadFailed, setCustomersLoadFailed] = useState(false);
   const [customers, setCustomers] = useState([]);
   const [equipmentMasterList, setEquipmentMasterList] = useState([]);
   const [task, setTask] = useState(null);
@@ -701,6 +702,7 @@ export default function CertificateComplianceGeneratorPage() {
         const certsData = certsRes.ok ? await certsRes.json() : [];
         if (cancelled) return;
         setCustomers(Array.isArray(custData) ? custData : []);
+        setCustomersLoadFailed(!custRes.ok);
         setEquipmentMasterList(Array.isArray(eqData) ? eqData : []);
         setAllCertificates(Array.isArray(certsData) ? certsData : []);
 
@@ -763,6 +765,18 @@ export default function CertificateComplianceGeneratorPage() {
     })();
     return () => { cancelled = true; };
   }, [taskId, token]);
+
+  const retryLoadCustomers = async () => {
+    try {
+      const res = await fetch('/api/customers', { headers: { Authorization: `Bearer ${token}` } });
+      const data = res.ok ? await res.json() : [];
+      setCustomers(Array.isArray(data) ? data : []);
+      setCustomersLoadFailed(!res.ok);
+    } catch {
+      setCustomersLoadFailed(true);
+    }
+  };
+
   // Apply loaded doc settings to new certificate on mount or when docSettings changes
   useEffect(() => {
     if (!docSettings || !certForm.formatType) return;
@@ -930,6 +944,62 @@ export default function CertificateComplianceGeneratorPage() {
     }));
   };
 
+  // Previous/Next cycle through allCertificates sorted newest-first by creation time.
+  // "Previous" = older certificate, "Next" = newer certificate relative to the one currently open.
+  const loadCertificateAtOffset = (offset) => {
+    if (allCertificates.length === 0) {
+      alert("No certificates found in history.");
+      return;
+    }
+    const sortedCerts = [...allCertificates].sort((a, b) => {
+      const ta = getRecordCreatedAt(a)?.getTime();
+      const tb = getRecordCreatedAt(b)?.getTime();
+      if (ta === undefined && tb === undefined) return 0;
+      if (ta === undefined) return 1;
+      if (tb === undefined) return -1;
+      return tb - ta;
+    });
+    const currentIndex = sortedCerts.findIndex(c =>
+      (c.verificationGuid && c.verificationGuid === certForm.verificationGuid) ||
+      (c.Verification_GUID && c.Verification_GUID === certForm.verificationGuid)
+    );
+    let targetIndex = currentIndex === -1 ? 0 : currentIndex + offset;
+    if (targetIndex < 0) { alert("You are already at the newest certificate."); return; }
+    if (targetIndex >= sortedCerts.length) { alert("You have reached the oldest certificate."); return; }
+
+    const targetCert = sortedCerts[targetIndex];
+    const newCertNo = targetCert.Certificate_No || targetCert.certificateNo || '';
+    const newRevision = (targetCert.Revision || targetCert.revision || 0);
+    const loadedChallanDate = targetCert.Challan_Date || targetCert.challanDate || targetCert.Issue_Date || targetCert.issueDate || getLocalDateStr();
+    const loadedValidUntil = targetCert.Valid_Until || targetCert.validUntil || '';
+
+    setCertForm({
+      ...targetCert,
+      certificateNo: newCertNo,
+      revision: newRevision,
+      isLocked: false,
+      isContentUnlocked: true,
+      customerName: targetCert.Customer_Name || targetCert.customerName || '',
+      address: targetCert.Address || targetCert.address || '',
+      gstin: targetCert.GSTIN || targetCert.gstin || '',
+      contact: targetCert.Contact || targetCert.contact || '',
+      authPerson: targetCert.Auth_Person || targetCert.authPerson || '',
+      issueDate: targetCert.Issue_Date || targetCert.issueDate || getLocalDateStr(),
+      validUntil: loadedValidUntil,
+      challanDate: loadedChallanDate,
+      verificationGuid: targetCert.Verification_GUID || targetCert.verificationGuid
+    });
+
+    setNewItemRefillDate(loadedChallanDate);
+    setNewItemNextDate(loadedValidUntil);
+    setCertCustomerSearch(targetCert.Customer_Name || targetCert.customerName || '');
+    setActiveMobileTab('edit');
+    alert(`Loaded Certificate ${newCertNo}`);
+  };
+
+  const handleLoadPreviousCertificate = () => loadCertificateAtOffset(1);
+  const handleLoadNextCertificate = () => loadCertificateAtOffset(-1);
+
   const generateCertificateCanvas = async () => {
     if (!certPreviewRef.current) throw new Error('Certificate preview container is not ready.');
     const { default: html2canvas } = await import('html2canvas');
@@ -951,7 +1021,22 @@ export default function CertificateComplianceGeneratorPage() {
         const cw = clonedDoc.getElementById('cert-scale-wrapper');
         if (cw) { cw.style.width = '794px'; cw.style.height = '1123px'; cw.style.overflow = 'visible'; }
         const cr = clonedDoc.getElementById('certificate-print-root');
-        if (cr) { cr.style.transform = 'none'; cr.style.width = '794px'; cr.style.height = '1123px'; }
+        if (cr) {
+          cr.style.transform = 'none'; cr.style.width = '794px'; cr.style.height = '1123px';
+          // html2canvas doesn't reliably vertically-center flex children (text sits low in the
+          // rendered PDF even though it looks fine in the live browser preview). The badge boxes
+          // above use display:table/table-cell + vertical-align:middle, which html2canvas renders
+          // correctly — this style tag is a defensive backstop in case a stray flex/items-center
+          // class ever slips back in on one of those boxes.
+          const styleTag = clonedDoc.createElement('style');
+          styleTag.textContent = `
+            #certificate-print-root [style*="display: table-cell"],
+            #certificate-print-root [style*="display:table-cell"] {
+              vertical-align: middle !important;
+            }
+          `;
+          cr.appendChild(styleTag);
+        }
         const imgs = Array.from(clonedDoc.querySelectorAll('img'));
         await Promise.all(imgs.map(async img => {
           img.crossOrigin = 'anonymous';
@@ -1235,6 +1320,12 @@ export default function CertificateComplianceGeneratorPage() {
                       </div>
                     )}
                   </div>
+                  {customersLoadFailed && (
+                    <div className="flex items-center justify-between gap-2 mt-1 px-2 py-1 bg-rose-50 border border-rose-200 rounded-lg">
+                      <span className="text-[10px] font-bold text-rose-700">Couldn't load the customer list — check your connection.</span>
+                      <button type="button" onClick={retryLoadCustomers} className="text-[10px] font-bold text-rose-700 underline shrink-0">Retry</button>
+                    </div>
+                  )}
                 </div>
 
                 {/* 3. Address */}
@@ -1476,7 +1567,7 @@ export default function CertificateComplianceGeneratorPage() {
                     <div className="bg-slate-50 px-3 py-1.5 text-[10px] font-bold text-slate-600 uppercase tracking-wide border-b border-slate-200">
                       Certificate Items — {(certForm.itemsList||[]).length} row(s)
                     </div>
-                    <div className="divide-y divide-slate-100 max-h-44 overflow-y-auto">
+                    <div className="divide-y divide-slate-100 max-h-[60vh] overflow-y-auto">
                       {(certForm.itemsList||[]).map((it, idx) => (
                         <div key={it.id||idx} className="flex items-start justify-between px-3 py-2 hover:bg-slate-50 gap-2">
                           <div className="flex items-start gap-2 flex-1 min-w-0">
@@ -1592,7 +1683,7 @@ export default function CertificateComplianceGeneratorPage() {
                           </div>
                           <button type="button"
                             onClick={() => setCertForm(prev => ({...prev, itemsList: (prev.itemsList||[]).filter((_,i)=>i!==idx).map((item,i)=>({...item,srNo:i+1}))}))}
-                            className="text-slate-300 hover:text-rose-500 p-1 mt-0.5 shrink-0 transition"><X className="w-3.5 h-3.5"/></button>
+                            className="text-red-600 hover:text-red-700 p-1 mt-0.5 shrink-0 transition"><X className="w-3.5 h-3.5"/></button>
                         </div>
                       ))}
                     </div>
@@ -2416,13 +2507,13 @@ export default function CertificateComplianceGeneratorPage() {
                 </div>
                 )}
 
-                <div className="flex justify-between items-center text-xs font-extrabold text-red-950 bg-red-50/80 px-4 h-8 rounded border border-red-300 mb-4">
-                  <div>{isSectionVisible('certNo') && <>Ref / Cert No:&nbsp;<span className="text-slate-900">{certForm.certificateNo}</span></>}</div>
-                  <div className="flex items-center">Date:&nbsp;<span className="text-slate-800 font-bold">{formatDateDDMMYYYY(certForm.issueDate)}</span></div>
+                <div className="text-xs font-extrabold text-red-950 bg-red-50/80 px-4 h-8 rounded border border-red-300 mb-4" style={{ display: 'table', width: '100%', tableLayout: 'fixed' }}>
+                  <div style={{ display: 'table-cell', verticalAlign: 'middle', textAlign: 'left' }}>{isSectionVisible('certNo') && <>Ref / Cert No:&nbsp;<span className="text-slate-900">{certForm.certificateNo}</span></>}</div>
+                  <div style={{ display: 'table-cell', verticalAlign: 'middle', textAlign: 'right' }}>Date:&nbsp;<span className="text-slate-800 font-bold">{formatDateDDMMYYYY(certForm.issueDate)}</span></div>
                 </div>
                 {isSectionVisible('title') && (
                 <div className="flex justify-center w-full my-4">
-                  <span className="flex items-center justify-center bg-red-700 text-white font-black text-sm px-5 h-10 rounded-md uppercase tracking-wider shadow-md border border-red-800 text-center">{certForm.title}</span>
+                  <span className="bg-red-700 text-white font-black text-sm px-5 h-10 rounded-md uppercase tracking-wider shadow-md border border-red-800 text-center" style={{ display: 'table' }}><span style={{ display: 'table-cell', verticalAlign: 'middle' }}>{certForm.title}</span></span>
                 </div>
                 )}
                 <div className={`${density.bodyText} leading-relaxed text-slate-800 text-justify ${density.bodySpace}`}>
@@ -2444,27 +2535,27 @@ export default function CertificateComplianceGeneratorPage() {
                    )}
 
                   {isSectionVisible('formatSpecific') && certForm.formatType === 'HP Testing' && (
-                    <div className="bg-slate-50 px-4 h-9 rounded border border-slate-300 text-[11px] flex items-center justify-between font-bold shadow-2xs">
-                      <div className="flex items-center">Test Pressure:&nbsp;<span className="text-indigo-855 font-black">{certForm.hpTestPressure}</span></div>
-                      <div className="flex items-center">Result:&nbsp;<span className="text-emerald-750 font-black">{certForm.hpTestResult}</span></div>
+                    <div className="bg-slate-50 px-4 h-9 rounded border border-slate-300 text-[11px] font-bold shadow-2xs" style={{ display: 'table', width: '100%', tableLayout: 'fixed' }}>
+                      <div style={{ display: 'table-cell', verticalAlign: 'middle', textAlign: 'left' }}>Test Pressure:&nbsp;<span className="text-indigo-855 font-black">{certForm.hpTestPressure}</span></div>
+                      <div style={{ display: 'table-cell', verticalAlign: 'middle', textAlign: 'right' }}>Result:&nbsp;<span className="text-emerald-750 font-black">{certForm.hpTestResult}</span></div>
                     </div>
                   )}
                   {isSectionVisible('formatSpecific') && certForm.formatType === 'New Fire Extinguisher' && (
-                    <div className="bg-slate-50 px-4 h-9 rounded border border-slate-300 text-[11px] flex items-center justify-between font-bold shadow-2xs">
-                      <div className="flex items-center">ISI Mark:&nbsp;<span className="text-indigo-855 font-black">{certForm.isiMarkNumber}</span></div>
-                      <div className="flex items-center">Warranty:&nbsp;<span className="text-red-950 font-black">{certForm.newExtinguisherWarranty}</span></div>
+                    <div className="bg-slate-50 px-4 h-9 rounded border border-slate-300 text-[11px] font-bold shadow-2xs" style={{ display: 'table', width: '100%', tableLayout: 'fixed' }}>
+                      <div style={{ display: 'table-cell', verticalAlign: 'middle', textAlign: 'left' }}>ISI Mark:&nbsp;<span className="text-indigo-855 font-black">{certForm.isiMarkNumber}</span></div>
+                      <div style={{ display: 'table-cell', verticalAlign: 'middle', textAlign: 'right' }}>Warranty:&nbsp;<span className="text-red-950 font-black">{certForm.newExtinguisherWarranty}</span></div>
                     </div>
                   )}
                   {isSectionVisible('formatSpecific') && certForm.formatType === 'System Installation' && (
-                    <div className="bg-slate-50 px-4 h-9 rounded border border-slate-300 text-[11px] flex items-center justify-between font-bold shadow-2xs">
-                      <div className="flex items-center">System:&nbsp;<span className="text-indigo-950 font-black">{certForm.systemInstallationType}</span></div>
-                      <div className="flex items-center text-emerald-750">Status:&nbsp;<span className="font-black">{certForm.systemStatus}</span></div>
+                    <div className="bg-slate-50 px-4 h-9 rounded border border-slate-300 text-[11px] font-bold shadow-2xs" style={{ display: 'table', width: '100%', tableLayout: 'fixed' }}>
+                      <div style={{ display: 'table-cell', verticalAlign: 'middle', textAlign: 'left' }}>System:&nbsp;<span className="text-indigo-950 font-black">{certForm.systemInstallationType}</span></div>
+                      <div className="text-emerald-750" style={{ display: 'table-cell', verticalAlign: 'middle', textAlign: 'right' }}>Status:&nbsp;<span className="font-black">{certForm.systemStatus}</span></div>
                     </div>
                   )}
                   {isSectionVisible('formatSpecific') && certForm.formatType === 'AMC Certificate' && (
-                    <div className="bg-slate-50 px-4 h-9 rounded border border-slate-300 text-[11px] flex items-center justify-between font-bold shadow-2xs">
-                      <div className="flex items-center">Period:&nbsp;<span className="text-indigo-950 font-black">{certForm.amcPeriod}</span></div>
-                      <div className="flex items-center">Frequency:&nbsp;<span className="text-emerald-855 font-black">{certForm.amcFrequency}</span></div>
+                    <div className="bg-slate-50 px-4 h-9 rounded border border-slate-300 text-[11px] font-bold shadow-2xs" style={{ display: 'table', width: '100%', tableLayout: 'fixed' }}>
+                      <div style={{ display: 'table-cell', verticalAlign: 'middle', textAlign: 'left' }}>Period:&nbsp;<span className="text-indigo-950 font-black">{certForm.amcPeriod}</span></div>
+                      <div style={{ display: 'table-cell', verticalAlign: 'middle', textAlign: 'right' }}>Frequency:&nbsp;<span className="text-emerald-855 font-black">{certForm.amcFrequency}</span></div>
                     </div>
                   )}
                   {isSectionVisible('formatSpecific') && certForm.formatType === 'Visit Report' && (

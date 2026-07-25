@@ -1021,22 +1021,7 @@ export default function CertificateComplianceGeneratorPage() {
         const cw = clonedDoc.getElementById('cert-scale-wrapper');
         if (cw) { cw.style.width = '794px'; cw.style.height = '1123px'; cw.style.overflow = 'visible'; }
         const cr = clonedDoc.getElementById('certificate-print-root');
-        if (cr) {
-          cr.style.transform = 'none'; cr.style.width = '794px'; cr.style.height = '1123px';
-          // html2canvas doesn't reliably vertically-center flex children (text sits low in the
-          // rendered PDF even though it looks fine in the live browser preview). The badge boxes
-          // above use display:table/table-cell + vertical-align:middle, which html2canvas renders
-          // correctly — this style tag is a defensive backstop in case a stray flex/items-center
-          // class ever slips back in on one of those boxes.
-          const styleTag = clonedDoc.createElement('style');
-          styleTag.textContent = `
-            #certificate-print-root [style*="display: table-cell"],
-            #certificate-print-root [style*="display:table-cell"] {
-              vertical-align: middle !important;
-            }
-          `;
-          cr.appendChild(styleTag);
-        }
+        if (cr) { cr.style.transform = 'none'; cr.style.width = '794px'; cr.style.height = '1123px'; }
         const imgs = Array.from(clonedDoc.querySelectorAll('img'));
         await Promise.all(imgs.map(async img => {
           img.crossOrigin = 'anonymous';
@@ -2507,13 +2492,14 @@ export default function CertificateComplianceGeneratorPage() {
                 </div>
                 )}
 
-                <div className="text-xs font-extrabold text-red-950 bg-red-50/80 px-4 h-8 rounded border border-red-300 mb-4" style={{ display: 'table', width: '100%', tableLayout: 'fixed' }}>
-                  <div style={{ display: 'table-cell', verticalAlign: 'middle', textAlign: 'left' }}>{isSectionVisible('certNo') && <>Ref / Cert No:&nbsp;<span className="text-slate-900">{certForm.certificateNo}</span></>}</div>
-                  <div style={{ display: 'table-cell', verticalAlign: 'middle', textAlign: 'right' }}>Date:&nbsp;<span className="text-slate-800 font-bold">{formatDateDDMMYYYY(certForm.issueDate)}</span></div>
+                <div className="text-xs font-extrabold text-red-950 bg-red-50/80 px-4 rounded border border-red-300 mb-4 clearfix" style={{ paddingTop: '10px', paddingBottom: '10px', lineHeight: '1' }}>
+                  <div style={{ float: 'left' }}>{isSectionVisible('certNo') && <>Ref / Cert No:&nbsp;<span className="text-slate-900">{certForm.certificateNo}</span></>}</div>
+                  <div style={{ float: 'right' }}>Date:&nbsp;<span className="text-slate-800 font-bold">{formatDateDDMMYYYY(certForm.issueDate)}</span></div>
+                  <div style={{ clear: 'both' }} />
                 </div>
                 {isSectionVisible('title') && (
                 <div className="flex justify-center w-full my-4">
-                  <span className="bg-red-700 text-white font-black text-sm px-5 h-10 rounded-md uppercase tracking-wider shadow-md border border-red-800 text-center" style={{ display: 'table' }}><span style={{ display: 'table-cell', verticalAlign: 'middle' }}>{certForm.title}</span></span>
+                  <span className="bg-red-700 text-white font-black text-sm px-5 rounded-md uppercase tracking-wider shadow-md border border-red-800 text-center" style={{ paddingTop: '12px', paddingBottom: '12px', lineHeight: '1', display: 'inline-block' }}>{certForm.title}</span>
                 </div>
                 )}
                 <div className={`${density.bodyText} leading-relaxed text-slate-800 text-justify ${density.bodySpace}`}>
@@ -2535,27 +2521,31 @@ export default function CertificateComplianceGeneratorPage() {
                    )}
 
                   {isSectionVisible('formatSpecific') && certForm.formatType === 'HP Testing' && (
-                    <div className="bg-slate-50 px-4 h-9 rounded border border-slate-300 text-[11px] font-bold shadow-2xs" style={{ display: 'table', width: '100%', tableLayout: 'fixed' }}>
-                      <div style={{ display: 'table-cell', verticalAlign: 'middle', textAlign: 'left' }}>Test Pressure:&nbsp;<span className="text-indigo-855 font-black">{certForm.hpTestPressure}</span></div>
-                      <div style={{ display: 'table-cell', verticalAlign: 'middle', textAlign: 'right' }}>Result:&nbsp;<span className="text-emerald-750 font-black">{certForm.hpTestResult}</span></div>
+                    <div className="bg-slate-50 px-4 rounded border border-slate-300 text-[11px] font-bold shadow-2xs" style={{ paddingTop: '10px', paddingBottom: '10px', lineHeight: '1' }}>
+                      <div style={{ float: 'left' }}>Test Pressure:&nbsp;<span className="text-indigo-855 font-black">{certForm.hpTestPressure}</span></div>
+                      <div style={{ float: 'right' }}>Result:&nbsp;<span className="text-emerald-750 font-black">{certForm.hpTestResult}</span></div>
+                      <div style={{ clear: 'both' }} />
                     </div>
                   )}
                   {isSectionVisible('formatSpecific') && certForm.formatType === 'New Fire Extinguisher' && (
-                    <div className="bg-slate-50 px-4 h-9 rounded border border-slate-300 text-[11px] font-bold shadow-2xs" style={{ display: 'table', width: '100%', tableLayout: 'fixed' }}>
-                      <div style={{ display: 'table-cell', verticalAlign: 'middle', textAlign: 'left' }}>ISI Mark:&nbsp;<span className="text-indigo-855 font-black">{certForm.isiMarkNumber}</span></div>
-                      <div style={{ display: 'table-cell', verticalAlign: 'middle', textAlign: 'right' }}>Warranty:&nbsp;<span className="text-red-950 font-black">{certForm.newExtinguisherWarranty}</span></div>
+                    <div className="bg-slate-50 px-4 rounded border border-slate-300 text-[11px] font-bold shadow-2xs" style={{ paddingTop: '10px', paddingBottom: '10px', lineHeight: '1' }}>
+                      <div style={{ float: 'left' }}>ISI Mark:&nbsp;<span className="text-indigo-855 font-black">{certForm.isiMarkNumber}</span></div>
+                      <div style={{ float: 'right' }}>Warranty:&nbsp;<span className="text-red-950 font-black">{certForm.newExtinguisherWarranty}</span></div>
+                      <div style={{ clear: 'both' }} />
                     </div>
                   )}
                   {isSectionVisible('formatSpecific') && certForm.formatType === 'System Installation' && (
-                    <div className="bg-slate-50 px-4 h-9 rounded border border-slate-300 text-[11px] font-bold shadow-2xs" style={{ display: 'table', width: '100%', tableLayout: 'fixed' }}>
-                      <div style={{ display: 'table-cell', verticalAlign: 'middle', textAlign: 'left' }}>System:&nbsp;<span className="text-indigo-950 font-black">{certForm.systemInstallationType}</span></div>
-                      <div className="text-emerald-750" style={{ display: 'table-cell', verticalAlign: 'middle', textAlign: 'right' }}>Status:&nbsp;<span className="font-black">{certForm.systemStatus}</span></div>
+                    <div className="bg-slate-50 px-4 rounded border border-slate-300 text-[11px] font-bold shadow-2xs" style={{ paddingTop: '10px', paddingBottom: '10px', lineHeight: '1' }}>
+                      <div style={{ float: 'left' }}>System:&nbsp;<span className="text-indigo-950 font-black">{certForm.systemInstallationType}</span></div>
+                      <div className="text-emerald-750" style={{ float: 'right' }}>Status:&nbsp;<span className="font-black">{certForm.systemStatus}</span></div>
+                      <div style={{ clear: 'both' }} />
                     </div>
                   )}
                   {isSectionVisible('formatSpecific') && certForm.formatType === 'AMC Certificate' && (
-                    <div className="bg-slate-50 px-4 h-9 rounded border border-slate-300 text-[11px] font-bold shadow-2xs" style={{ display: 'table', width: '100%', tableLayout: 'fixed' }}>
-                      <div style={{ display: 'table-cell', verticalAlign: 'middle', textAlign: 'left' }}>Period:&nbsp;<span className="text-indigo-950 font-black">{certForm.amcPeriod}</span></div>
-                      <div style={{ display: 'table-cell', verticalAlign: 'middle', textAlign: 'right' }}>Frequency:&nbsp;<span className="text-emerald-855 font-black">{certForm.amcFrequency}</span></div>
+                    <div className="bg-slate-50 px-4 rounded border border-slate-300 text-[11px] font-bold shadow-2xs" style={{ paddingTop: '10px', paddingBottom: '10px', lineHeight: '1' }}>
+                      <div style={{ float: 'left' }}>Period:&nbsp;<span className="text-indigo-950 font-black">{certForm.amcPeriod}</span></div>
+                      <div style={{ float: 'right' }}>Frequency:&nbsp;<span className="text-emerald-855 font-black">{certForm.amcFrequency}</span></div>
+                      <div style={{ clear: 'both' }} />
                     </div>
                   )}
                   {isSectionVisible('formatSpecific') && certForm.formatType === 'Visit Report' && (

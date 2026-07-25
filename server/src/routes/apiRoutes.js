@@ -141,10 +141,13 @@ router.get('/sync/all', async (req, res) => {
 });
 
 // --- DOCUMENT REGISTRY / CERTIFICATES & EQUIPMENT MASTER ---
+// By default returns only non-deleted certificates (matches every existing caller). Pass
+// ?deletedOnly=true for the Admin "Recently Deleted" recovery view.
 router.get('/certificates', async (req, res) => {
   try {
     const certs = await sheetsService.getAllCertificates();
-    res.json(certs);
+    const wantDeleted = req.query.deletedOnly === 'true';
+    res.json(certs.filter(c => Boolean(c.Is_Deleted) === wantDeleted));
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch certificates' });
   }
@@ -158,7 +161,12 @@ router.post('/certificates', async (req, res) => {
         return res.status(403).json({ error: 'You do not have permission to generate certificates. Contact Admin.' });
       }
     }
-    const newCert = await sheetsService.insertRow('Document_Registry', req.body);
+    const newCert = await sheetsService.insertRow('Document_Registry', {
+      ...req.body,
+      Created_By: req.body.Created_By || req.user.name || req.user.staffId || 'Unknown',
+      Created_By_Role: req.body.Created_By_Role || req.user.role || 'Staff',
+      Created_At: req.body.Created_At || new Date().toISOString()
+    });
     res.json({ success: true, certificate: newCert });
   } catch (err) {
     console.error('Save certificate failed:', err);
@@ -186,11 +194,78 @@ router.put('/certificates/:guid', async (req, res) => {
   }
 });
 
+// Soft delete: certificates are never hard-removed from Document_Registry. A deleted
+// certificate's QR verification link (already printed on physical documents) must keep
+// resolving — see the /api/verify-certificate/:guid "revoked" branch in server.js — instead
+// of falsely reading as fraudulent/nonexistent to whoever scans it.
+router.delete('/certificates/:guid', async (req, res) => {
+  try {
+    if (req.user.role !== 'Admin') {
+      const staff = await sheetsService.getStaffById(req.user.staffId);
+      if (!staff || !staff.Can_Access_Certificates) {
+        return res.status(403).json({ error: 'You do not have permission to delete certificates. Contact Admin.' });
+      }
+    }
+    const certs = await sheetsService.getAllCertificates();
+    const target = certs.find(c =>
+      c.verificationGuid === req.params.guid || c.Verification_GUID === req.params.guid ||
+      c.Certificate_No === req.params.guid || c.certificateNo === req.params.guid
+    );
+    if (!target) return res.status(404).json({ error: 'Certificate not found' });
+    const idColumn = target.verificationGuid ? 'verificationGuid'
+      : target.Verification_GUID ? 'Verification_GUID'
+      : target.Certificate_No ? 'Certificate_No'
+      : 'certificateNo';
+    const updated = await sheetsService.updateRow('Document_Registry', idColumn, target[idColumn], {
+      Is_Deleted: true,
+      Deleted_At: new Date().toISOString(),
+      Deleted_By: req.user.name || req.user.staffId || 'Unknown'
+    });
+    res.json({ success: true, certificate: updated });
+  } catch (err) {
+    console.error('Delete certificate failed:', err);
+    res.status(500).json({ error: 'Failed to delete certificate: ' + err.message });
+  }
+});
+
+// Admin-only recovery of a soft-deleted certificate.
+router.post('/certificates/:guid/restore', async (req, res) => {
+  try {
+    if (req.user.role !== 'Admin') {
+      return res.status(403).json({ error: 'Admin access required to restore certificates' });
+    }
+    const certs = await sheetsService.getAllCertificates();
+    const target = certs.find(c =>
+      c.verificationGuid === req.params.guid || c.Verification_GUID === req.params.guid ||
+      c.Certificate_No === req.params.guid || c.certificateNo === req.params.guid
+    );
+    if (!target) return res.status(404).json({ error: 'Certificate not found' });
+    const idColumn = target.verificationGuid ? 'verificationGuid'
+      : target.Verification_GUID ? 'Verification_GUID'
+      : target.Certificate_No ? 'Certificate_No'
+      : 'certificateNo';
+    const updated = await sheetsService.updateRow('Document_Registry', idColumn, target[idColumn], {
+      Is_Deleted: false,
+      Deleted_At: null,
+      Deleted_By: null,
+      Restored_At: new Date().toISOString(),
+      Restored_By: req.user.name || req.user.staffId || 'Unknown'
+    });
+    res.json({ success: true, certificate: updated });
+  } catch (err) {
+    console.error('Restore certificate failed:', err);
+    res.status(500).json({ error: 'Failed to restore certificate' });
+  }
+});
+
 // --- SERVICE REPORTS ENDPOINTS ---
+// By default returns only non-deleted reports (matches every existing caller). Pass
+// ?deletedOnly=true for the Admin "Recycle Bin" recovery view.
 router.get('/service-reports', async (req, res) => {
   try {
     const reports = await sheetsService.getAllServiceReports();
-    res.json(reports);
+    const wantDeleted = req.query.deletedOnly === 'true';
+    res.json(reports.filter(r => Boolean(r.Is_Deleted) === wantDeleted));
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch service reports' });
   }
@@ -284,6 +359,51 @@ router.put('/service-reports/:id/status', async (req, res) => {
     res.json({ success: true, report: updated });
   } catch (err) {
     res.status(500).json({ error: 'Failed to update report status' });
+  }
+});
+
+// Soft delete: service reports are never hard-removed, same convention as certificates
+// (see DELETE /certificates/:guid above) — sets Is_Deleted/Deleted_At/Deleted_By and the
+// record just drops out of the default GET /api/service-reports list.
+router.delete('/service-reports/:id', async (req, res) => {
+  try {
+    if (req.user.role !== 'Admin') {
+      const staff = await sheetsService.getStaffById(req.user.staffId);
+      if (!staff || !staff.Can_Access_Service_Reports) {
+        return res.status(403).json({ error: 'You do not have permission to delete service reports. Contact Admin.' });
+      }
+    }
+    const updated = await sheetsService.updateRow('Service_Reports', 'Report_ID', req.params.id, {
+      Is_Deleted: true,
+      Deleted_At: new Date().toISOString(),
+      Deleted_By: req.user.name || req.user.staffId || 'Unknown'
+    });
+    if (!updated) return res.status(404).json({ error: 'Service report not found' });
+    res.json({ success: true, report: updated });
+  } catch (err) {
+    console.error('Delete service report failed:', err);
+    res.status(500).json({ error: 'Failed to delete service report: ' + err.message });
+  }
+});
+
+// Admin-only recovery of a soft-deleted service report.
+router.post('/service-reports/:id/restore', async (req, res) => {
+  try {
+    if (req.user.role !== 'Admin') {
+      return res.status(403).json({ error: 'Admin access required to restore service reports' });
+    }
+    const updated = await sheetsService.updateRow('Service_Reports', 'Report_ID', req.params.id, {
+      Is_Deleted: false,
+      Deleted_At: null,
+      Deleted_By: null,
+      Restored_At: new Date().toISOString(),
+      Restored_By: req.user.name || req.user.staffId || 'Unknown'
+    });
+    if (!updated) return res.status(404).json({ error: 'Service report not found' });
+    res.json({ success: true, report: updated });
+  } catch (err) {
+    console.error('Restore service report failed:', err);
+    res.status(500).json({ error: 'Failed to restore service report' });
   }
 });
 
@@ -853,11 +973,13 @@ router.get('/notifications/my', async (req, res) => {
   try {
     const staffId = req.user.staffId || req.user.Staff_ID || req.user.id;
     const role = req.user.role || req.user.Role;
-    const [tasks, leaves, staffList, advances] = await Promise.all([
+    const [tasks, leaves, staffList, advances, serviceReports, certificates] = await Promise.all([
       sheetsService.getAllTasks(),
       sheetsService.getAllLeaves(),
       sheetsService.getAllStaff(),
-      sheetsService.getAdvances()
+      sheetsService.getAdvances(),
+      role === 'Admin' ? sheetsService.getAllServiceReports() : Promise.resolve([]),
+      role === 'Admin' ? sheetsService.getAllCertificates() : Promise.resolve([])
     ]);
 
     const notifications = [];
@@ -956,6 +1078,46 @@ router.get('/notifications/my', async (req, res) => {
           targetId: a.Advance_ID,
           targetType: 'ADVANCE',
           action: 'REVIEW_ADVANCE'
+        });
+      });
+
+      // Service reports staff have submitted and are still awaiting Admin review — every report
+      // defaults to 'Pending Approval' on creation (POST /service-reports), so this naturally
+      // covers every new submission until Admin approves/requests revision.
+      const pendingReports = (serviceReports || []).filter(r => !r.Is_Deleted && r.Status === 'Pending Approval');
+      pendingReports.forEach(r => {
+        notifications.push({
+          id: `srpending-${r.Report_ID}`,
+          title: 'Service Report Submitted',
+          message: `${r.Created_By || 'A technician'} submitted a report for ${r.Customer_Name || r.customerName || 'a client'} — awaiting your approval.`,
+          time: r.Created_At || 'Recently',
+          type: 'APPROVAL_NEEDED',
+          targetId: r.Report_ID,
+          targetType: 'SERVICE_REPORT',
+          action: 'REVIEW_SERVICE_REPORT'
+        });
+      });
+
+      // Certificates a non-Admin staff member generated in the last 48 hours — an FYI (there's no
+      // approval gate on certificate generation itself, unlike service reports), so Admin still
+      // sees what staff have been issuing without needing to act on it.
+      const recentStaffCerts = (certificates || []).filter(c => {
+        if (c.Is_Deleted) return false;
+        if ((c.Created_By_Role || 'Staff') === 'Admin') return false;
+        const createdAt = c.Created_At ? new Date(c.Created_At) : null;
+        if (!createdAt || isNaN(createdAt.getTime())) return false;
+        return (Date.now() - createdAt.getTime()) <= 48 * 60 * 60 * 1000;
+      });
+      recentStaffCerts.forEach(c => {
+        notifications.push({
+          id: `cert-${c.verificationGuid || c.Verification_GUID || c.Certificate_No}`,
+          title: 'Certificate Generated by Staff',
+          message: `${c.Created_By || 'A staff member'} generated certificate ${c.Certificate_No || c.certificateNo} for ${c.Customer_Name || c.customerName || 'a client'}.`,
+          time: c.Created_At || 'Recently',
+          type: 'INFO',
+          targetId: c.verificationGuid || c.Verification_GUID || c.Certificate_No,
+          targetType: 'CERTIFICATE',
+          action: 'VIEW_CERTIFICATE'
         });
       });
     } else {

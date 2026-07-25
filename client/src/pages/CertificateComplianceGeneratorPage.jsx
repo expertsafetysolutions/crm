@@ -24,7 +24,13 @@ import {
   Minimize2,
   Lock,
   GripVertical,
-  RotateCcw
+  RotateCcw,
+  Filter,
+  Trash2,
+  AlertTriangle,
+  Building2,
+  History,
+  RotateCw
 } from 'lucide-react';
 import { QRCodeCanvas } from 'qrcode.react';
 // html2canvas/jspdf are loaded on demand (see generateCertificateCanvas/buildCertificatePdf) —
@@ -308,11 +314,24 @@ function CustomLinesEditor({ lines, onChange, placeholder, accent = 'amber' }) {
 export default function CertificateComplianceGeneratorPage() {
   const { taskId } = useParams();
   const navigate = useNavigate();
-  const { token } = useAuth();
+  const { token, user } = useAuth();
   const { docSettings, updateDocSettings } = useDocSettings();
   const certCfg = docSettings?.document_configs?.CERTIFICATE || {};
   const branding = docSettings?.branding_assets || {};
   const handleBack = () => navigate('/');
+
+  // On mobile the on-screen keyboard covers the bottom third of the viewport (plus the sticky
+  // action bar above it), hiding whatever field the user just tapped — e.g. Qty/Capacity/Date
+  // while adding an equipment row. Scrolling after a short delay lets the keyboard's open
+  // animation finish first, so centering is computed against the already-shrunk viewport instead
+  // of the pre-keyboard one (scrolling immediately would center against the wrong height and get
+  // re-covered once the keyboard finishes sliding up).
+  const scrollFieldIntoView = (e) => {
+    const el = e.target;
+    setTimeout(() => {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 300);
+  };
 
   const [isPageLoading, setIsPageLoading] = useState(true);
   
@@ -385,6 +404,19 @@ export default function CertificateComplianceGeneratorPage() {
   const [showSearchModal, setShowSearchModal] = useState(false);
   const [showCertSearchDropdown, setShowCertSearchDropdown] = useState(false);
   const [certTab, setCertTab] = useState('client'); // 'client' | 'equipment' | 'settings'
+
+  // Certificate List: Filter Sheet + Delete Confirmation
+  const [showCertFilterSheet, setShowCertFilterSheet] = useState(false);
+  const [certFilters, setCertFilters] = useState({ company: '', fromDate: '', toDate: '', certType: '' });
+  const [certFilterDraft, setCertFilterDraft] = useState({ company: '', fromDate: '', toDate: '', certType: '' });
+  const [certPendingDelete, setCertPendingDelete] = useState(null); // the certificate object queued for delete confirmation
+  const [isDeletingCert, setIsDeletingCert] = useState(false);
+
+  // Recently Deleted (soft-delete recovery) — Admin only
+  const [showRecentlyDeleted, setShowRecentlyDeleted] = useState(false);
+  const [deletedCertificates, setDeletedCertificates] = useState([]);
+  const [isLoadingDeleted, setIsLoadingDeleted] = useState(false);
+  const [restoringGuid, setRestoringGuid] = useState(null);
 
   const [certForm, setCertForm] = useState({
     formatType: 'Refilling',
@@ -564,6 +596,18 @@ export default function CertificateComplianceGeneratorPage() {
   };
 
   const handleCertFormatChange = (newFormat) => {
+    if (newFormat === certForm.formatType) return;
+    if ((certForm.itemsList || []).length > 0) {
+      const proceed = window.confirm('Switching Certificate Type will clear the equipment items already added for this certificate. Continue?');
+      if (!proceed) return;
+    }
+    // Clear the "Add Equipment Row" entry form too, so nothing from the previous type lingers.
+    setNewItemSearch('');
+    setNewItemSelectedMasterId('');
+    setNewItemCapacity('');
+    setNewItemQty('');
+    setNewItemCustomValues({});
+
     let title = 'FIRE EXTINGUISHER REFILLING & MAINTENANCE CERTIFICATE';
     let details = 'Fire Extinguishers Refilling, Testing & Maintenance as per IS:2190 standards';
     let duration = '1 Year';
@@ -662,6 +706,7 @@ export default function CertificateComplianceGeneratorPage() {
         
         // Settings-isolated properties
         formatType: newFormat,
+        itemsList: [],
         certPrefix: nextPrefix,
         certPeriod: nextPeriod,
         certSequence: nextSequence,
@@ -1122,6 +1167,87 @@ export default function CertificateComplianceGeneratorPage() {
     return { pdf, imgData };
   };
 
+  // Combines the header text search with the Company / Date Range / Certificate Type filters
+  // from the filter sheet. Date comparisons use the YYYY-MM-DD prefix only, so a certificate
+  // issued on the exact fromDate/toDate boundary is still included regardless of any time
+  // component stored alongside the date.
+  const getFilteredCertificates = () => {
+    const q = certSearchQuery.toLowerCase().trim();
+    const companyQuery = certFilters.company.toLowerCase().trim();
+    return allCertificates.filter(c => {
+      const cNo = (c.Certificate_No || c.certificateNo || '').toLowerCase();
+      const cName = (c.Customer_Name || c.customerName || '').toLowerCase();
+      if (q && !cNo.includes(q) && !cName.includes(q)) return false;
+      if (companyQuery && !cName.includes(companyQuery)) return false;
+      if (certFilters.certType && (c.formatType || c.Format_Type) !== certFilters.certType) return false;
+
+      const issueDateOnly = String(c.Issue_Date || c.issueDate || '').slice(0, 10);
+      if (certFilters.fromDate && issueDateOnly && issueDateOnly < certFilters.fromDate) return false;
+      if (certFilters.toDate && issueDateOnly && issueDateOnly > certFilters.toDate) return false;
+
+      return true;
+    });
+  };
+
+  const handleConfirmDeleteCertificate = async () => {
+    if (!certPendingDelete) return;
+    const idToDelete = certPendingDelete.verificationGuid || certPendingDelete.Verification_GUID
+      || certPendingDelete.Certificate_No || certPendingDelete.certificateNo;
+    try {
+      setIsDeletingCert(true);
+      const res = await fetch(`/api/certificates/${encodeURIComponent(idToDelete)}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'Failed to delete certificate');
+      }
+      setAllCertificates(prev => prev.filter(c =>
+        (c.verificationGuid || c.Verification_GUID || c.Certificate_No || c.certificateNo) !== idToDelete
+      ));
+      setCertPendingDelete(null);
+    } catch (err) {
+      alert('Delete failed: ' + err.message);
+    } finally {
+      setIsDeletingCert(false);
+    }
+  };
+
+  const loadDeletedCertificates = async () => {
+    try {
+      setIsLoadingDeleted(true);
+      const res = await fetch('/api/certificates?deletedOnly=true', { headers: { Authorization: `Bearer ${token}` } });
+      if (!res.ok) throw new Error('Failed to load recently deleted certificates');
+      setDeletedCertificates(await res.json());
+    } catch (err) {
+      alert(err.message);
+    } finally {
+      setIsLoadingDeleted(false);
+    }
+  };
+
+  const handleRestoreCertificate = async (cert) => {
+    const guid = cert.verificationGuid || cert.Verification_GUID || cert.Certificate_No || cert.certificateNo;
+    try {
+      setRestoringGuid(guid);
+      const res = await fetch(`/api/certificates/${encodeURIComponent(guid)}/restore`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'Failed to restore certificate');
+      }
+      setDeletedCertificates(prev => prev.filter(c => (c.verificationGuid || c.Verification_GUID || c.Certificate_No || c.certificateNo) !== guid));
+      setAllCertificates(prev => [...prev, { ...cert, Is_Deleted: false }]);
+    } catch (err) {
+      alert('Restore failed: ' + err.message);
+    } finally {
+      setRestoringGuid(null);
+    }
+  };
+
   return (
     <div className="min-h-screen w-full bg-slate-50 flex flex-col">
       {/* Page Header */}
@@ -1148,13 +1274,31 @@ export default function CertificateComplianceGeneratorPage() {
             {focusMode ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
             <span>{focusMode ? 'Exit Full Screen' : 'Full Screen'}</span>
           </button>
+          <div className="relative">
+            <Search className="w-3.5 h-3.5 text-amber-600 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+            <input
+              type="text"
+              value={certSearchQuery}
+              onChange={e => setCertSearchQuery(e.target.value)}
+              onFocus={() => setShowSearchModal(true)}
+              placeholder="Search certificates…"
+              className="w-32 sm:w-52 pl-8 pr-2.5 py-2 bg-amber-50 border border-amber-200 rounded-xl text-xs font-bold text-amber-950 placeholder-amber-600/60 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:bg-white shadow-2xs transition"
+            />
+          </div>
           <button
             type="button"
-            onClick={() => setShowSearchModal(true)}
-            className="p-2 bg-amber-50 hover:bg-amber-100 text-amber-700 hover:text-amber-800 rounded-xl transition shrink-0 shadow-2xs border border-amber-200"
-            title="Search Issued Certificates"
+            onClick={() => { setCertFilterDraft(certFilters); setShowCertFilterSheet(true); }}
+            className={`relative p-2 rounded-xl transition shrink-0 shadow-2xs border ${
+              certFilters.company || certFilters.fromDate || certFilters.toDate || certFilters.certType
+                ? 'bg-indigo-600 hover:bg-indigo-700 text-white border-indigo-600'
+                : 'bg-amber-50 hover:bg-amber-100 text-amber-700 hover:text-amber-800 border-amber-200'
+            }`}
+            title="Filter Certificates"
           >
-            <Search className="w-4 h-4" />
+            <Filter className="w-4 h-4" />
+            {(certFilters.company || certFilters.fromDate || certFilters.toDate || certFilters.certType) && (
+              <span className="absolute -top-1 -right-1 w-2 h-2 rounded-full bg-rose-500 animate-pulse" />
+            )}
           </button>
           <button
             type="button"
@@ -1292,7 +1436,7 @@ export default function CertificateComplianceGeneratorPage() {
                       />
                     </div>
                     <div className="space-y-1">
-                      <label className="block text-[11px] font-bold text-slate-600 uppercase tracking-wide">Challan Date (Refilling) *</label>
+                      <label className="block text-[11px] font-bold text-slate-600 uppercase tracking-wide">Challan Date *</label>
                       <input
                         type="date"
                         value={certForm.challanDate || ''}
@@ -1476,7 +1620,7 @@ export default function CertificateComplianceGeneratorPage() {
                                   setNewItemSelectedMasterId('');
                                 }
                               }}
-                              onFocus={() => setShowNewItemDropdown(true)}
+                              onFocus={(e) => { setShowNewItemDropdown(true); scrollFieldIntoView(e); }}
                               onBlur={() => setTimeout(() => setShowNewItemDropdown(false), 180)}
                               className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-medium focus:outline-none focus:ring-1 focus:ring-amber-500 shadow-2xs"
                             />
@@ -1528,6 +1672,7 @@ export default function CertificateComplianceGeneratorPage() {
                                 <select
                                   value={newItemCapacity || availableCaps[0]}
                                   onChange={e => setNewItemCapacity(e.target.value)}
+                                  onFocus={scrollFieldIntoView}
                                   className="w-full px-2.5 py-1.5 bg-white border border-amber-400 rounded-lg text-xs font-bold text-amber-950 focus:outline-none shadow-2xs"
                                 >
                                   {availableCaps.map(cap => (
@@ -1541,6 +1686,7 @@ export default function CertificateComplianceGeneratorPage() {
                                   type="text"
                                   value={newItemCapacity}
                                   onChange={e => setNewItemCapacity(e.target.value)}
+                                  onFocus={scrollFieldIntoView}
                                   placeholder="e.g. 4.5 Kg"
                                   className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-bold focus:outline-none"
                                 />
@@ -1552,6 +1698,7 @@ export default function CertificateComplianceGeneratorPage() {
                                 type="text"
                                 value={newItemQty}
                                 onChange={e => setNewItemQty(e.target.value)}
+                                onFocus={scrollFieldIntoView}
                                 placeholder="e.g. 5"
                                 className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-bold focus:outline-none"
                               />
@@ -1561,7 +1708,7 @@ export default function CertificateComplianceGeneratorPage() {
                           <div className="grid grid-cols-2 gap-2">
                             <div className="space-y-1">
                               <label className="block text-[10px] font-bold text-slate-600">{certForm.formatType === 'HP Testing' ? 'Date of Testing' : 'Date of Refilling'}</label>
-                              <input type="date" value={newItemRefillDate} max={certForm.challanDate || ''} onChange={e => {
+                              <input type="date" value={newItemRefillDate} max={certForm.challanDate || ''} onFocus={scrollFieldIntoView} onChange={e => {
                                 let refillDt = e.target.value;
                                 const maxLimit = certForm.challanDate || getLocalDateStr();
                                 if (refillDt > maxLimit) {
@@ -1577,7 +1724,7 @@ export default function CertificateComplianceGeneratorPage() {
                             </div>
                             <div className="space-y-1">
                               <label className="block text-[10px] font-bold text-slate-600">{certForm.formatType === 'HP Testing' ? 'Next Date of Testing' : 'Next Date of Refilling'}</label>
-                              <input type="date" value={newItemNextDate} onChange={e => setNewItemNextDate(e.target.value)}
+                              <input type="date" value={newItemNextDate} onChange={e => setNewItemNextDate(e.target.value)} onFocus={scrollFieldIntoView}
                                 className="w-full px-2 py-1.5 bg-white border border-slate-300 rounded-lg text-xs text-rose-700 font-bold focus:outline-none"/>
                             </div>
                           </div>
@@ -1590,6 +1737,7 @@ export default function CertificateComplianceGeneratorPage() {
                               <label className="block text-[10px] font-bold text-indigo-700">{col.label}</label>
                               <input type="text" placeholder={col.label} value={newItemCustomValues[col.id]||''}
                                 onChange={e => setNewItemCustomValues(prev => ({...prev, [col.id]: e.target.value}))}
+                                onFocus={scrollFieldIntoView}
                                 className="w-full px-2 py-1.5 bg-indigo-50 border border-indigo-300 rounded-lg text-xs font-bold focus:outline-none"/>
                             </div>
                           ))}
@@ -2878,26 +3026,6 @@ export default function CertificateComplianceGeneratorPage() {
               <CheckCircle2 className="w-3.5 h-3.5" /><span>{adminSubmitting === 'cert' ? 'Saving…' : 'Mark Certified'}</span>
             </button>
           )}
-
-          <button
-            type="button"
-            onClick={() => setActiveMobileTab(activeMobileTab === 'edit' ? 'preview' : 'edit')}
-            className={`flex-1 py-2 rounded-xl text-white font-black text-xs flex items-center justify-center gap-1.5 shadow-sm active:scale-95 transition-all ${
-              activeMobileTab === 'edit' ? 'bg-amber-800' : 'bg-slate-800'
-            }`}
-          >
-            {activeMobileTab === 'edit' ? (
-              <>
-                <Eye className="w-4 h-4 text-amber-400 animate-pulse" />
-                <span>Show Preview</span>
-              </>
-            ) : (
-              <>
-                <Edit3 className="w-4 h-4 text-amber-400 animate-pulse" />
-                <span>Back to Edit</span>
-              </>
-            )}
-          </button>
         </div>
       </div>
 
@@ -2915,92 +3043,354 @@ export default function CertificateComplianceGeneratorPage() {
         </div>
       )}
 
-      {/* Full Screen Search Modal */}
+      {/* Full Screen Search Modal — Certificate List with Summary Cards */}
       {showSearchModal && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white w-full max-w-lg rounded-2xl shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[85vh] animate-in fade-in zoom-in-95 duration-150">
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          onClick={() => { setShowSearchModal(false); setCertSearchQuery(''); }}
+        >
+          <div
+            className="bg-white w-full max-w-lg rounded-2xl shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[85vh] animate-in fade-in zoom-in-95 duration-150"
+            onClick={e => e.stopPropagation()}
+          >
             {/* Modal Header */}
             <div className="bg-indigo-50 border-b border-indigo-100 px-4 py-3 flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <Search className="w-4 h-4 text-indigo-700" />
-                <span className="font-bold text-indigo-955 text-xs uppercase tracking-wider">Search Issued Certificates</span>
+                <span className="font-bold text-indigo-955 text-xs uppercase tracking-wider">Issued Certificates</span>
               </div>
-              <button
-                type="button"
-                onClick={() => { setShowSearchModal(false); setCertSearchQuery(''); }}
-                className="p-1.5 text-slate-400 hover:text-rose-600 rounded-lg transition"
-              >
-                <X className="w-5 h-5" />
-              </button>
+              <div className="flex items-center gap-1.5">
+                {user?.Role === 'Admin' && (
+                  <button
+                    type="button"
+                    onClick={() => { setShowRecentlyDeleted(true); loadDeletedCertificates(); }}
+                    className="p-1.5 rounded-lg text-indigo-700 hover:bg-indigo-100 transition"
+                    title="Recently Deleted"
+                  >
+                    <History className="w-4 h-4" />
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => { setCertFilterDraft(certFilters); setShowCertFilterSheet(true); }}
+                  className={`relative p-1.5 rounded-lg transition ${
+                    certFilters.company || certFilters.fromDate || certFilters.toDate || certFilters.certType
+                      ? 'bg-indigo-600 text-white'
+                      : 'text-indigo-700 hover:bg-indigo-100'
+                  }`}
+                  title="Filter Certificates"
+                >
+                  <Filter className="w-4 h-4" />
+                  {(certFilters.company || certFilters.fromDate || certFilters.toDate || certFilters.certType) && (
+                    <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-rose-500" />
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setShowSearchModal(false); setCertSearchQuery(''); }}
+                  className="p-1.5 text-slate-400 hover:text-rose-600 rounded-lg transition"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
             </div>
 
             {/* Modal Body */}
             <div className="p-4 flex-1 overflow-y-auto space-y-3.5">
-              <div className="space-y-1">
-                <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wide">
-                  Type Certificate Number or Customer Name
-                </label>
-                <div className="relative">
-                  <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                  <input
-                    type="text"
-                    placeholder="Search by Certificate No or Customer Name..."
-                    value={certSearchQuery}
-                    onChange={e => setCertSearchQuery(e.target.value)}
-                    className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-300 rounded-xl font-bold text-slate-900 text-xs focus:ring-2 focus:ring-amber-500 focus:bg-white focus:outline-none shadow-2xs transition"
-                    autoFocus
-                  />
-                </div>
+              <div className="relative">
+                <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  placeholder="Search by Certificate No or Customer Name..."
+                  value={certSearchQuery}
+                  onChange={e => setCertSearchQuery(e.target.value)}
+                  className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-300 rounded-xl font-bold text-slate-900 text-xs focus:ring-2 focus:ring-amber-500 focus:bg-white focus:outline-none shadow-2xs transition"
+                  autoFocus
+                />
               </div>
 
-              {/* Search Results Dropdown List */}
-              <div className="border border-slate-200 rounded-xl overflow-hidden divide-y divide-slate-100 bg-white max-h-80 overflow-y-auto">
-                {allCertificates
-                  .filter(c => {
-                    const q = certSearchQuery.toLowerCase().trim();
-                    if (!q) return true;
-                    const cNo = (c.Certificate_No || c.certificateNo || '').toLowerCase();
-                    const cName = (c.Customer_Name || c.customerName || '').toLowerCase();
-                    return cNo.includes(q) || cName.includes(q);
-                  })
-                  .slice(0, 15)
-                  .map(c => (
+              {(certFilters.company || certFilters.fromDate || certFilters.toDate || certFilters.certType) && (
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {certFilters.company && (
+                    <span className="text-[10px] font-bold px-2 py-1 rounded-md bg-indigo-50 text-indigo-800 border border-indigo-200">Company: {certFilters.company}</span>
+                  )}
+                  {certFilters.certType && (
+                    <span className="text-[10px] font-bold px-2 py-1 rounded-md bg-indigo-50 text-indigo-800 border border-indigo-200">Type: {certFilters.certType}</span>
+                  )}
+                  {(certFilters.fromDate || certFilters.toDate) && (
+                    <span className="text-[10px] font-bold px-2 py-1 rounded-md bg-indigo-50 text-indigo-800 border border-indigo-200">
+                      {certFilters.fromDate ? formatDateDDMMYYYY(certFilters.fromDate) : '…'} – {certFilters.toDate ? formatDateDDMMYYYY(certFilters.toDate) : '…'}
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => { setCertFilters({ company: '', fromDate: '', toDate: '', certType: '' }); setCertFilterDraft({ company: '', fromDate: '', toDate: '', certType: '' }); }}
+                    className="text-[10px] font-bold px-2 py-1 rounded-md bg-rose-50 text-rose-700 border border-rose-200 hover:bg-rose-100 transition"
+                  >
+                    Clear All
+                  </button>
+                </div>
+              )}
+
+              {/* Certificate Summary Cards */}
+              <div className="space-y-2.5">
+                {getFilteredCertificates().slice(0, 50).map(c => {
+                  const refNo = c.Certificate_No || c.certificateNo;
+                  const companyName = c.Customer_Name || c.customerName;
+                  return (
                     <div
                       key={c.verificationGuid || c._id}
-                      onClick={() => {
-                        handleLoadCertificateToEdit(c);
-                        setShowSearchModal(false);
-                        setCertSearchQuery('');
-                      }}
-                      className="flex items-center justify-between px-3.5 py-2.5 hover:bg-amber-50 active:bg-amber-100 cursor-pointer transition"
+                      className="rounded-xl border border-slate-200 bg-white shadow-2xs hover:shadow-sm transition overflow-hidden"
                     >
-                      <div className="min-w-0 flex-1 pr-2">
-                        <div className="font-bold text-indigo-950 text-xs truncate">{c.Certificate_No || c.certificateNo}</div>
-                        <div className="text-[10px] text-slate-600 font-bold truncate mt-0.5">
-                          {c.Customer_Name || c.customerName}
+                      <div
+                        onClick={() => {
+                          handleLoadCertificateToEdit(c);
+                          setShowSearchModal(false);
+                          setCertSearchQuery('');
+                        }}
+                        className="px-3.5 pt-3 pb-2.5 cursor-pointer hover:bg-amber-50/60 active:bg-amber-100/60 transition"
+                      >
+                        <div className="text-[10px] font-bold text-slate-500">
+                          {formatDateDDMMYYYY(c.Issue_Date || c.issueDate)}
                         </div>
-                        <div className="text-[9px] text-slate-400 font-semibold mt-0.5">
-                          Issued: {formatDateDDMMYYYY(c.Issue_Date || c.issueDate)}
+                        <div className="text-sm font-extrabold text-slate-900 mt-0.5 truncate">
+                          {companyName}
+                        </div>
+                        <div className="text-[11px] text-indigo-700 font-semibold mt-0.5 truncate">
+                          {c.title || c.Title || c.formatType || c.Format_Type}
                         </div>
                       </div>
-                      <span className="text-[10px] bg-indigo-50 text-indigo-800 px-2.5 py-1 rounded-md font-extrabold shrink-0 border border-indigo-200">
-                        EDIT
-                      </span>
+                      <div className="flex items-center justify-between px-3.5 py-2 border-t border-slate-100 bg-slate-50/70">
+                        <span className="text-[10px] font-bold text-slate-600">
+                          Ref No: <span className="text-slate-900">{refNo}</span>
+                        </span>
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); setCertPendingDelete(c); }}
+                          className="p-1.5 rounded-lg text-rose-600 hover:bg-rose-100 transition"
+                          title="Delete Certificate"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
                     </div>
-                  ))}
+                  );
+                })}
 
-                {allCertificates.filter(c => {
-                  const q = certSearchQuery.toLowerCase().trim();
-                  if (!q) return true;
-                  const cNo = (c.Certificate_No || c.certificateNo || '').toLowerCase();
-                  const cName = (c.Customer_Name || c.customerName || '').toLowerCase();
-                  return cNo.includes(q) || cName.includes(q);
-                }).length === 0 && (
+                {getFilteredCertificates().length === 0 && (
                   <div className="px-4 py-8 text-xs text-slate-400 text-center font-bold">
                     No matching certificates found
                   </div>
                 )}
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Filter Sheet — Company / Date Range / Certificate Type. Centered in the same spot as the
+          Search modal it opens from (not bottom-anchored), so it reads as a continuation of the
+          same popup instead of a disconnected sheet down at the edge of the viewport. */}
+      {showCertFilterSheet && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center p-4"
+          onClick={() => setShowCertFilterSheet(false)}
+        >
+          <div
+            className="bg-white w-full max-w-lg rounded-2xl shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[85vh] animate-in fade-in zoom-in-95 duration-150"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="bg-indigo-50 border-b border-indigo-100 px-4 py-3 flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-2">
+                <Filter className="w-4 h-4 text-indigo-700" />
+                <span className="font-bold text-indigo-955 text-xs uppercase tracking-wider">Filter Certificates</span>
+              </div>
+              <button type="button" onClick={() => setShowCertFilterSheet(false)} className="p-1.5 text-slate-400 hover:text-rose-600 rounded-lg transition">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-4 flex-1 overflow-y-auto space-y-4">
+              {/* Company Filter */}
+              <div className="space-y-1">
+                <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wide flex items-center gap-1">
+                  <Building2 className="w-3 h-3" /> Company Name
+                </label>
+                <input
+                  type="text"
+                  list="cert-filter-company-list"
+                  placeholder="Search / select company..."
+                  value={certFilterDraft.company}
+                  onChange={e => setCertFilterDraft(prev => ({ ...prev, company: e.target.value }))}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl font-bold text-slate-900 text-xs focus:ring-2 focus:ring-indigo-500 focus:bg-white focus:outline-none shadow-2xs transition"
+                />
+                <datalist id="cert-filter-company-list">
+                  {[...new Set(allCertificates.map(c => c.Customer_Name || c.customerName).filter(Boolean))].map(name => (
+                    <option key={name} value={name} />
+                  ))}
+                </datalist>
+              </div>
+
+              {/* Date Range Filter */}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wide">From Date</label>
+                  <input
+                    type="date"
+                    value={certFilterDraft.fromDate}
+                    onChange={e => setCertFilterDraft(prev => ({ ...prev, fromDate: e.target.value }))}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl font-bold text-slate-900 text-xs focus:ring-2 focus:ring-indigo-500 focus:bg-white focus:outline-none shadow-2xs transition"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wide">To Date</label>
+                  <input
+                    type="date"
+                    value={certFilterDraft.toDate}
+                    onChange={e => setCertFilterDraft(prev => ({ ...prev, toDate: e.target.value }))}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl font-bold text-slate-900 text-xs focus:ring-2 focus:ring-indigo-500 focus:bg-white focus:outline-none shadow-2xs transition"
+                  />
+                </div>
+              </div>
+
+              {/* Certificate Type Filter */}
+              <div className="space-y-1">
+                <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wide flex items-center gap-1">
+                  <FileCheck className="w-3 h-3" /> Certificate Type
+                </label>
+                <select
+                  value={certFilterDraft.certType}
+                  onChange={e => setCertFilterDraft(prev => ({ ...prev, certType: e.target.value }))}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl font-bold text-slate-900 text-xs focus:ring-2 focus:ring-indigo-500 focus:bg-white focus:outline-none shadow-2xs transition"
+                >
+                  <option value="">All Types</option>
+                  <option value="Refilling">Refilling</option>
+                  <option value="HP Testing">HP Testing</option>
+                  <option value="New Fire Extinguisher">New Fire Extinguisher</option>
+                  <option value="System Installation">System Installation</option>
+                  <option value="AMC Certificate">AMC Certificate</option>
+                  <option value="Visit Report">Visit Report</option>
+                  <option value="Training Certificate">Training Certificate</option>
+                </select>
+              </div>
+            </div>
+
+            {/* Apply & Reset */}
+            <div className="p-4 border-t border-slate-200 flex items-center gap-2.5 shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  setCertFilterDraft({ company: '', fromDate: '', toDate: '', certType: '' });
+                }}
+                className="flex-1 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs flex items-center justify-center gap-1.5 transition"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>Reset</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => { setCertFilters(certFilterDraft); setShowCertFilterSheet(false); }}
+                className="flex-1 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition shadow-sm"
+              >
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                <span>Apply Filters</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Confirmation — double confirmation before any certificate is removed */}
+      {certPendingDelete && (
+        <div className="fixed inset-0 z-[70] bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-sm rounded-2xl shadow-2xl border border-slate-200 overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+            <div className="p-5 space-y-3 text-center">
+              <div className="w-12 h-12 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center mx-auto">
+                <AlertTriangle className="w-6 h-6" />
+              </div>
+              <h3 className="text-base font-extrabold text-slate-900">Delete Certificate?</h3>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Are you sure you want to delete certificate Ref No: <span className="font-bold text-slate-900">{certPendingDelete.Certificate_No || certPendingDelete.certificateNo}</span> for <span className="font-bold text-slate-900">{certPendingDelete.Customer_Name || certPendingDelete.customerName}</span>? This action cannot be undone.
+              </p>
+            </div>
+            <div className="p-4 border-t border-slate-200 flex items-center gap-2.5">
+              <button
+                type="button"
+                disabled={isDeletingCert}
+                onClick={() => setCertPendingDelete(null)}
+                className="flex-1 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs transition disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={isDeletingCert}
+                onClick={handleConfirmDeleteCertificate}
+                className="flex-1 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition shadow-sm disabled:opacity-50"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>{isDeletingCert ? 'Deleting…' : 'Confirm Delete'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Recently Deleted — Admin-only recovery view for soft-deleted certificates */}
+      {showRecentlyDeleted && (
+        <div className="fixed inset-0 z-[60] bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-lg rounded-2xl shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[85vh] animate-in fade-in zoom-in-95 duration-150">
+            <div className="bg-amber-50 border-b border-amber-100 px-4 py-3 flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-2">
+                <History className="w-4 h-4 text-amber-700" />
+                <span className="font-bold text-amber-950 text-xs uppercase tracking-wider">Recently Deleted Certificates</span>
+              </div>
+              <button type="button" onClick={() => setShowRecentlyDeleted(false)} className="p-1.5 text-slate-400 hover:text-rose-600 rounded-lg transition">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-4 flex-1 overflow-y-auto space-y-2.5">
+              {isLoadingDeleted && (
+                <div className="px-4 py-8 text-xs text-slate-400 text-center font-bold">Loading…</div>
+              )}
+
+              {!isLoadingDeleted && deletedCertificates.length === 0 && (
+                <div className="px-4 py-8 text-xs text-slate-400 text-center font-bold">No deleted certificates</div>
+              )}
+
+              {!isLoadingDeleted && deletedCertificates.map(c => {
+                const guid = c.verificationGuid || c.Verification_GUID || c.Certificate_No || c.certificateNo;
+                const refNo = c.Certificate_No || c.certificateNo;
+                const companyName = c.Customer_Name || c.customerName;
+                return (
+                  <div key={guid} className="rounded-xl border border-slate-200 bg-white shadow-2xs overflow-hidden">
+                    <div className="px-3.5 pt-3 pb-2.5">
+                      <div className="text-[10px] font-bold text-slate-500">{formatDateDDMMYYYY(c.Issue_Date || c.issueDate)}</div>
+                      <div className="text-sm font-extrabold text-slate-900 mt-0.5 truncate">{companyName}</div>
+                      <div className="text-[11px] text-indigo-700 font-semibold mt-0.5 truncate">{c.title || c.Title || c.formatType || c.Format_Type}</div>
+                      {c.Deleted_At && (
+                        <div className="text-[9px] text-rose-500 font-semibold mt-1">
+                          Deleted {formatDateDDMMYYYY(c.Deleted_At)}{c.Deleted_By ? ` by ${c.Deleted_By}` : ''}
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex items-center justify-between px-3.5 py-2 border-t border-slate-100 bg-slate-50/70">
+                      <span className="text-[10px] font-bold text-slate-600">Ref No: <span className="text-slate-900">{refNo}</span></span>
+                      <button
+                        type="button"
+                        disabled={restoringGuid === guid}
+                        onClick={() => handleRestoreCertificate(c)}
+                        className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[10px] font-bold flex items-center gap-1.5 transition disabled:opacity-50"
+                        title="Restore Certificate"
+                      >
+                        <RotateCw className="w-3 h-3" />
+                        <span>{restoringGuid === guid ? 'Restoring…' : 'Restore'}</span>
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </div>
         </div>

@@ -46,6 +46,7 @@ import {
   UserPlus,
   Shield,
   Trash2,
+  RotateCw,
   Key,
   ChevronUp,
   ChevronDown,
@@ -376,6 +377,13 @@ export default function AdminDashboard() {
   const [equipmentMasterList, setEquipmentMasterList] = useState([]);
   const [serviceReportsList, setServiceReportsList] = useState([]);
   const [serviceReportFilter, setServiceReportFilter] = useState('ALL'); // 'ALL' | 'PENDING' | 'APPROVED'
+
+  // Recycle Bin — soft-deleted Certificates & Service Reports, restorable
+  const [recycleBinTab, setRecycleBinTab] = useState('CERTIFICATES'); // 'CERTIFICATES' | 'SERVICE_REPORTS'
+  const [deletedCertificates, setDeletedCertificates] = useState([]);
+  const [deletedServiceReports, setDeletedServiceReports] = useState([]);
+  const [isLoadingRecycleBin, setIsLoadingRecycleBin] = useState(false);
+  const [restoringRecycleBinId, setRestoringRecycleBinId] = useState(null);
 
   // Dynamic Task Tags (admin-editable, multi-select labels e.g. "New Inquiry", "Site Visit")
   const [tags, setTags] = useState([]);
@@ -1112,6 +1120,69 @@ export default function AdminDashboard() {
       } catch (e) {}
     } catch (err) { console.error(err); }
   };
+
+  const loadRecycleBin = async () => {
+    try {
+      setIsLoadingRecycleBin(true);
+      const headers = { Authorization: `Bearer ${token}` };
+      const [certRes, reportRes] = await Promise.all([
+        fetch('/api/certificates?deletedOnly=true', { headers }),
+        fetch('/api/service-reports?deletedOnly=true', { headers })
+      ]);
+      setDeletedCertificates(certRes.ok ? await certRes.json() : []);
+      setDeletedServiceReports(reportRes.ok ? await reportRes.json() : []);
+    } catch (err) {
+      alert('Failed to load Recycle Bin: ' + err.message);
+    } finally {
+      setIsLoadingRecycleBin(false);
+    }
+  };
+
+  const handleRestoreCertificateFromBin = async (cert) => {
+    const guid = cert.verificationGuid || cert.Verification_GUID || cert.Certificate_No || cert.certificateNo;
+    try {
+      setRestoringRecycleBinId(guid);
+      const res = await fetch(`/api/certificates/${encodeURIComponent(guid)}/restore`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'Failed to restore certificate');
+      }
+      setDeletedCertificates(prev => prev.filter(c => (c.verificationGuid || c.Verification_GUID || c.Certificate_No || c.certificateNo) !== guid));
+      setCertificatesRegistry(prev => [...prev, { ...cert, Is_Deleted: false }]);
+    } catch (err) {
+      alert('Restore failed: ' + err.message);
+    } finally {
+      setRestoringRecycleBinId(null);
+    }
+  };
+
+  const handleRestoreServiceReportFromBin = async (report) => {
+    const reportId = report.Report_ID || report.reportId;
+    try {
+      setRestoringRecycleBinId(reportId);
+      const res = await fetch(`/api/service-reports/${encodeURIComponent(reportId)}/restore`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'Failed to restore service report');
+      }
+      setDeletedServiceReports(prev => prev.filter(r => (r.Report_ID || r.reportId) !== reportId));
+      setServiceReportsList(prev => [...prev, { ...report, Is_Deleted: false }]);
+    } catch (err) {
+      alert('Restore failed: ' + err.message);
+    } finally {
+      setRestoringRecycleBinId(null);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'RECYCLE_BIN') loadRecycleBin();
+  }, [activeTab]);
 
   useEffect(() => {
     if (icardTargetUser) {
@@ -2533,7 +2604,8 @@ export default function AdminDashboard() {
             { id: 'ATTENDANCE', label: '4. Attendance & Leave Roster', shortLabel: '4. Attendance', icon: Clock },
             { id: 'LOGS', label: '5. Live Activity Logs', shortLabel: '5. Logs', icon: Activity },
             { id: 'CERTIFICATES', label: '6. Certificate Module', shortLabel: '6. Certificates', icon: Award },
-            { id: 'SERVICE_REPORTS', label: '7. Service Reports Queue', shortLabel: '7. Reports', icon: FileCheck }
+            { id: 'SERVICE_REPORTS', label: '7. Service Reports Queue', shortLabel: '7. Reports', icon: FileCheck },
+            { id: 'RECYCLE_BIN', label: '8. Recycle Bin', shortLabel: '8. Recycle Bin', icon: Trash2 }
           ].map(tab => {
             const Icon = tab.icon;
             return (
@@ -6246,6 +6318,147 @@ export default function AdminDashboard() {
         </div>
       )}
 
+      {/* TAB CONTENT 8: RECYCLE BIN — soft-deleted Certificates & Service Reports, restorable */}
+      {activeTab === 'RECYCLE_BIN' && (
+        <div className="space-y-4">
+          <div className="bg-gradient-to-r from-slate-900 via-rose-950 to-slate-900 text-white rounded-2xl p-6 shadow-xl relative overflow-hidden">
+            <div className="absolute right-0 top-0 bottom-0 w-1/3 bg-white/5 transform skew-x-12 pointer-events-none"></div>
+            <div className="relative z-10 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+              <div>
+                <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-rose-500/30 border border-rose-300/40 text-rose-200 text-xs font-bold mb-2">
+                  <Trash2 className="w-3.5 h-3.5 text-rose-300" />
+                  <span>Soft-Deleted Records — Nothing Is Ever Hard-Removed</span>
+                </div>
+                <h2 className="text-xl sm:text-2xl font-black text-white">🗑️ Recycle Bin</h2>
+                <p className="text-rose-200 text-xs sm:text-sm mt-1 max-w-2xl">
+                  Deleted Certificates and Service Reports land here instead of being permanently removed. Restore any record back into active use at any time.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={loadRecycleBin}
+                disabled={isLoadingRecycleBin}
+                className="px-4 py-2.5 rounded-xl bg-white/10 hover:bg-white/20 border border-white/20 text-white font-bold text-xs flex items-center gap-2 transition disabled:opacity-50"
+              >
+                <RotateCw className={`w-3.5 h-3.5 ${isLoadingRecycleBin ? 'animate-spin' : ''}`} />
+                <span>Refresh</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Sub-tabs: Certificates / Service Reports */}
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setRecycleBinTab('CERTIFICATES')}
+              className={`px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition ${
+                recycleBinTab === 'CERTIFICATES'
+                  ? 'bg-rose-600 text-white shadow-sm'
+                  : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
+              }`}
+            >
+              <Award className="w-3.5 h-3.5" />
+              <span>Certificates ({deletedCertificates.length})</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setRecycleBinTab('SERVICE_REPORTS')}
+              className={`px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition ${
+                recycleBinTab === 'SERVICE_REPORTS'
+                  ? 'bg-rose-600 text-white shadow-sm'
+                  : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
+              }`}
+            >
+              <FileCheck className="w-3.5 h-3.5" />
+              <span>Service Reports ({deletedServiceReports.length})</span>
+            </button>
+          </div>
+
+          <div className="bg-white rounded-2xl border border-slate-200 p-4 sm:p-5 shadow-xs">
+            {isLoadingRecycleBin && (
+              <div className="px-4 py-12 text-xs text-slate-400 text-center font-bold">Loading…</div>
+            )}
+
+            {!isLoadingRecycleBin && recycleBinTab === 'CERTIFICATES' && (
+              deletedCertificates.length === 0 ? (
+                <div className="px-4 py-12 text-xs text-slate-400 text-center font-bold">No deleted certificates</div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {deletedCertificates.map(c => {
+                    const guid = c.verificationGuid || c.Verification_GUID || c.Certificate_No || c.certificateNo;
+                    const refNo = c.Certificate_No || c.certificateNo;
+                    return (
+                      <div key={guid} className="rounded-xl border border-slate-200 bg-white shadow-2xs overflow-hidden">
+                        <div className="px-3.5 pt-3 pb-2.5">
+                          <div className="text-[10px] font-bold text-slate-500">{formatDateDDMMYYYY(c.Issue_Date || c.issueDate)}</div>
+                          <div className="text-sm font-extrabold text-slate-900 mt-0.5 truncate">{c.Customer_Name || c.customerName}</div>
+                          <div className="text-[11px] text-indigo-700 font-semibold mt-0.5 truncate">{c.title || c.Title || c.formatType || c.Format_Type}</div>
+                          {c.Deleted_At && (
+                            <div className="text-[9px] text-rose-500 font-semibold mt-1">
+                              Deleted {formatDateDDMMYYYY(c.Deleted_At)}{c.Deleted_By ? ` by ${c.Deleted_By}` : ''}
+                            </div>
+                          )}
+                        </div>
+                        <div className="flex items-center justify-between px-3.5 py-2 border-t border-slate-100 bg-slate-50/70">
+                          <span className="text-[10px] font-bold text-slate-600">Ref No: <span className="text-slate-900">{refNo}</span></span>
+                          <button
+                            type="button"
+                            disabled={restoringRecycleBinId === guid}
+                            onClick={() => handleRestoreCertificateFromBin(c)}
+                            className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[10px] font-bold flex items-center gap-1.5 transition disabled:opacity-50"
+                          >
+                            <RotateCw className="w-3 h-3" />
+                            <span>{restoringRecycleBinId === guid ? 'Restoring…' : 'Restore'}</span>
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )
+            )}
+
+            {!isLoadingRecycleBin && recycleBinTab === 'SERVICE_REPORTS' && (
+              deletedServiceReports.length === 0 ? (
+                <div className="px-4 py-12 text-xs text-slate-400 text-center font-bold">No deleted service reports</div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {deletedServiceReports.map(r => {
+                    const reportId = r.Report_ID || r.reportId;
+                    return (
+                      <div key={reportId} className="rounded-xl border border-slate-200 bg-white shadow-2xs overflow-hidden">
+                        <div className="px-3.5 pt-3 pb-2.5">
+                          <div className="text-[10px] font-bold text-slate-500">{formatDateDDMMYYYY(r.Service_Date || r.serviceDate || r.Created_At)}</div>
+                          <div className="text-sm font-extrabold text-slate-900 mt-0.5 truncate">{r.Customer_Name || r.customerName}</div>
+                          <div className="text-[11px] text-amber-700 font-semibold mt-0.5 truncate">{r.reportType || r.Report_Type || 'Service Report'}</div>
+                          {r.Deleted_At && (
+                            <div className="text-[9px] text-rose-500 font-semibold mt-1">
+                              Deleted {formatDateDDMMYYYY(r.Deleted_At)}{r.Deleted_By ? ` by ${r.Deleted_By}` : ''}
+                            </div>
+                          )}
+                        </div>
+                        <div className="flex items-center justify-between px-3.5 py-2 border-t border-slate-100 bg-slate-50/70">
+                          <span className="text-[10px] font-bold text-slate-600">Report ID: <span className="text-slate-900">{reportId}</span></span>
+                          <button
+                            type="button"
+                            disabled={restoringRecycleBinId === reportId}
+                            onClick={() => handleRestoreServiceReportFromBin(r)}
+                            className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[10px] font-bold flex items-center gap-1.5 transition disabled:opacity-50"
+                          >
+                            <RotateCw className="w-3 h-3" />
+                            <span>{restoringRecycleBinId === reportId ? 'Restoring…' : 'Restore'}</span>
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )
+            )}
+          </div>
+        </div>
+      )}
+
       {/* SALARY OVERRIDE MODAL */}
       {salaryModalRecord && (
         <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4">
@@ -7857,8 +8070,14 @@ export default function AdminDashboard() {
 
       {/* RIGHT SIDE ADMIN PROFILE & QUICK MENU POPUP */}
       {showAdminProfilePopup && (
-        <div className="fixed inset-0 z-50 bg-slate-900/10 flex items-start justify-end p-4 sm:p-6">
-          <div className="bg-white rounded-2xl max-w-sm w-full p-6 shadow-2xl border border-slate-200 animate-fadeIn space-y-5 max-h-[95vh] overflow-y-auto">
+        <div
+          className="fixed inset-0 z-50 flex items-start justify-end p-4 sm:p-6"
+          onClick={() => setShowAdminProfilePopup(false)}
+        >
+          <div
+            className="bg-white rounded-2xl max-w-sm w-full p-6 shadow-2xl border border-slate-200 animate-fadeIn space-y-5 max-h-[95vh] overflow-y-auto"
+            onClick={e => e.stopPropagation()}
+          >
             <div className="flex items-center justify-between border-b border-slate-200 pb-3">
               <div className="flex items-center gap-2.5">
                 <div className="w-12 h-12 rounded-full bg-slate-900 text-white flex items-center justify-center text-base font-extrabold shadow-sm overflow-hidden border-2 border-rose-600 shrink-0">

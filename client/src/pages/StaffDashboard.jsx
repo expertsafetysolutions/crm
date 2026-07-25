@@ -3958,7 +3958,7 @@ export default function StaffDashboard() {
                 <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
               </button>
 
-              {(user?.Role === 'Admin' || user?.Can_Access_Service_Reports) && (
+              {user?.Can_Access_Service_Reports && (
                 <button
                   type="button"
                   onClick={() => {
@@ -3975,7 +3975,7 @@ export default function StaffDashboard() {
                 </button>
               )}
 
-              {(user?.Role === 'Admin' || user?.Can_Access_Certificates) && (
+              {user?.Can_Access_Certificates && (
                 <button
                   type="button"
                   onClick={() => {

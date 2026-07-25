@@ -31,7 +31,44 @@ app.get('/api/verify-certificate/:guid', async (req, res) => {
     let cert = await sheetsService.getCertificateByGuid(guid);
     let details = null;
     let items = [];
-    
+
+    // Soft-deleted certificates keep resolving here (their QR code may already be printed on a
+    // physical document) but must not read as a normal valid verification — show a distinct
+    // "revoked" state instead of either silently vouching for it or claiming it never existed.
+    if (cert) {
+      const rawCert = cert.toObject ? cert.toObject() : cert;
+      if (rawCert.Is_Deleted) {
+        return res.status(410).send(`
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <title>Certificate Revoked - Expert Safety Solutions</title>
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
+            <style>
+              body { font-family: 'Outfit', sans-serif; background: #fffbeb; margin: 0; padding: 20px; display: flex; align-items: center; justify-content: center; min-height: 100vh; text-align: center; }
+              .card { background: white; padding: 40px 30px; border-radius: 24px; box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.05); max-width: 400px; width: 100%; border: 1.5px solid #fde68a; }
+              .icon { font-size: 56px; margin-bottom: 20px; }
+              h1 { color: #1e293b; font-size: 22px; margin: 0 0 10px; font-weight: 800; }
+              p { color: #64748b; font-size: 13.5px; line-height: 1.6; margin: 0 0 24px; font-weight: 500; }
+              .ref { color: #92400e; font-weight: 700; }
+              .btn { display: inline-block; background: #9a3412; color: white; text-decoration: none; padding: 12px 24px; border-radius: 12px; font-weight: 700; font-size: 13px; text-transform: uppercase; transition: all 0.2s; }
+              .btn:hover { background: #7c2d12; transform: translateY(-1px); }
+            </style>
+          </head>
+          <body>
+            <div class="card">
+              <div class="icon">⚠️</div>
+              <h1>Certificate Revoked</h1>
+              <p>Certificate <span class="ref">${rawCert.Certificate_No || rawCert.certificateNo || guid}</span> has been withdrawn from our active registry by Expert Safety Solutions and is no longer valid. If you believe this is an error, or need a reissued copy, please contact us directly.</p>
+              <a href="/" class="btn">Back to Portal</a>
+            </div>
+          </body>
+          </html>
+        `);
+      }
+    }
+
     if (cert) {
       const c = cert.toObject ? cert.toObject() : cert;
       details = {
@@ -125,6 +162,103 @@ app.get('/api/verify-certificate/:guid', async (req, res) => {
       const lastParts = segments.slice(-2);
       return lastParts.join(', ');
     };
+
+    // A certificate stays valid through the end of its Valid_Until day — only expired starting
+    // the day after. An expired certificate is NOT invalid/fraudulent, just due for renewal, so
+    // it gets its own distinct page rather than falling through to "Verification Failed".
+    const RENEWAL_PHONE_DISPLAY = '8460699569';
+    const RENEWAL_PHONE_E164 = '918460699569';
+    const validityDate = details.validity ? new Date(details.validity) : null;
+    let isExpired = false;
+    if (validityDate && !isNaN(validityDate.getTime())) {
+      const endOfValidityDay = new Date(validityDate);
+      endOfValidityDay.setHours(23, 59, 59, 999);
+      isExpired = endOfValidityDay.getTime() < Date.now();
+    }
+
+    if (isExpired) {
+      const whatsappText = encodeURIComponent(`Hi, my ${details.type} (No. ${details.number}) has expired on ${formatDate(details.validity)}. I would like to renew it.`);
+      return res.send(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <title>Certificate Expired - Expert Safety Solutions</title>
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+          <style>
+            body { font-family: 'Outfit', sans-serif; background: linear-gradient(135deg, #fff7ed 0%, #fffbeb 100%); margin: 0; padding: 20px; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+            .card { background: white; border-radius: 28px; box-shadow: 0 25px 50px -12px rgba(154, 52, 18, 0.15); max-width: 480px; width: 100%; overflow: hidden; border: 1px solid #fed7aa; }
+            .header { background: linear-gradient(135deg, #c2410c 0%, #ea580c 100%); padding: 28px 24px; text-align: center; color: white; }
+            .logo { width: 56px; height: 56px; border-radius: 50%; object-fit: cover; margin: 0 auto 12px; display: block; box-shadow: 0 4px 15px rgba(0,0,0,0.15); background: white; }
+            .badge { background: rgba(255,255,255,0.25); border: 1px solid rgba(255,255,255,0.5); display: inline-block; padding: 5px 12px; border-radius: 50px; font-weight: 800; font-size: 10.5px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px; }
+            .header h1 { font-size: 19px; margin: 0; font-weight: 800; }
+            .content { padding: 26px 24px; text-align: center; }
+            .expired-icon { font-size: 44px; margin-bottom: 12px; }
+            .doc-title { font-size: 14px; font-weight: 800; color: #9a3412; text-transform: uppercase; margin: 0 0 10px; }
+            .msg { color: #78350f; font-size: 13.5px; line-height: 1.7; font-weight: 500; margin: 0 0 20px; }
+            .msg b { color: #9a3412; }
+            .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 22px; text-align: left; }
+            .info-box { background: #fff7ed; border: 1px solid #fed7aa; padding: 10px 14px; border-radius: 12px; }
+            .info-label { color: #9a3412; font-weight: 700; text-transform: uppercase; font-size: 9px; letter-spacing: 0.5px; margin-bottom: 3px; opacity: 0.75; }
+            .info-val { color: #431407; font-weight: 800; font-size: 12.5px; }
+            .cta-label { font-size: 11px; font-weight: 800; color: #9a3412; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 12px; }
+            .btn-row { display: flex; gap: 10px; }
+            .btn { flex: 1; display: flex; align-items: center; justify-content: center; gap: 8px; text-decoration: none; padding: 13px 10px; border-radius: 14px; font-weight: 800; font-size: 13px; transition: all 0.2s; }
+            .btn-call { background: #ea580c; color: white; }
+            .btn-call:hover { background: #c2410c; transform: translateY(-1px); }
+            .btn-whatsapp { background: #25D366; color: white; }
+            .btn-whatsapp:hover { background: #1da851; transform: translateY(-1px); }
+            .phone-note { margin-top: 14px; font-size: 11.5px; color: #9a3412; font-weight: 700; }
+            .footer { background: #fff7ed; padding: 18px 24px; text-align: center; border-top: 1px solid #fed7aa; }
+            .footer-logo { font-size: 10px; color: #b45309; font-weight: 700; text-transform: uppercase; }
+          </style>
+        </head>
+        <body>
+          <div class="card">
+            <div class="header">
+              <img class="logo" src="/assets/header_logo.png" onerror="this.onerror=null;this.src='/assets/header.jpg';" alt="Expert Safety Solutions" />
+              <span class="badge">⏳ Certificate Expired</span>
+              <h1>EXPERT SAFETY SOLUTIONS</h1>
+            </div>
+            <div class="content">
+              <div class="expired-icon">🔔</div>
+              <h2 class="doc-title">${details.title}</h2>
+              <p class="msg">Your certificate <b>expired on ${formatDate(details.validity)}</b>. This does <b>not</b> mean it is invalid or fraudulent — it simply means the validity period is over and it's time to renew. Please renew now to stay compliant and protected.</p>
+
+              <div class="info-grid">
+                <div class="info-box">
+                  <div class="info-label">Document No</div>
+                  <div class="info-val">${details.number}</div>
+                </div>
+                <div class="info-box">
+                  <div class="info-label">Client Name</div>
+                  <div class="info-val">${maskCustomerName(details.client)}</div>
+                </div>
+                <div class="info-box">
+                  <div class="info-label">Document Type</div>
+                  <div class="info-val">${details.type}</div>
+                </div>
+                <div class="info-box">
+                  <div class="info-label">Expired On</div>
+                  <div class="info-val" style="color: #b91c1c;">${formatDate(details.validity)}</div>
+                </div>
+              </div>
+
+              <div class="cta-label">Renew Your Certificate Now</div>
+              <div class="btn-row">
+                <a class="btn btn-call" href="tel:+${RENEWAL_PHONE_E164}">📞 Call Now</a>
+                <a class="btn btn-whatsapp" href="https://wa.me/${RENEWAL_PHONE_E164}?text=${whatsappText}" target="_blank" rel="noopener noreferrer">💬 WhatsApp</a>
+              </div>
+              <div class="phone-note">Call / WhatsApp: ${RENEWAL_PHONE_DISPLAY}</div>
+            </div>
+            <div class="footer">
+              <div class="footer-logo">Expert Safety Solutions Registry</div>
+            </div>
+          </div>
+        </body>
+        </html>
+      `);
+    }
 
     res.send(`
       <!DOCTYPE html>

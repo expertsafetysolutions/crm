@@ -1018,6 +1018,13 @@ export default function CertificateComplianceGeneratorPage() {
     return html2canvas(certPreviewRef.current, {
       scale: 2, useCORS: true, allowTaint: false, backgroundColor: '#ffffff', windowWidth: 1200,
       onclone: async (clonedDoc) => {
+        // The Inter Google Font loads with font-display:swap (index.html), so the browser can
+        // still be showing/measuring a fallback system font when html2canvas snapshots — different
+        // fonts have different baseline/ascent metrics at the same size, which shows up as every
+        // text box on the certificate rendering with text pushed low and a gap above it. Waiting
+        // for both documents' fonts to finish loading before rasterizing eliminates that mismatch.
+        if (document.fonts && document.fonts.ready) await document.fonts.ready;
+        if (clonedDoc.fonts && clonedDoc.fonts.ready) await clonedDoc.fonts.ready;
         const cw = clonedDoc.getElementById('cert-scale-wrapper');
         if (cw) { cw.style.width = '794px'; cw.style.height = '1123px'; cw.style.overflow = 'visible'; }
         const cr = clonedDoc.getElementById('certificate-print-root');

@@ -7,6 +7,7 @@ import EquipmentPreviewTable from '../components/servicereport/EquipmentPreviewT
 import EquipmentEditorTable from '../components/servicereport/EquipmentEditorTable';
 import GuidedInspection from '../components/servicereport/GuidedInspection';
 import { itemsToCsvObjects, csvObjectsToItems } from '../utils/serviceReportCsv';
+import { uploadPdfToAppsScript } from '../utils/appsScriptUpload';
 import {
   resolveColumns,
   resolveNumbering,
@@ -1057,6 +1058,15 @@ export default function CertificateGeneratorPage() {
 
       const fileName = getDownloadFilename(reportForm.Report_ID, reportForm.customerName, reportForm.serviceDate);
       pdf.save(`${fileName}.pdf`);
+      uploadPdfToAppsScript({
+        pdf,
+        fileName: `${fileName}.pdf`,
+        documentType: 'Service Report',
+        reportId: reportForm.Report_ID,
+        reportType: reportForm.reportType,
+        customerName: reportForm.customerName,
+        serviceDate: reportForm.serviceDate
+      });
     } catch (err) {
       console.error('PDF Export Error:', err);
       alert('Failed to generate PDF: ' + err.message);

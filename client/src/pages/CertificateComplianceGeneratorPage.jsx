@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useDocSettings } from '../context/DocSettingsContext';
 import { getLocalDateStr, formatDateDDMMYYYY, getRecordCreatedAt } from '../utils/dateUtils';
+import { uploadPdfToAppsScript } from '../utils/appsScriptUpload';
 import {
   ChevronLeft,
   ChevronRight,
@@ -2441,7 +2442,9 @@ export default function CertificateComplianceGeneratorPage() {
                   const result = await saveCertificateRecord({ isLocked: true });
                   setCertForm(prev => ({ ...prev, isLocked: true }));
                   const { pdf } = await buildCertificatePdf();
-                  pdf.save(`${getDownloadFilename(certForm.certificateNo, certForm.customerName, certForm.issueDate)}.pdf`);
+                  const certFileName = `${getDownloadFilename(certForm.certificateNo, certForm.customerName, certForm.issueDate)}.pdf`;
+                  pdf.save(certFileName);
+                  uploadPdfToAppsScript({ pdf, fileName: certFileName, documentType: 'Certificate', certificateNo: certForm.certificateNo, formatType: certForm.formatType, customerName: certForm.customerName, issueDate: certForm.issueDate });
                   if (!result.isExisting && result.certificate) advanceToNextCertNumber(result.certificate);
                 } catch (err) { console.error(err); alert('PDF error: ' + err.message); }
                 finally { setAdminSubmitting(''); }
@@ -2824,7 +2827,9 @@ export default function CertificateComplianceGeneratorPage() {
               const result = await saveCertificateRecord({ isLocked: true });
               setCertForm(prev => ({ ...prev, isLocked: true }));
               const { pdf } = await buildCertificatePdf();
-              pdf.save(`${getDownloadFilename(certForm.certificateNo, certForm.customerName, certForm.issueDate)}.pdf`);
+              const certFileName = `${getDownloadFilename(certForm.certificateNo, certForm.customerName, certForm.issueDate)}.pdf`;
+              pdf.save(certFileName);
+              uploadPdfToAppsScript({ pdf, fileName: certFileName, documentType: 'Certificate', certificateNo: certForm.certificateNo, formatType: certForm.formatType, customerName: certForm.customerName, issueDate: certForm.issueDate });
               if (!result.isExisting && result.certificate) advanceToNextCertNumber(result.certificate);
             } catch (err) { console.error(err); alert('PDF error: ' + err.message); }
             finally { setAdminSubmitting(''); }

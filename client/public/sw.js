@@ -1,4 +1,4 @@
-const CACHE_NAME = 'expert-safety-pwa-v2';
+const CACHE_NAME = 'expert-safety-pwa-v3';
 const MAX_CACHE_ENTRIES = 80;
 const STATIC_ASSETS = [
   '/',

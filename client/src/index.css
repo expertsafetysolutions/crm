@@ -35,3 +35,28 @@
 .mobile-actions-scroll::-webkit-scrollbar {
   display: none;
 }
+
+/*
+ * html2canvas font-baseline probe — DO NOT REMOVE.
+ *
+ * Before drawing any text, html2canvas measures where a font's baseline sits by appending a hidden
+ * <div><span>Hidden Text</span><img 1x1 gif></div> to document.body and reading
+ * `img.offsetTop - span.offsetTop`. That only yields the baseline if the probe image is an INLINE,
+ * baseline-aligned box. Tailwind's Preflight sets `img { display: block }` for every image on the
+ * page, which turns the probe into a block that lands *below* the text line — so the measured
+ * baseline comes out roughly half a line too large, and every single text run in an exported
+ * canvas is painted ~6px lower than the browser painted it, while boxes, borders and images stay
+ * put. That is what made downloaded certificates/service reports look misaligned even though the
+ * on-screen preview was correct.
+ *
+ * The selector matches html2canvas' own SMALL_IMAGE data URI and nothing else in the app.
+ * height: 2px cancels html2canvas' hardcoded `+ 2` fudge factor (a 2px tall baseline-aligned image
+ * has its top exactly 2px above the baseline), which lands the text on the exact baseline.
+ */
+img[src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"] {
+  display: inline !important;
+  vertical-align: baseline !important;
+  width: 1px !important;
+  height: 2px !important;
+  max-width: none !important;
+}

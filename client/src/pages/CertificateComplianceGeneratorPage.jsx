@@ -2556,7 +2556,7 @@ export default function CertificateComplianceGeneratorPage() {
               <div className="relative flex flex-col h-full">
                 {(certCfg.show_header !== false) && (
                 <div className={`border-b-2 border-red-700 pb-3 ${density.headerMb} shrink-0`}>
-                  <img src={certBase64Assets.header||branding.header_image_url||'/assets/header_logo.png'} onError={e=>{e.target.onerror=null;e.target.src='/assets/header.jpg';}} alt="Expert Safety Solutions Header" className={`w-full h-auto ${density.imgMaxH} object-contain mx-auto shrink-0`}/>
+                  <img src={certBase64Assets.header||branding.header_image_url||'/assets/header_logo.png'} onError={e=>{e.target.onerror=null;e.target.src='/assets/header.jpg';}} alt="Expert Safety Solutions Header" className={`w-auto h-auto max-w-full ${density.imgMaxH} object-contain mx-auto shrink-0`}/>
                 </div>
                 )}
 
@@ -2739,12 +2739,18 @@ export default function CertificateComplianceGeneratorPage() {
                         <div className="text-center min-w-[180px] shrink-0">
                           {/* Stamp placed above signature line (system signature removed) */}
                           {(certCfg.show_stamp !== false) && (
-                            <img
-                              src={certBase64Assets.stamp||branding.company_stamp_url||'/assets/company_stamp.png'}
-                              onError={e=>{e.target.onerror=null;e.target.src='/assets/stamp.jpg';}}
-                              alt="Official Seal Stamp"
-                              className="w-24 h-24 object-contain mx-auto -mb-1 shrink-0"
-                            />
+                            /* Fixed 96x96 slot, but the <img> itself is sized by max-width/max-height so its
+                               box always keeps the stamp's own aspect ratio — html2canvas ignores object-fit
+                               and stretches an image to fill its box, which squashed the round seal into an
+                               ellipse in the PDF while the preview looked fine. */
+                            <div className="w-24 h-24 mx-auto -mb-1 shrink-0 flex items-center justify-center">
+                              <img
+                                src={certBase64Assets.stamp||branding.company_stamp_url||'/assets/company_stamp.png'}
+                                onError={e=>{e.target.onerror=null;e.target.src='/assets/stamp.jpg';}}
+                                alt="Official Seal Stamp"
+                                className="w-auto h-auto max-w-full max-h-full object-contain"
+                              />
+                            </div>
                           )}
                           {isSectionVisible('signatory') && (
                             <>
@@ -2757,7 +2763,9 @@ export default function CertificateComplianceGeneratorPage() {
                         /* If signature is hidden but stamp is shown */
                         (certCfg.show_stamp !== false) && (
                           <div className="text-center shrink-0">
-                            <img src={certBase64Assets.stamp||branding.company_stamp_url||'/assets/company_stamp.png'} onError={e=>{e.target.onerror=null;e.target.src='/assets/stamp.jpg';}} alt="Official Seal Stamp" className="w-24 h-24 object-contain mx-auto shrink-0"/>
+                            <div className="w-24 h-24 mx-auto shrink-0 flex items-center justify-center">
+                              <img src={certBase64Assets.stamp||branding.company_stamp_url||'/assets/company_stamp.png'} onError={e=>{e.target.onerror=null;e.target.src='/assets/stamp.jpg';}} alt="Official Seal Stamp" className="w-auto h-auto max-w-full max-h-full object-contain"/>
+                            </div>
                             <span className="text-[9px] font-bold text-slate-500 mt-1 uppercase block">Official Company Seal</span>
                           </div>
                         )
@@ -2772,7 +2780,7 @@ export default function CertificateComplianceGeneratorPage() {
                 </div>
                 {(certCfg.show_footer !== false) && (
                 <div className="mt-1 shrink-0">
-                  <img src={certBase64Assets.footer||branding.footer_image_url||'/assets/Footer - Expert (2025).PNG'} alt="Expert Footer Branding" className={`w-full h-auto ${density.imgMaxH} object-contain mx-auto shrink-0`} onError={e=>{e.target.onerror=null;e.target.src='/assets/footer.png';}}/>
+                  <img src={certBase64Assets.footer||branding.footer_image_url||'/assets/Footer - Expert (2025).PNG'} alt="Expert Footer Branding" className={`w-auto h-auto max-w-full ${density.imgMaxH} object-contain mx-auto shrink-0`} onError={e=>{e.target.onerror=null;e.target.src='/assets/footer.png';}}/>
                 </div>
                 )}
               </div>

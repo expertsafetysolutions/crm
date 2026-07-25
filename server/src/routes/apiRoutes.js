@@ -152,6 +152,12 @@ router.get('/certificates', async (req, res) => {
 
 router.post('/certificates', async (req, res) => {
   try {
+    if (req.user.role !== 'Admin') {
+      const staff = await sheetsService.getStaffById(req.user.staffId);
+      if (!staff || !staff.Can_Access_Certificates) {
+        return res.status(403).json({ error: 'You do not have permission to generate certificates. Contact Admin.' });
+      }
+    }
     const newCert = await sheetsService.insertRow('Document_Registry', req.body);
     res.json({ success: true, certificate: newCert });
   } catch (err) {
@@ -162,6 +168,12 @@ router.post('/certificates', async (req, res) => {
 
 router.put('/certificates/:guid', async (req, res) => {
   try {
+    if (req.user.role !== 'Admin') {
+      const staff = await sheetsService.getStaffById(req.user.staffId);
+      if (!staff || !staff.Can_Access_Certificates) {
+        return res.status(403).json({ error: 'You do not have permission to update certificates. Contact Admin.' });
+      }
+    }
     const updated = await sheetsService.updateRow('Document_Registry', 'verificationGuid', req.params.guid, req.body);
     if (!updated) {
       const byNo = await sheetsService.updateRow('Document_Registry', 'Certificate_No', req.params.guid, req.body);
@@ -217,6 +229,12 @@ router.get('/service-reports/:id', async (req, res) => {
 
 router.post('/service-reports', async (req, res) => {
   try {
+    if (req.user.role !== 'Admin') {
+      const staff = await sheetsService.getStaffById(req.user.staffId);
+      if (!staff || !staff.Can_Access_Service_Reports) {
+        return res.status(403).json({ error: 'You do not have permission to create service reports. Contact Admin.' });
+      }
+    }
     const reportData = {
       ...req.body,
       Report_ID: req.body.Report_ID || `SR-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`,
@@ -234,6 +252,12 @@ router.post('/service-reports', async (req, res) => {
 
 router.put('/service-reports/:id', async (req, res) => {
   try {
+    if (req.user.role !== 'Admin') {
+      const staff = await sheetsService.getStaffById(req.user.staffId);
+      if (!staff || !staff.Can_Access_Service_Reports) {
+        return res.status(403).json({ error: 'You do not have permission to update service reports. Contact Admin.' });
+      }
+    }
     const updated = await sheetsService.updateRow('Service_Reports', 'Report_ID', req.params.id, {
       ...req.body,
       Updated_At: new Date().toISOString(),

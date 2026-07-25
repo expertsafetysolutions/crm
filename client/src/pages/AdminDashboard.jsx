@@ -1331,6 +1331,22 @@ export default function AdminDashboard() {
     }
   };
 
+  // Toggles the Service Report / Certificate module flags on a staff member.
+  // field is 'Can_Access_Service_Reports' or 'Can_Access_Certificates'.
+  const handleUpdateStaffModuleAccess = async (staffId, field, value) => {
+    try {
+      const res = await fetch(`/api/staff/${staffId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ [field]: value })
+      });
+      if (!res.ok) throw new Error('Failed to update module access');
+      await loadAdminData();
+    } catch (err) {
+      alert(err.message);
+    }
+  };
+
   const handleAdminSetStaffPassword = async (e) => {
     e.preventDefault();
     setPasswordResetError('');
@@ -3648,6 +3664,36 @@ export default function AdminDashboard() {
                       <option value="ALL_TASKS">All Company Work Orders & Pipeline</option>
                       <option value="FULL_ACCESS">Full Access (Supervisor / All Scope)</option>
                     </select>
+                  </div>
+
+                  {/* Module Access: Service Report & Certificate */}
+                  <div className="space-y-1.5">
+                    <label className="block text-[11px] font-bold text-slate-600 flex items-center gap-1">
+                      <FileCheck className="w-3.5 h-3.5 text-amber-600" />
+                      Module Access
+                    </label>
+                    <div className="flex items-center justify-between p-2 rounded-xl bg-slate-50 border border-slate-200/80">
+                      <span className="text-xs font-semibold text-slate-700">Service Report</span>
+                      <button
+                        type="button"
+                        onClick={() => handleUpdateStaffModuleAccess(staff.Staff_ID, 'Can_Access_Service_Reports', !staff.Can_Access_Service_Reports)}
+                        className={`relative w-10 h-6 rounded-full transition shrink-0 ${staff.Can_Access_Service_Reports ? 'bg-emerald-500' : 'bg-slate-300'}`}
+                        title="Allow this staff member to create Service Reports"
+                      >
+                        <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all ${staff.Can_Access_Service_Reports ? 'left-[18px]' : 'left-0.5'}`} />
+                      </button>
+                    </div>
+                    <div className="flex items-center justify-between p-2 rounded-xl bg-slate-50 border border-slate-200/80">
+                      <span className="text-xs font-semibold text-slate-700">Certificate Generation</span>
+                      <button
+                        type="button"
+                        onClick={() => handleUpdateStaffModuleAccess(staff.Staff_ID, 'Can_Access_Certificates', !staff.Can_Access_Certificates)}
+                        className={`relative w-10 h-6 rounded-full transition shrink-0 ${staff.Can_Access_Certificates ? 'bg-emerald-500' : 'bg-slate-300'}`}
+                        title="Allow this staff member to generate Certificates"
+                      >
+                        <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all ${staff.Can_Access_Certificates ? 'left-[18px]' : 'left-0.5'}`} />
+                      </button>
+                    </div>
                   </div>
                 </div>
 
@@ -8160,6 +8206,37 @@ export default function AdminDashboard() {
                   <option value="ALL_TASKS">All Company Work Orders & Pipeline</option>
                   <option value="FULL_ACCESS">Full Access (Supervisor Scope)</option>
                 </select>
+              </div>
+
+              <div className="space-y-1 sm:col-span-2">
+                <label className="block text-xs font-bold text-slate-700 flex items-center gap-1">
+                  <FileCheck className="w-3.5 h-3.5 text-amber-600" />
+                  Module Access
+                </label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <div className="flex items-center justify-between p-2 rounded-xl bg-white border border-slate-200">
+                    <span className="text-xs font-semibold text-slate-700">Service Report</span>
+                    <button
+                      type="button"
+                      onClick={() => handleUpdateStaffModuleAccess(selectedStaffProfile.Staff_ID, 'Can_Access_Service_Reports', !selectedStaffProfile.Can_Access_Service_Reports)}
+                      className={`relative w-10 h-6 rounded-full transition shrink-0 ${selectedStaffProfile.Can_Access_Service_Reports ? 'bg-emerald-500' : 'bg-slate-300'}`}
+                      title="Allow this staff member to create Service Reports"
+                    >
+                      <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all ${selectedStaffProfile.Can_Access_Service_Reports ? 'left-[18px]' : 'left-0.5'}`} />
+                    </button>
+                  </div>
+                  <div className="flex items-center justify-between p-2 rounded-xl bg-white border border-slate-200">
+                    <span className="text-xs font-semibold text-slate-700">Certificate Generation</span>
+                    <button
+                      type="button"
+                      onClick={() => handleUpdateStaffModuleAccess(selectedStaffProfile.Staff_ID, 'Can_Access_Certificates', !selectedStaffProfile.Can_Access_Certificates)}
+                      className={`relative w-10 h-6 rounded-full transition shrink-0 ${selectedStaffProfile.Can_Access_Certificates ? 'bg-emerald-500' : 'bg-slate-300'}`}
+                      title="Allow this staff member to generate Certificates"
+                    >
+                      <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all ${selectedStaffProfile.Can_Access_Certificates ? 'left-[18px]' : 'left-0.5'}`} />
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
 

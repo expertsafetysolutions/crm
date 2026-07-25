@@ -60,7 +60,8 @@ import {
   Filter,
   Tag as TagIcon,
   Check,
-  Key
+  Key,
+  Award
 } from 'lucide-react';
 
 const REMARK_TAGS = [
@@ -2498,24 +2499,6 @@ export default function StaffDashboard() {
                 <PlusCircle className="w-4 h-4" />
               </button>
 
-              <button
-                type="button"
-                onClick={() => navigate('/field-visit/new')}
-                className="p-2 sm:px-3 sm:py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition shrink-0"
-                title="Start a Field Visit — search any equipment type for a client in one walk-through"
-              >
-                <FileText className="w-4 h-4" />
-                <span className="hidden sm:inline">Service Report</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => navigate('/certificate/new')}
-                className="p-2 sm:px-2.5 sm:py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-500 font-bold text-xs flex items-center justify-center shadow-sm transition shrink-0"
-                title="Single-type report (skip the guided field visit)"
-              >
-                <FileText className="w-3.5 h-3.5" />
-              </button>
             </div>
 
             {/* Status/Tag Filter Rows — auto-hide while scrolling, reappear near the top */}
@@ -3831,8 +3814,14 @@ export default function StaffDashboard() {
 
       {/* RIGHT SIDE STAFF PROFILE & QUICK MENU POPUP */}
       {showProfilePopup && (
-        <div className="fixed inset-0 z-50 bg-slate-900/10 flex items-start justify-end p-3 sm:p-5">
-          <div className="bg-white rounded-2xl max-w-sm w-full p-4 sm:p-5 shadow-2xl border border-slate-200 animate-fadeIn space-y-3.5 max-h-[92vh] overflow-y-auto">
+        <div
+          className="fixed inset-0 z-50 flex items-start justify-end p-3 sm:p-5"
+          onClick={() => setShowProfilePopup(false)}
+        >
+          <div
+            className="bg-white rounded-2xl max-w-sm w-full p-4 sm:p-5 shadow-2xl border border-slate-200 animate-fadeIn space-y-3.5 max-h-[92vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
             <div className="flex items-center justify-between border-b border-slate-200 pb-2.5">
               <div className="flex items-center gap-2.5">
                 <div className="w-11 h-11 rounded-full bg-rose-600 text-white flex items-center justify-center text-base font-extrabold shadow-sm overflow-hidden border-2 border-rose-200 shrink-0">
@@ -3968,6 +3957,40 @@ export default function StaffDashboard() {
                 </div>
                 <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
               </button>
+
+              {(user?.Role === 'Admin' || user?.Can_Access_Service_Reports) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowProfilePopup(false);
+                    navigate('/field-visit/new');
+                  }}
+                  className="w-full flex items-center justify-between p-2.5 rounded-xl bg-slate-50 hover:bg-slate-100 text-slate-800 font-bold text-xs transition border border-slate-200/80"
+                >
+                  <div className="flex items-center gap-2">
+                    <FileText className="w-3.5 h-3.5 text-amber-600" />
+                    <span>Service Report</span>
+                  </div>
+                  <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
+                </button>
+              )}
+
+              {(user?.Role === 'Admin' || user?.Can_Access_Certificates) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowProfilePopup(false);
+                    navigate('/certificate-compliance/new');
+                  }}
+                  className="w-full flex items-center justify-between p-2.5 rounded-xl bg-slate-50 hover:bg-slate-100 text-slate-800 font-bold text-xs transition border border-slate-200/80"
+                >
+                  <div className="flex items-center gap-2">
+                    <Award className="w-3.5 h-3.5 text-indigo-600" />
+                    <span>Generate Certificate</span>
+                  </div>
+                  <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
+                </button>
+              )}
 
               <button
                 type="button"

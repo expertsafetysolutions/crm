@@ -2052,12 +2052,17 @@ export default function CertificateGeneratorPage() {
                           <div className="text-center flex flex-col items-center justify-end min-w-[150px] shrink-0">
                              {/* Stamp placed above signature line (system signature removed) */}
                              {(srCfg.show_stamp_every_page !== false) && (
-                              <img
-                                src={assets.stamp || branding.company_stamp_url || '/assets/company_stamp.png'}
-                                onError={e => { e.target.onerror = null; e.target.src = '/assets/stamp.jpg'; }}
-                                alt="Circular Blue Seal"
-                                className="w-20 h-20 object-contain mx-auto -mb-1 shrink-0"
-                              />
+                              /* Fixed 80x80 slot with the image sized by max-width/max-height, so its box keeps
+                                 the seal's aspect ratio — html2canvas ignores object-fit and would otherwise
+                                 stretch the round seal into an ellipse in the exported PDF. */
+                              <div className="w-20 h-20 mx-auto -mb-1 shrink-0 flex items-center justify-center">
+                                <img
+                                  src={assets.stamp || branding.company_stamp_url || '/assets/company_stamp.png'}
+                                  onError={e => { e.target.onerror = null; e.target.src = '/assets/stamp.jpg'; }}
+                                  alt="Circular Blue Seal"
+                                  className="w-auto h-auto max-w-full max-h-full object-contain"
+                                />
+                              </div>
                             )}
                             <div className="border-t border-slate-900 pt-0.5 font-black text-[10px] text-slate-950 w-full uppercase">
                               {reportForm.authorizedSignatory || 'NILESHKUMAR MANJIBHAI PADAYA'}
@@ -2070,12 +2075,14 @@ export default function CertificateGeneratorPage() {
                           /* If signature is hidden but stamp is shown */
                           (srCfg.show_stamp_every_page !== false) && (
                             <div className="flex flex-col items-center justify-end shrink-0">
-                              <img
-                                src={assets.stamp || branding.company_stamp_url || '/assets/company_stamp.png'}
-                                onError={e => { e.target.onerror = null; e.target.src = '/assets/stamp.jpg'; }}
-                                alt="Circular Blue Seal"
-                                className="w-20 h-20 object-contain shrink-0"
-                              />
+                              <div className="w-20 h-20 shrink-0 flex items-center justify-center">
+                                <img
+                                  src={assets.stamp || branding.company_stamp_url || '/assets/company_stamp.png'}
+                                  onError={e => { e.target.onerror = null; e.target.src = '/assets/stamp.jpg'; }}
+                                  alt="Circular Blue Seal"
+                                  className="w-auto h-auto max-w-full max-h-full object-contain"
+                                />
+                              </div>
                               <span className="text-[7.5px] font-bold text-slate-500 uppercase mt-0.5">Official Circular Stamp</span>
                             </div>
                           )
@@ -2092,7 +2099,7 @@ export default function CertificateGeneratorPage() {
                       src={assets.footer || branding.footer_image_url || '/assets/Footer - Expert (2025).PNG'}
                       onError={e => { e.target.onerror = null; e.target.src = '/assets/footer.png'; }}
                       alt="Expert Safety Solutions Footer"
-                      className="w-full h-auto max-h-28 object-contain mx-auto shrink-0"
+                      className="w-auto h-auto max-w-full max-h-28 object-contain mx-auto shrink-0"
                     />
                   </div>
                   )}

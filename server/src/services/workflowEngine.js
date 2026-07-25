@@ -185,8 +185,89 @@ async function getAvailableStaff(department, defaultStaffId) {
   return defaultStaffId;
 }
 
+const REFILLING_DUE_FORMAT_TYPES = ['Refilling', 'HP Testing', 'Training Certificate'];
+
+function addDaysToDateStr(dateStr, days) {
+  const d = new Date(dateStr);
+  d.setDate(d.getDate() + days);
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(d);
+}
+
+function formatDDMMYY(dateStr) {
+  const d = new Date(dateStr);
+  const dd = String(d.getDate()).padStart(2, '0');
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const yy = String(d.getFullYear()).slice(-2);
+  return `${dd}/${mm}/${yy}`;
+}
+
+// Builds "ABC 6 Kg - 5 Nos, Co2 - 2 Nos" from a certificate's itemsList.
+function summarizeItems(itemsList) {
+  return (itemsList || []).map(item => {
+    const qtyNumber = String(item.qty || '').match(/\d+/)?.[0] || '1';
+    const namePart = [item.itemName, item.capacity].filter(Boolean).join(' ');
+    return `${namePart} - ${qtyNumber} Nos`;
+  }).join(', ');
+}
+
+async function getOrCreateRefillingDueTag() {
+  const tags = await sheetsService.getAllTags();
+  const existing = tags.find(t => String(t.name || '').trim().toLowerCase() === 'refilling due');
+  if (existing) return existing.Tag_ID;
+  const newTag = { Tag_ID: `TAG${Date.now().toString().slice(-6)}`, name: 'Refilling Due', color: '#ea580c' };
+  await sheetsService.insertRow('Tag_Master', newTag);
+  return newTag.Tag_ID;
+}
+
+// Daily check (invoked by the /api/cron/refilling-due-check route): finds certificates whose
+// Valid_Until is exactly 30 days from today and, for the first time, generates a follow-up
+// Sales task so the equipment listed on the certificate can be proactively re-serviced before
+// it lapses. Idempotent — each processed certificate is flagged so a repeat run (or a run that
+// finds the same date again) can't create duplicate tasks.
+async function generateRefillingDueTasks() {
+  const todayStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
+  const targetDate = addDaysToDateStr(todayStr, 30);
+
+  const certificates = await sheetsService.getAllCertificates();
+  const dueCerts = certificates.filter(c => {
+    const formatType = c.formatType || c.Format_Type;
+    const validUntil = c.Valid_Until || c.validUntil;
+    return REFILLING_DUE_FORMAT_TYPES.includes(formatType) && validUntil === targetDate && !c.refillingTaskGenerated;
+  });
+
+  if (dueCerts.length === 0) return { createdCount: 0, skippedCount: 0, targetDate };
+
+  const tagId = await getOrCreateRefillingDueTag();
+  let createdCount = 0;
+
+  for (const cert of dueCerts) {
+    const validUntil = cert.Valid_Until || cert.validUntil;
+    const description = `RDD - ${formatDDMMYY(validUntil)} - ${summarizeItems(cert.itemsList)}`;
+    const newTask = {
+      Task_ID: `TASK${Date.now().toString().slice(-6)}${Math.floor(Math.random() * 100).toString().padStart(2, '0')}`,
+      Customer_ID: cert.Customer_ID || cert.customerId,
+      Description: description,
+      Assigned_Staff: '',
+      Department: 'Sales',
+      Stage: 'New Inquiry',
+      Type: 'One-time',
+      Scheduled_Date: todayStr,
+      Status: 'Pending',
+      Tags: [tagId],
+      Created_By: 'SYSTEM',
+      Created_At: todayStr
+    };
+    await sheetsService.insertRow('Task_Master', newTask);
+    await sheetsService.updateRow('Document_Registry', 'verificationGuid', cert.verificationGuid || cert.Verification_GUID, { refillingTaskGenerated: true });
+    createdCount++;
+  }
+
+  return { createdCount, skippedCount: dueCerts.length - createdCount, targetDate };
+}
+
 module.exports = {
   SALES_STAGES,
   PRODUCTION_STAGES,
-  advanceTaskStage
+  advanceTaskStage,
+  generateRefillingDueTasks
 };

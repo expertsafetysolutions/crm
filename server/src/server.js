@@ -266,6 +266,23 @@ app.get('/api/verify-certificate/:guid', async (req, res) => {
   }
 });
 
+// Vercel Cron target — must be registered before apiRouter (which requires a staff JWT on
+// everything) since Vercel authenticates cron requests with `Authorization: Bearer $CRON_SECRET`,
+// not a login token. See vercel.json's "crons" entry.
+app.get('/api/cron/refilling-due-check', async (req, res) => {
+  if (process.env.CRON_SECRET && req.headers.authorization !== `Bearer ${process.env.CRON_SECRET}`) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  try {
+    const workflowEngine = require('./services/workflowEngine');
+    const result = await workflowEngine.generateRefillingDueTasks();
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('Refilling-due cron job error:', err);
+    res.status(500).json({ error: 'Refilling-due check failed' });
+  }
+});
+
 // Routes
 app.use('/api/auth', authRouter);
 app.use('/api', apiRouter);

@@ -21,7 +21,6 @@ import {
   Settings,
   Maximize2,
   Minimize2,
-  Share2,
   Lock,
   GripVertical,
   RotateCcw
@@ -394,6 +393,7 @@ export default function CertificateComplianceGeneratorPage() {
     certificateNo: 'Expert/26-27/R310',
     editCoolingDays: 3,
     title: 'FIRE EXTINGUISHER REFILLING & MAINTENANCE CERTIFICATE',
+    customerId: '',
     customerName: '',
     address: '',
     gstin: '',
@@ -726,6 +726,7 @@ export default function CertificateComplianceGeneratorPage() {
               certPeriod: '26-27',
               certSequence: seqNo,
               certificateNo: `Expert/26-27/${seqNo}`,
+              customerId: foundTask.Customer_ID || cust.Customer_ID || '',
               customerName: foundTask.Customer_Name || cust.Company_Name || 'Valued Client',
               address: foundTask.Customer_Address || cust.Address || 'Gujarat, India',
               contact: cust.Contact || cust.Phone || cust.Mobile || cust.Contact_Number || '',
@@ -900,7 +901,7 @@ export default function CertificateComplianceGeneratorPage() {
   const saveCertificateRecord = async (extra = {}) => {
     const payload = {
       ...certForm, ...extra,
-      Certificate_No: certForm.certificateNo, Customer_Name: certForm.customerName, Address: certForm.address,
+      Certificate_No: certForm.certificateNo, Customer_ID: certForm.customerId, Customer_Name: certForm.customerName, Address: certForm.address,
       GSTIN: certForm.gstin, Issue_Date: certForm.issueDate, Valid_Until: certForm.validUntil,
       Challan_Date: certForm.challanDate || certForm.issueDate,
       Verification_GUID: certForm.verificationGuid, Revision: certForm.revision || 0,
@@ -979,6 +980,7 @@ export default function CertificateComplianceGeneratorPage() {
       revision: newRevision,
       isLocked: false,
       isContentUnlocked: true,
+      customerId: targetCert.Customer_ID || targetCert.customerId || '',
       customerName: targetCert.Customer_Name || targetCert.customerName || '',
       address: targetCert.Address || targetCert.address || '',
       gstin: targetCert.GSTIN || targetCert.gstin || '',
@@ -998,7 +1000,75 @@ export default function CertificateComplianceGeneratorPage() {
   };
 
   const handleLoadPreviousCertificate = () => loadCertificateAtOffset(1);
-  const handleLoadNextCertificate = () => loadCertificateAtOffset(-1);
+
+  // Clears client/equipment fields and assigns the next unused certificate number for this
+  // format, so the form is ready to start an unrelated new certificate from scratch.
+  const resetToBlankCertificate = (certsForNumbering) => {
+    const latestSeq = getLatestSequenceNumber(certsForNumbering, certForm.formatType);
+    const nextSeq = latestSeq + 1;
+    const prefixLetter = (certForm.certSequence || '').match(/^[A-Za-z]+/)?.[0] || '';
+    const nextSequence = `${prefixLetter}${nextSeq}`;
+    setCertForm(prev => ({
+      ...prev,
+      customerId: '',
+      customerName: '',
+      address: '',
+      gstin: '',
+      contact: '',
+      authPerson: '',
+      itemsList: [],
+      certSequence: nextSequence,
+      certificateNo: `${prev.certPrefix || 'Expert/'}${prev.certPeriod || '26-27'}/${nextSequence}`,
+      verificationGuid: 'ESS-VER-' + Math.random().toString(36).substring(2, 8).toUpperCase(),
+      isLocked: false,
+      isContentUnlocked: false,
+      revision: 0
+    }));
+    setCertCustomerSearch('');
+    setNewItemSearch('');
+    setActiveMobileTab('edit');
+  };
+
+  // Next, once already on the newest saved certificate, opens a blank certificate instead of
+  // just alerting — auto-saving the currently open one first if it has unsaved-but-complete data.
+  const handleLoadNextCertificate = async () => {
+    if (allCertificates.length > 0) {
+      const sortedCerts = [...allCertificates].sort((a, b) => {
+        const ta = getRecordCreatedAt(a)?.getTime();
+        const tb = getRecordCreatedAt(b)?.getTime();
+        if (ta === undefined && tb === undefined) return 0;
+        if (ta === undefined) return 1;
+        if (tb === undefined) return -1;
+        return tb - ta;
+      });
+      const currentIndex = sortedCerts.findIndex(c =>
+        (c.verificationGuid && c.verificationGuid === certForm.verificationGuid) ||
+        (c.Verification_GUID && c.Verification_GUID === certForm.verificationGuid)
+      );
+      if (currentIndex > 0) { loadCertificateAtOffset(-1); return; }
+    }
+    // Already at the newest certificate (or no history yet) — open a blank one.
+    let updatedCerts = allCertificates;
+    if (readyToFinalize) {
+      try {
+        setAdminSubmitting('save');
+        const result = await saveCertificateRecord();
+        if (result.certificate) {
+          updatedCerts = [
+            ...allCertificates.filter(c => (c.verificationGuid || c.Verification_GUID) !== (result.certificate.verificationGuid || result.certificate.Verification_GUID)),
+            result.certificate
+          ];
+        }
+      } catch (err) {
+        alert('Failed to auto-save current certificate: ' + err.message);
+        setAdminSubmitting('');
+        return;
+      }
+      setAdminSubmitting('');
+    }
+    resetToBlankCertificate(updatedCerts);
+    alert('✨ New blank certificate opened.');
+  };
 
   const generateCertificateCanvas = async () => {
     if (!certPreviewRef.current) throw new Error('Certificate preview container is not ready.');
@@ -1287,10 +1357,11 @@ export default function CertificateComplianceGeneratorPage() {
                               const gst = c.GSTIN || c.Gst_No || c.GST || '';
                               const contact = c.Contact || c.Phone || c.Mobile || c.Contact_Number || '';
                               const authPerson = c.Auth_Person || '';
-                              setCertForm(prev => ({ 
-                                ...prev, 
-                                customerName: compName, 
-                                address: addr, 
+                              setCertForm(prev => ({
+                                ...prev,
+                                customerId: c.Customer_ID || '',
+                                customerName: compName,
+                                address: addr,
                                 gstin: gst,
                                 contact: contact,
                                 authPerson: authPerson
@@ -2343,88 +2414,78 @@ export default function CertificateComplianceGeneratorPage() {
           </div>
           {/* Final Action Buttons — Docked at the end of the form/configuration panel */}
           <div className="pt-4 mt-2 border-t border-slate-200 shrink-0 space-y-2.5 lg:block hidden">
-            {readyToFinalize ? (
-              <div className="flex flex-wrap gap-2 w-full">
+            <div className="flex flex-wrap gap-2 w-full">
+              <button type="button" disabled={Boolean(adminSubmitting)} onClick={handleLoadPreviousCertificate} title="Open the certificate created before this one"
+                className="flex-1 min-w-[80px] py-2 px-2.5 rounded-xl bg-zinc-600 hover:bg-zinc-700 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50">
+                <ChevronLeft className="w-3.5 h-3.5" /><span>Previous</span>
+              </button>
+
+              <button type="button" disabled={!readyToFinalize || Boolean(adminSubmitting)} onClick={async () => {
+                try {
+                  setAdminSubmitting('save');
+                  const result = await saveCertificateRecord();
+                  const updatedCerts = result.certificate
+                    ? [...allCertificates.filter(c => (c.verificationGuid || c.Verification_GUID) !== (result.certificate.verificationGuid || result.certificate.Verification_GUID)), result.certificate]
+                    : allCertificates;
+                  resetToBlankCertificate(updatedCerts);
+                  alert('✅ Certificate saved. Ready for a new certificate.');
+                } catch (err) { alert('Save failed: ' + err.message); }
+                finally { setAdminSubmitting(''); }
+              }} className="flex-1 min-w-[80px] py-2 px-2.5 rounded-xl bg-slate-700 hover:bg-slate-800 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50">
+                <Save className="w-3.5 h-3.5" /><span>{adminSubmitting === 'save' ? 'Saving…' : 'Save'}</span>
+              </button>
+
+              <button type="button" disabled={!readyToFinalize || Boolean(adminSubmitting)} onClick={async () => {
+                try {
+                  setAdminSubmitting('download');
+                  const result = await saveCertificateRecord({ isLocked: true });
+                  setCertForm(prev => ({ ...prev, isLocked: true }));
+                  const { pdf } = await buildCertificatePdf();
+                  pdf.save(`${getDownloadFilename(certForm.certificateNo, certForm.customerName, certForm.issueDate)}.pdf`);
+                  if (!result.isExisting && result.certificate) advanceToNextCertNumber(result.certificate);
+                } catch (err) { console.error(err); alert('PDF error: ' + err.message); }
+                finally { setAdminSubmitting(''); }
+              }} className="flex-1 min-w-[80px] py-2 px-2.5 rounded-xl bg-amber-700 hover:bg-amber-800 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50">
+                <Download className="w-3.5 h-3.5" /><span>{adminSubmitting === 'download' ? 'Generating…' : 'Download'}</span>
+              </button>
+
+              <button type="button" disabled={!readyToFinalize || Boolean(adminSubmitting)} onClick={async () => {
+                try {
+                  setAdminSubmitting('print');
+                  const { imgData } = await buildCertificatePdf();
+                  const pw = window.open('', '_blank');
+                  if (!pw) { alert('Popup blocked!'); return; }
+                  pw.document.write(`<!DOCTYPE html><html><head><title>Print - ${certForm.certificateNo}</title><style>@page{size:A4 portrait;margin:0;}body{margin:0;padding:0;background:#fff;text-align:center;}img{width:210mm;height:auto;display:block;margin:0 auto;}</style></head><body><img src="${imgData}" onload="setTimeout(function(){window.print();window.close();},300);"/></body></html>`);
+                  pw.document.close();
+                } catch (err) { alert('Print failed: ' + err.message); }
+                finally { setAdminSubmitting(''); }
+              }} className="flex-1 min-w-[80px] py-2 px-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50">
+                <Printer className="w-3.5 h-3.5" /><span>{adminSubmitting === 'print' ? 'Preparing…' : 'Print'}</span>
+              </button>
+
+              <button type="button" disabled={Boolean(adminSubmitting)} onClick={handleLoadNextCertificate} title="Open the next newer certificate, or a blank one if you're already on the newest"
+                className="flex-1 min-w-[80px] py-2 px-2.5 rounded-xl bg-zinc-600 hover:bg-zinc-700 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50">
+                <span>{adminSubmitting === 'save' ? 'Saving…' : 'Next'}</span><ChevronRight className="w-3.5 h-3.5" />
+              </button>
+
+              {task && readyToFinalize && (
                 <button type="button" disabled={Boolean(adminSubmitting)} onClick={async () => {
                   try {
-                    setAdminSubmitting('save');
-                    const result = await saveCertificateRecord();
-                    if (!result.isExisting && result.certificate) advanceToNextCertNumber(result.certificate);
-                    alert('✅ Certificate saved.');
-                  } catch (err) { alert('Save failed: ' + err.message); }
+                    setAdminSubmitting('cert');
+                    await saveCertificateRecord({ isLocked: true });
+                    const r = await fetch(`/api/tasks/${task.Task_ID}/stage`, { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ remarks: `[Certificate Issued: ${certForm.certificateNo}] Challan Date: ${certForm.challanDate} | Valid Until: ${certForm.validUntil}`, latLong: '0.0000, 0.0000' }) });
+                    if (!r.ok) throw new Error('Failed to advance stage');
+                    alert(`✅ Certificate ${certForm.certificateNo} issued and stage advanced!`); handleBack();
+                  } catch (err) { alert(err.message); }
                   finally { setAdminSubmitting(''); }
-                }} className="flex-1 min-w-[80px] py-2 px-2.5 rounded-xl bg-slate-700 hover:bg-slate-800 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50">
-                  <Save className="w-3.5 h-3.5" /><span>{adminSubmitting === 'save' ? 'Saving…' : 'Save'}</span>
+                }} className="w-full py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-xs flex items-center justify-center gap-1.5 shadow-md transition disabled:opacity-50">
+                  <CheckCircle2 className="w-3.5 h-3.5" /><span>{adminSubmitting === 'cert' ? 'Saving…' : '✅ Mark Certified & Advance Stage'}</span>
                 </button>
-
-                <button type="button" disabled={Boolean(adminSubmitting)} onClick={async () => {
-                  try {
-                    setAdminSubmitting('download');
-                    const result = await saveCertificateRecord({ isLocked: true });
-                    setCertForm(prev => ({ ...prev, isLocked: true }));
-                    const { pdf } = await buildCertificatePdf();
-                    pdf.save(`${getDownloadFilename(certForm.certificateNo, certForm.customerName, certForm.issueDate)}.pdf`);
-                    if (!result.isExisting && result.certificate) advanceToNextCertNumber(result.certificate);
-                  } catch (err) { console.error(err); alert('PDF error: ' + err.message); }
-                  finally { setAdminSubmitting(''); }
-                }} className="flex-1 min-w-[80px] py-2 px-2.5 rounded-xl bg-amber-700 hover:bg-amber-800 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50">
-                  <Download className="w-3.5 h-3.5" /><span>{adminSubmitting === 'download' ? 'Generating…' : 'Download'}</span>
-                </button>
-
-                <button type="button" disabled={Boolean(adminSubmitting)} onClick={async () => {
-                  try {
-                    setAdminSubmitting('print');
-                    const { imgData } = await buildCertificatePdf();
-                    const pw = window.open('', '_blank');
-                    if (!pw) { alert('Popup blocked!'); return; }
-                    pw.document.write(`<!DOCTYPE html><html><head><title>Print - ${certForm.certificateNo}</title><style>@page{size:A4 portrait;margin:0;}body{margin:0;padding:0;background:#fff;text-align:center;}img{width:210mm;height:auto;display:block;margin:0 auto;}</style></head><body><img src="${imgData}" onload="setTimeout(function(){window.print();window.close();},300);"/></body></html>`);
-                    pw.document.close();
-                  } catch (err) { alert('Print failed: ' + err.message); }
-                  finally { setAdminSubmitting(''); }
-                }} className="flex-1 min-w-[80px] py-2 px-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50">
-                  <Printer className="w-3.5 h-3.5" /><span>{adminSubmitting === 'print' ? 'Preparing…' : 'Print'}</span>
-                </button>
-
-                <button type="button" disabled={Boolean(adminSubmitting)} onClick={async () => {
-                  try {
-                    setAdminSubmitting('share');
-                    const { pdf } = await buildCertificatePdf();
-                    const fileName = `${getDownloadFilename(certForm.certificateNo, certForm.customerName, certForm.issueDate)}.pdf`;
-                    const blob = pdf.output('blob');
-                    const file = new File([blob], fileName, { type: 'application/pdf' });
-                    const shareTitle = `Certificate ${certForm.certificateNo}`;
-                    const shareText = `Fire Safety Certificate for ${certForm.customerName || 'client'}`;
-                    if (navigator.canShare && navigator.canShare({ files: [file] })) {
-                      await navigator.share({ files: [file], title: shareTitle, text: shareText });
-                    } else if (navigator.share) {
-                      await navigator.share({ title: shareTitle, text: shareText, url: `${window.location.origin}/api/verify-certificate/${certForm.verificationGuid}` });
-                    } else {
-                      alert('Sharing is not supported on this browser. Please use Download instead, then share the PDF file manually.');
-                    }
-                  } catch (err) { if (err.name !== 'AbortError') alert('Share failed: ' + err.message); }
-                  finally { setAdminSubmitting(''); }
-                }} className="flex-1 min-w-[80px] py-2 px-2.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50">
-                  <Share2 className="w-3.5 h-3.5" /><span>{adminSubmitting === 'share' ? 'Preparing…' : 'Share'}</span>
-                </button>
-
-                {task && (
-                  <button type="button" disabled={Boolean(adminSubmitting)} onClick={async () => {
-                    try {
-                      setAdminSubmitting('cert');
-                      await saveCertificateRecord({ isLocked: true });
-                      const r = await fetch(`/api/tasks/${task.Task_ID}/stage`, { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ remarks: `[Certificate Issued: ${certForm.certificateNo}] Challan Date: ${certForm.challanDate} | Valid Until: ${certForm.validUntil}`, latLong: '0.0000, 0.0000' }) });
-                      if (!r.ok) throw new Error('Failed to advance stage');
-                      alert(`✅ Certificate ${certForm.certificateNo} issued and stage advanced!`); handleBack();
-                    } catch (err) { alert(err.message); }
-                    finally { setAdminSubmitting(''); }
-                  }} className="w-full py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-xs flex items-center justify-center gap-1.5 shadow-md transition disabled:opacity-50">
-                    <CheckCircle2 className="w-3.5 h-3.5" /><span>{adminSubmitting === 'cert' ? 'Saving…' : '✅ Mark Certified & Advance Stage'}</span>
-                  </button>
-                )}
-              </div>
-            ) : (
-              <div className="px-3 py-2.5 bg-slate-100 border border-dashed border-slate-300 rounded-xl text-center">
-                <span className="text-[10px] font-bold text-slate-400">Complete Certificate Details &amp; add at least one Equipment item to unlock Save, Download, Print &amp; Share.</span>
+              )}
+            </div>
+            {!readyToFinalize && (
+              <div className="px-3 py-1.5 bg-slate-100 border border-dashed border-slate-300 rounded-xl text-center">
+                <span className="text-[10px] font-bold text-slate-400">Complete Certificate Details &amp; add at least one Equipment item to unlock Save, Download &amp; Print. Previous / Next are always available.</span>
               </div>
             )}
 
@@ -2499,14 +2560,23 @@ export default function CertificateComplianceGeneratorPage() {
                 </div>
                 )}
 
-                <div className="text-xs font-extrabold text-red-950 bg-red-50/80 px-4 rounded border border-red-300 mb-4 clearfix" style={{ paddingTop: '10px', paddingBottom: '10px', lineHeight: '1' }}>
-                  <div style={{ float: 'left' }}>{isSectionVisible('certNo') && <>Ref / Cert No:&nbsp;<span className="text-slate-900">{certForm.certificateNo}</span></>}</div>
-                  <div style={{ float: 'right' }}>Date:&nbsp;<span className="text-slate-800 font-bold">{formatDateDDMMYYYY(certForm.issueDate)}</span></div>
-                  <div style={{ clear: 'both' }} />
-                </div>
+                <table className="w-full text-xs font-extrabold text-red-950 bg-red-50/80 rounded border border-red-300 mb-4" style={{ borderCollapse: 'separate', borderSpacing: 0, height: '32px', tableLayout: 'fixed' }}>
+                  <tbody>
+                    <tr>
+                      <td className="px-4 text-left" style={{ verticalAlign: 'middle' }}>{isSectionVisible('certNo') && <>Ref / Cert No:&nbsp;<span className="text-slate-900">{certForm.certificateNo}</span></>}</td>
+                      <td className="px-4 text-right" style={{ verticalAlign: 'middle' }}>Date:&nbsp;<span className="text-slate-800 font-bold">{formatDateDDMMYYYY(certForm.issueDate)}</span></td>
+                    </tr>
+                  </tbody>
+                </table>
                 {isSectionVisible('title') && (
-                <div className="flex justify-center w-full my-4">
-                  <span className="bg-red-700 text-white font-black text-sm px-5 rounded-md uppercase tracking-wider shadow-md border border-red-800 text-center" style={{ paddingTop: '12px', paddingBottom: '12px', lineHeight: '1', display: 'inline-block' }}>{certForm.title}</span>
+                <div className="w-full my-4">
+                  <table className="mx-auto" style={{ borderCollapse: 'separate', borderSpacing: 0, height: '40px' }}>
+                    <tbody>
+                      <tr>
+                        <td className="bg-red-700 text-white font-black text-sm px-5 rounded-md uppercase tracking-wider shadow-md border border-red-800 text-center" style={{ verticalAlign: 'middle' }}>{certForm.title}</td>
+                      </tr>
+                    </tbody>
+                  </table>
                 </div>
                 )}
                 <div className={`${density.bodyText} leading-relaxed text-slate-800 text-justify ${density.bodySpace}`}>
@@ -2528,32 +2598,44 @@ export default function CertificateComplianceGeneratorPage() {
                    )}
 
                   {isSectionVisible('formatSpecific') && certForm.formatType === 'HP Testing' && (
-                    <div className="bg-slate-50 px-4 rounded border border-slate-300 text-[11px] font-bold shadow-2xs" style={{ paddingTop: '10px', paddingBottom: '10px', lineHeight: '1' }}>
-                      <div style={{ float: 'left' }}>Test Pressure:&nbsp;<span className="text-indigo-855 font-black">{certForm.hpTestPressure}</span></div>
-                      <div style={{ float: 'right' }}>Result:&nbsp;<span className="text-emerald-750 font-black">{certForm.hpTestResult}</span></div>
-                      <div style={{ clear: 'both' }} />
-                    </div>
+                    <table className="w-full bg-slate-50 rounded border border-slate-300 text-[11px] font-bold shadow-2xs" style={{ borderCollapse: 'separate', borderSpacing: 0, height: '36px', tableLayout: 'fixed' }}>
+                      <tbody>
+                        <tr>
+                          <td className="px-4 text-left" style={{ verticalAlign: 'middle' }}>Test Pressure:&nbsp;<span className="text-indigo-855 font-black">{certForm.hpTestPressure}</span></td>
+                          <td className="px-4 text-right" style={{ verticalAlign: 'middle' }}>Result:&nbsp;<span className="text-emerald-750 font-black">{certForm.hpTestResult}</span></td>
+                        </tr>
+                      </tbody>
+                    </table>
                   )}
                   {isSectionVisible('formatSpecific') && certForm.formatType === 'New Fire Extinguisher' && (
-                    <div className="bg-slate-50 px-4 rounded border border-slate-300 text-[11px] font-bold shadow-2xs" style={{ paddingTop: '10px', paddingBottom: '10px', lineHeight: '1' }}>
-                      <div style={{ float: 'left' }}>ISI Mark:&nbsp;<span className="text-indigo-855 font-black">{certForm.isiMarkNumber}</span></div>
-                      <div style={{ float: 'right' }}>Warranty:&nbsp;<span className="text-red-950 font-black">{certForm.newExtinguisherWarranty}</span></div>
-                      <div style={{ clear: 'both' }} />
-                    </div>
+                    <table className="w-full bg-slate-50 rounded border border-slate-300 text-[11px] font-bold shadow-2xs" style={{ borderCollapse: 'separate', borderSpacing: 0, height: '36px', tableLayout: 'fixed' }}>
+                      <tbody>
+                        <tr>
+                          <td className="px-4 text-left" style={{ verticalAlign: 'middle' }}>ISI Mark:&nbsp;<span className="text-indigo-855 font-black">{certForm.isiMarkNumber}</span></td>
+                          <td className="px-4 text-right" style={{ verticalAlign: 'middle' }}>Warranty:&nbsp;<span className="text-red-950 font-black">{certForm.newExtinguisherWarranty}</span></td>
+                        </tr>
+                      </tbody>
+                    </table>
                   )}
                   {isSectionVisible('formatSpecific') && certForm.formatType === 'System Installation' && (
-                    <div className="bg-slate-50 px-4 rounded border border-slate-300 text-[11px] font-bold shadow-2xs" style={{ paddingTop: '10px', paddingBottom: '10px', lineHeight: '1' }}>
-                      <div style={{ float: 'left' }}>System:&nbsp;<span className="text-indigo-950 font-black">{certForm.systemInstallationType}</span></div>
-                      <div className="text-emerald-750" style={{ float: 'right' }}>Status:&nbsp;<span className="font-black">{certForm.systemStatus}</span></div>
-                      <div style={{ clear: 'both' }} />
-                    </div>
+                    <table className="w-full bg-slate-50 rounded border border-slate-300 text-[11px] font-bold shadow-2xs" style={{ borderCollapse: 'separate', borderSpacing: 0, height: '36px', tableLayout: 'fixed' }}>
+                      <tbody>
+                        <tr>
+                          <td className="px-4 text-left" style={{ verticalAlign: 'middle' }}>System:&nbsp;<span className="text-indigo-950 font-black">{certForm.systemInstallationType}</span></td>
+                          <td className="px-4 text-right text-emerald-750" style={{ verticalAlign: 'middle' }}>Status:&nbsp;<span className="font-black">{certForm.systemStatus}</span></td>
+                        </tr>
+                      </tbody>
+                    </table>
                   )}
                   {isSectionVisible('formatSpecific') && certForm.formatType === 'AMC Certificate' && (
-                    <div className="bg-slate-50 px-4 rounded border border-slate-300 text-[11px] font-bold shadow-2xs" style={{ paddingTop: '10px', paddingBottom: '10px', lineHeight: '1' }}>
-                      <div style={{ float: 'left' }}>Period:&nbsp;<span className="text-indigo-950 font-black">{certForm.amcPeriod}</span></div>
-                      <div style={{ float: 'right' }}>Frequency:&nbsp;<span className="text-emerald-855 font-black">{certForm.amcFrequency}</span></div>
-                      <div style={{ clear: 'both' }} />
-                    </div>
+                    <table className="w-full bg-slate-50 rounded border border-slate-300 text-[11px] font-bold shadow-2xs" style={{ borderCollapse: 'separate', borderSpacing: 0, height: '36px', tableLayout: 'fixed' }}>
+                      <tbody>
+                        <tr>
+                          <td className="px-4 text-left" style={{ verticalAlign: 'middle' }}>Period:&nbsp;<span className="text-indigo-950 font-black">{certForm.amcPeriod}</span></td>
+                          <td className="px-4 text-right" style={{ verticalAlign: 'middle' }}>Frequency:&nbsp;<span className="text-emerald-855 font-black">{certForm.amcFrequency}</span></td>
+                        </tr>
+                      </tbody>
+                    </table>
                   )}
                   {isSectionVisible('formatSpecific') && certForm.formatType === 'Visit Report' && (
                     <div className="bg-slate-50 p-2 rounded border border-slate-300 text-[11px]">
@@ -2625,27 +2707,25 @@ export default function CertificateComplianceGeneratorPage() {
                     <div className="flex flex-col items-center justify-between text-center w-[200px] h-[140px] shrink-0 mx-auto">
                       <div className="flex flex-col items-center gap-1">
                         <span className="text-[9px] font-black text-slate-700 uppercase tracking-wide">Customer Support</span>
-                        <span className="text-[11px] font-extrabold text-red-600 border border-red-300 rounded-md px-2.5 py-0.5 bg-red-50/50">8460699569</span>
+                        <table className="mx-auto" style={{ borderCollapse: 'separate', borderSpacing: 0, height: '22px' }}>
+                          <tbody>
+                            <tr>
+                              <td className="text-[11px] font-extrabold text-red-600 border border-red-300 rounded-md px-2.5 bg-red-50/50 text-center" style={{ verticalAlign: 'middle' }}>8460699569</td>
+                            </tr>
+                          </tbody>
+                        </table>
                       </div>
                       <div className="w-full">
                         <span className="text-[10.5px] font-black text-red-600 uppercase tracking-widest border-b border-red-300 pb-1 w-full text-center mb-1.5 block">Emergency Contact</span>
                         <table className="w-full border-collapse text-[10px] text-center font-extrabold">
-                          <tbody className="w-full">
-                            <tr className="border-b border-slate-300 w-full flex">
-                              <td className="border-r border-slate-300 py-2 px-1 text-red-600 font-extrabold w-1/2 flex items-center justify-center gap-1">
-                                <span>🚒</span> Fire: <span className="text-slate-900 font-black">101</span>
-                              </td>
-                              <td className="py-2 px-1 text-blue-700 font-extrabold w-1/2 flex items-center justify-center gap-1">
-                                <span>🚑</span> Amb: <span className="text-slate-900 font-black">108</span>
-                              </td>
+                          <tbody>
+                            <tr className="border-b border-slate-300">
+                              <td className="border-r border-slate-300 py-2 px-1 text-red-600 font-extrabold w-1/2" style={{ verticalAlign: 'middle' }}>🚒 Fire: <span className="text-slate-900 font-black">101</span></td>
+                              <td className="py-2 px-1 text-blue-700 font-extrabold w-1/2" style={{ verticalAlign: 'middle' }}>🚑 Amb: <span className="text-slate-900 font-black">108</span></td>
                             </tr>
-                            <tr className="w-full flex">
-                              <td className="border-r border-slate-300 py-2 px-1 text-blue-700 font-extrabold w-1/2 flex items-center justify-center gap-1">
-                                <span>👮</span> Police: <span className="text-slate-900 font-black">100</span>
-                              </td>
-                              <td className="py-2 px-1 text-red-600 font-extrabold w-1/2 flex items-center justify-center gap-1">
-                                <span>🚨</span> Emerg: <span className="text-slate-900 font-black">112</span>
-                              </td>
+                            <tr>
+                              <td className="border-r border-slate-300 py-2 px-1 text-blue-700 font-extrabold w-1/2" style={{ verticalAlign: 'middle' }}>👮 Police: <span className="text-slate-900 font-black">100</span></td>
+                              <td className="py-2 px-1 text-red-600 font-extrabold w-1/2" style={{ verticalAlign: 'middle' }}>🚨 Emerg: <span className="text-slate-900 font-black">112</span></td>
                             </tr>
                           </tbody>
                         </table>
@@ -2653,16 +2733,16 @@ export default function CertificateComplianceGeneratorPage() {
                     </div>
                   </div>
 
-                  <div className="flex justify-end">
-                    <div className="relative flex items-end shrink-0">
+                  <div className="text-right">
+                    <div className="relative inline-block shrink-0">
                       {(certCfg.show_signature !== false) ? (
-                        <div className="text-center flex flex-col items-center justify-end min-w-[180px] shrink-0">
+                        <div className="text-center min-w-[180px] shrink-0">
                           {/* Stamp placed above signature line (system signature removed) */}
                           {(certCfg.show_stamp !== false) && (
-                            <img 
-                              src={certBase64Assets.stamp||branding.company_stamp_url||'/assets/company_stamp.png'} 
-                              onError={e=>{e.target.onerror=null;e.target.src='/assets/stamp.jpg';}} 
-                              alt="Official Seal Stamp" 
+                            <img
+                              src={certBase64Assets.stamp||branding.company_stamp_url||'/assets/company_stamp.png'}
+                              onError={e=>{e.target.onerror=null;e.target.src='/assets/stamp.jpg';}}
+                              alt="Official Seal Stamp"
                               className="w-24 h-24 object-contain mx-auto -mb-1 shrink-0"
                             />
                           )}
@@ -2676,9 +2756,9 @@ export default function CertificateComplianceGeneratorPage() {
                       ) : (
                         /* If signature is hidden but stamp is shown */
                         (certCfg.show_stamp !== false) && (
-                          <div className="flex flex-col items-center justify-end shrink-0">
-                            <img src={certBase64Assets.stamp||branding.company_stamp_url||'/assets/company_stamp.png'} onError={e=>{e.target.onerror=null;e.target.src='/assets/stamp.jpg';}} alt="Official Seal Stamp" className="w-24 h-24 object-contain shrink-0"/>
-                            <span className="text-[9px] font-bold text-slate-500 mt-1 uppercase">Official Company Seal</span>
+                          <div className="text-center shrink-0">
+                            <img src={certBase64Assets.stamp||branding.company_stamp_url||'/assets/company_stamp.png'} onError={e=>{e.target.onerror=null;e.target.src='/assets/stamp.jpg';}} alt="Official Seal Stamp" className="w-24 h-24 object-contain mx-auto shrink-0"/>
+                            <span className="text-[9px] font-bold text-slate-500 mt-1 uppercase block">Official Company Seal</span>
                           </div>
                         )
                       )}
@@ -2708,74 +2788,64 @@ export default function CertificateComplianceGeneratorPage() {
 
       {/* Sticky Bottom Actions Bar for Mobile */}
       <div className="lg:hidden fixed bottom-0 left-0 right-0 z-50 bg-white/95 backdrop-blur-md border-t border-slate-200 p-3 pb-safe shadow-[0_-8px_30px_rgba(0,0,0,0.12)] flex flex-col gap-2">
-        {/* Row 1: Quick Actions */}
-        {readyToFinalize ? (
-          <div className="flex gap-2">
-            <button type="button" disabled={Boolean(adminSubmitting)} onClick={async () => {
-              try {
-                setAdminSubmitting('save');
-                const result = await saveCertificateRecord();
-                if (!result.isExisting && result.certificate) advanceToNextCertNumber(result.certificate);
-                alert('✅ Certificate saved.');
-              } catch (err) { alert('Save failed: ' + err.message); }
-              finally { setAdminSubmitting(''); }
-            }} className="flex-1 py-2.5 px-2 rounded-xl bg-slate-700 active:scale-95 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50">
-              <Save className="w-3.5 h-3.5" /><span>{adminSubmitting === 'save' ? 'Saving…' : 'Save'}</span>
-            </button>
+        {/* Row 1: Quick Actions — Previous/Next always available, Save/Download/Print unlock once ready */}
+        <div className="flex flex-wrap gap-2">
+          <button type="button" disabled={Boolean(adminSubmitting)} onClick={handleLoadPreviousCertificate}
+            className="flex-1 min-w-[70px] py-2.5 px-2 rounded-xl bg-zinc-600 active:scale-95 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50">
+            <ChevronLeft className="w-3.5 h-3.5" /><span>Previous</span>
+          </button>
 
-            <button type="button" disabled={Boolean(adminSubmitting)} onClick={async () => {
-              try {
-                setAdminSubmitting('download');
-                const result = await saveCertificateRecord({ isLocked: true });
-                setCertForm(prev => ({ ...prev, isLocked: true }));
-                const { pdf } = await buildCertificatePdf();
-                pdf.save(`${getDownloadFilename(certForm.certificateNo, certForm.customerName, certForm.issueDate)}.pdf`);
-                if (!result.isExisting && result.certificate) advanceToNextCertNumber(result.certificate);
-              } catch (err) { console.error(err); alert('PDF error: ' + err.message); }
-              finally { setAdminSubmitting(''); }
-            }} className="flex-1 py-2.5 px-2 rounded-xl bg-amber-700 active:scale-95 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50">
-              <Download className="w-3.5 h-3.5" /><span>{adminSubmitting === 'download' ? 'Generating…' : 'Download'}</span>
-            </button>
+          <button type="button" disabled={!readyToFinalize || Boolean(adminSubmitting)} onClick={async () => {
+            try {
+              setAdminSubmitting('save');
+              const result = await saveCertificateRecord();
+              const updatedCerts = result.certificate
+                ? [...allCertificates.filter(c => (c.verificationGuid || c.Verification_GUID) !== (result.certificate.verificationGuid || result.certificate.Verification_GUID)), result.certificate]
+                : allCertificates;
+              resetToBlankCertificate(updatedCerts);
+              alert('✅ Certificate saved. Ready for a new certificate.');
+            } catch (err) { alert('Save failed: ' + err.message); }
+            finally { setAdminSubmitting(''); }
+          }} className="flex-1 min-w-[70px] py-2.5 px-2 rounded-xl bg-slate-700 active:scale-95 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50">
+            <Save className="w-3.5 h-3.5" /><span>{adminSubmitting === 'save' ? 'Saving…' : 'Save'}</span>
+          </button>
 
-            <button type="button" disabled={Boolean(adminSubmitting)} onClick={async () => {
-              try {
-                setAdminSubmitting('print');
-                const { imgData } = await buildCertificatePdf();
-                const pw = window.open('', '_blank');
-                if (!pw) { alert('Popup blocked!'); return; }
-                pw.document.write(`<!DOCTYPE html><html><head><title>Print - ${certForm.certificateNo}</title><style>@page{size:A4 portrait;margin:0;}body{margin:0;padding:0;background:#fff;text-align:center;}img{width:210mm;height:auto;display:block;margin:0 auto;}</style></head><body><img src="${imgData}" onload="setTimeout(function(){window.print();window.close();},300);"/></body></html>`);
-                pw.document.close();
-              } catch (err) { alert('Print failed: ' + err.message); }
-              finally { setAdminSubmitting(''); }
-            }} className="flex-1 py-2.5 px-2 rounded-xl bg-indigo-600 active:scale-95 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50">
-              <Printer className="w-3.5 h-3.5" /><span>{adminSubmitting === 'print' ? 'Preparing…' : 'Print'}</span>
-            </button>
+          <button type="button" disabled={!readyToFinalize || Boolean(adminSubmitting)} onClick={async () => {
+            try {
+              setAdminSubmitting('download');
+              const result = await saveCertificateRecord({ isLocked: true });
+              setCertForm(prev => ({ ...prev, isLocked: true }));
+              const { pdf } = await buildCertificatePdf();
+              pdf.save(`${getDownloadFilename(certForm.certificateNo, certForm.customerName, certForm.issueDate)}.pdf`);
+              if (!result.isExisting && result.certificate) advanceToNextCertNumber(result.certificate);
+            } catch (err) { console.error(err); alert('PDF error: ' + err.message); }
+            finally { setAdminSubmitting(''); }
+          }} className="flex-1 min-w-[70px] py-2.5 px-2 rounded-xl bg-amber-700 active:scale-95 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50">
+            <Download className="w-3.5 h-3.5" /><span>{adminSubmitting === 'download' ? 'Generating…' : 'Download'}</span>
+          </button>
 
-            <button type="button" disabled={Boolean(adminSubmitting)} onClick={async () => {
-              try {
-                setAdminSubmitting('share');
-                const { pdf } = await buildCertificatePdf();
-                const fileName = `${getDownloadFilename(certForm.certificateNo, certForm.customerName, certForm.issueDate)}.pdf`;
-                const blob = pdf.output('blob');
-                const file = new File([blob], fileName, { type: 'application/pdf' });
-                const shareTitle = `Certificate ${certForm.certificateNo}`;
-                const shareText = `Fire Safety Certificate for ${certForm.customerName || 'client'}`;
-                if (navigator.canShare && navigator.canShare({ files: [file] })) {
-                  await navigator.share({ files: [file], title: shareTitle, text: shareText });
-                } else if (navigator.share) {
-                  await navigator.share({ title: shareTitle, text: shareText, url: `${window.location.origin}/api/verify-certificate/${certForm.verificationGuid}` });
-                } else {
-                  alert('Sharing is not supported on this browser. Please use Download instead, then share the PDF file manually.');
-                }
-              } catch (err) { if (err.name !== 'AbortError') alert('Share failed: ' + err.message); }
-              finally { setAdminSubmitting(''); }
-            }} className="flex-1 py-2.5 px-2 rounded-xl bg-emerald-700 active:scale-95 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50">
-              <Share2 className="w-3.5 h-3.5" /><span>{adminSubmitting === 'share' ? 'Preparing…' : 'Share'}</span>
-            </button>
-          </div>
-        ) : (
+          <button type="button" disabled={!readyToFinalize || Boolean(adminSubmitting)} onClick={async () => {
+            try {
+              setAdminSubmitting('print');
+              const { imgData } = await buildCertificatePdf();
+              const pw = window.open('', '_blank');
+              if (!pw) { alert('Popup blocked!'); return; }
+              pw.document.write(`<!DOCTYPE html><html><head><title>Print - ${certForm.certificateNo}</title><style>@page{size:A4 portrait;margin:0;}body{margin:0;padding:0;background:#fff;text-align:center;}img{width:210mm;height:auto;display:block;margin:0 auto;}</style></head><body><img src="${imgData}" onload="setTimeout(function(){window.print();window.close();},300);"/></body></html>`);
+              pw.document.close();
+            } catch (err) { alert('Print failed: ' + err.message); }
+            finally { setAdminSubmitting(''); }
+          }} className="flex-1 min-w-[70px] py-2.5 px-2 rounded-xl bg-indigo-600 active:scale-95 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50">
+            <Printer className="w-3.5 h-3.5" /><span>{adminSubmitting === 'print' ? 'Preparing…' : 'Print'}</span>
+          </button>
+
+          <button type="button" disabled={Boolean(adminSubmitting)} onClick={handleLoadNextCertificate}
+            className="flex-1 min-w-[70px] py-2.5 px-2 rounded-xl bg-zinc-600 active:scale-95 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50">
+            <span>{adminSubmitting === 'save' ? 'Saving…' : 'Next'}</span><ChevronRight className="w-3.5 h-3.5" />
+          </button>
+        </div>
+        {!readyToFinalize && (
           <div className="px-3 py-1.5 bg-slate-50 border border-dashed border-slate-200 rounded-xl text-center">
-            <span className="text-[10px] font-bold text-slate-400">Complete details &amp; add equipment to unlock Save / Download.</span>
+            <span className="text-[10px] font-bold text-slate-400">Complete details &amp; add equipment to unlock Save / Download / Print.</span>
           </div>
         )}
 

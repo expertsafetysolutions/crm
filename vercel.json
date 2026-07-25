@@ -15,5 +15,11 @@
       "source": "/(.*)",
       "destination": "/index.html"
     }
+  ],
+  "crons": [
+    {
+      "path": "/api/cron/refilling-due-check",
+      "schedule": "0 3 * * *"
+    }
   ]
 }

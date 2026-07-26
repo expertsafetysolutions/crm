@@ -1,4 +1,5 @@
 const sheetsService = require('./sheetsService');
+const pushService = require('./pushService');
 
 const SALES_STAGES = [
   'New Inquiry',
@@ -165,6 +166,22 @@ async function advanceTaskStage(taskId, actionPayload) {
     Status: nextStatus
   };
 
+  // Notify the newly-assigned staff member when a department hand-off changes who owns the task
+  // (e.g. Order Confirmation -> Production, Service & Maintenance -> Sales/Certification).
+  if (finalTaskObject.Assigned_Staff && String(finalTaskObject.Assigned_Staff).trim().toUpperCase() !== String(task.Assigned_Staff).trim().toUpperCase()) {
+    try {
+      pushService.notifyStaff(finalTaskObject.Assigned_Staff, {
+        type: pushService.NOTIFICATION_TYPES.TASK_STAGE_HANDOFF,
+        title: 'Task Handed Off to You',
+        body: `"${task.Description || taskId}" moved to ${nextStage} (${nextDepartment}) and is now assigned to you.`,
+        url: `/?targetType=TASK&targetId=${taskId}`,
+        tag: `task-${taskId}`
+      });
+    } catch (e) {
+      console.error('Error triggering stage hand-off push notification:', e);
+    }
+  }
+
   return {
     updatedTask: finalTaskObject,
     logEntry,
@@ -228,11 +245,18 @@ async function generateRefillingDueTasks() {
   const todayStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
   const targetDate = addDaysToDateStr(todayStr, 30);
 
-  const certificates = await sheetsService.getAllCertificates();
+  const [certificates, customTypes] = await Promise.all([
+    sheetsService.getAllCertificates(),
+    sheetsService.getAllCertificateTypes()
+  ]);
+  // Built-in types opt in via the static allowlist above; admin-added custom types opt in via the
+  // "Generate refilling-due follow-up task" checkbox set when the type was created.
+  const customRefillingDueNames = customTypes.filter(t => t.generateRefillingDue).map(t => t.name);
+  const dueFormatTypes = new Set([...REFILLING_DUE_FORMAT_TYPES, ...customRefillingDueNames]);
   const dueCerts = certificates.filter(c => {
     const formatType = c.formatType || c.Format_Type;
     const validUntil = c.Valid_Until || c.validUntil;
-    return REFILLING_DUE_FORMAT_TYPES.includes(formatType) && validUntil === targetDate && !c.refillingTaskGenerated;
+    return dueFormatTypes.has(formatType) && validUntil === targetDate && !c.refillingTaskGenerated;
   });
 
   if (dueCerts.length === 0) return { createdCount: 0, skippedCount: 0, targetDate };

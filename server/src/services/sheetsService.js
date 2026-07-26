@@ -22,7 +22,9 @@ const models = {
   Client_Equipment_Master: createModel('Client_Equipment_Master'),
   Document_Settings: createModel('Document_Settings'),
   Tag_Master: createModel('Tag_Master'),
-  Field_Visits: createModel('Field_Visits')
+  Field_Visits: createModel('Field_Visits'),
+  Certificate_Type_Master: createModel('Certificate_Type_Master'),
+  Notification_Settings: createModel('Notification_Settings')
 };
 
 class MongoService {
@@ -283,6 +285,8 @@ class MongoService {
   async getAllServiceReports() { return this.getTab('Service_Reports'); }
   async getAllTags() { return this.getTab('Tag_Master'); }
 
+  async getAllCertificateTypes() { return this.getTab('Certificate_Type_Master'); }
+
   async getDocumentSettings(companyId = 'DEFAULT') {
     await this.connect();
     const Model = models['Document_Settings'];
@@ -302,6 +306,46 @@ class MongoService {
     ).lean();
     if (result) { delete result._id; delete result.__v; }
     return result;
+  }
+
+  async getNotificationSettings(companyId = 'DEFAULT') {
+    await this.connect();
+    const Model = models['Notification_Settings'];
+    const doc = await Model.findOne({ company_id: companyId }).lean();
+    if (doc) { delete doc._id; delete doc.__v; }
+    return doc || null;
+  }
+
+  async saveNotificationSettings(companyId = 'DEFAULT', settingsData) {
+    await this.connect();
+    const Model = models['Notification_Settings'];
+    const payload = { ...settingsData, company_id: companyId };
+    const result = await Model.findOneAndUpdate(
+      { company_id: companyId },
+      { $set: payload },
+      { new: true, upsert: true, returnDocument: 'after' }
+    ).lean();
+    if (result) { delete result._id; delete result.__v; }
+    return result;
+  }
+
+  // Read-modify-write since updateRow only supports $set (no array-push primitive) — dedupes by
+  // endpoint so re-subscribing the same device (e.g. after a SW update) doesn't create duplicates.
+  async addPushSubscription(staffId, subscription) {
+    const staff = await this.getStaffById(staffId);
+    if (!staff) return null;
+    const existing = Array.isArray(staff.Push_Subscriptions) ? staff.Push_Subscriptions : [];
+    const filtered = existing.filter(s => s.endpoint !== subscription.endpoint);
+    filtered.push({ ...subscription, subscribedAt: new Date().toISOString() });
+    return this.updateRow('Staff_Master', 'Staff_ID', staffId, { Push_Subscriptions: filtered });
+  }
+
+  async removePushSubscription(staffId, endpoint) {
+    const staff = await this.getStaffById(staffId);
+    if (!staff) return null;
+    const existing = Array.isArray(staff.Push_Subscriptions) ? staff.Push_Subscriptions : [];
+    const filtered = existing.filter(s => s.endpoint !== endpoint);
+    return this.updateRow('Staff_Master', 'Staff_ID', staffId, { Push_Subscriptions: filtered });
   }
 }
 

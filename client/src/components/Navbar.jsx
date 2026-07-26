@@ -47,6 +47,41 @@ export default function Navbar({ currentView, setCurrentView }) {
     return () => clearInterval(interval);
   }, [fetchNotifications]);
 
+  // Deep-link handling for push notification taps: the service worker either postMessages an
+  // already-open tab (see sw.js notificationclick) or opens a fresh tab at /?targetType=..&targetId=..
+  useEffect(() => {
+    const navigateFromUrl = (targetType, targetId) => {
+      if (!targetType || !targetId) return;
+      window.dispatchEvent(
+        new CustomEvent('NAVIGATE_TO_TARGET', {
+          detail: { targetType, targetId, action: 'VIEW' }
+        })
+      );
+    };
+
+    const handleSWMessage = (event) => {
+      if (event.data?.type !== 'NOTIFICATION_CLICK' || !event.data.url) return;
+      const params = new URL(event.data.url, window.location.origin).searchParams;
+      navigateFromUrl(params.get('targetType'), params.get('targetId'));
+    };
+
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.addEventListener('message', handleSWMessage);
+    }
+
+    // Fresh page load opened directly at a notification's deep link
+    const initialParams = new URLSearchParams(window.location.search);
+    if (initialParams.get('targetType') && initialParams.get('targetId')) {
+      navigateFromUrl(initialParams.get('targetType'), initialParams.get('targetId'));
+    }
+
+    return () => {
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.removeEventListener('message', handleSWMessage);
+      }
+    };
+  }, []);
+
   const handleMarkAllRead = () => {
     const userIdKey = (realUser || user)?.Staff_ID || (realUser || user)?.id || 'default';
     const dismissedKey = `expert_safety_dismissed_notifs_${userIdKey}`;

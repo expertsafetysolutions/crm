@@ -3,7 +3,9 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import ClientEquipmentModal from '../components/ClientEquipmentModal';
 import ServiceReportStatsPanel from '../components/servicereport/ServiceReportStatsPanel';
+import PhonePasteButton from '../components/PhonePasteButton';
 import { getAccurateGpsPosition } from '../utils/gpsHelper';
+import { cleanPhoneDigits } from '../utils/clipboardUtils';
 import {
   formatDateDDMMYYYY,
   formatDateWithDayName,
@@ -73,7 +75,9 @@ import {
   Eye,
   Tag as TagIcon,
   Settings,
-  CreditCard
+  CreditCard,
+  Bell,
+  BellOff
 } from 'lucide-react';
 import { QRCodeCanvas } from 'qrcode.react';
 
@@ -385,6 +389,16 @@ export default function AdminDashboard() {
   const [isLoadingRecycleBin, setIsLoadingRecycleBin] = useState(false);
   const [restoringRecycleBinId, setRestoringRecycleBinId] = useState(null);
 
+  // Push Notification Settings — admin-configurable per-event toggles
+  const [notificationSettings, setNotificationSettings] = useState({
+    TASK_ASSIGNED: true,
+    TASK_STAGE_HANDOFF: true,
+    LEAVE_STATUS: true,
+    PHOTO_ICARD_APPROVAL: true
+  });
+  const [isLoadingNotificationSettings, setIsLoadingNotificationSettings] = useState(false);
+  const [isSavingNotificationSettings, setIsSavingNotificationSettings] = useState(false);
+
   // Dynamic Task Tags (admin-editable, multi-select labels e.g. "New Inquiry", "Site Visit")
   const [tags, setTags] = useState([]);
   const [activeTagFilters, setActiveTagFilters] = useState([]); // array of tag ids, AND-less OR filter
@@ -395,6 +409,14 @@ export default function AdminDashboard() {
   const [editingTagDraft, setEditingTagDraft] = useState({ name: '', color: '' });
   const [taskTagPickerId, setTaskTagPickerId] = useState(null); // Task_ID currently showing the tag-picker popover
   const [tagSearchQuery, setTagSearchQuery] = useState('');
+
+  // Custom Certificate Types (admin-added, in addition to the 7 built-in ones hardcoded in the
+  // Certificate Compliance Generator). A type's name is its identifier — see apiRoutes.js.
+  const [certificateTypes, setCertificateTypes] = useState([]);
+  const [showCertTypeManagerModal, setShowCertTypeManagerModal] = useState(false);
+  const [newCertTypeName, setNewCertTypeName] = useState('');
+  const [newCertTypeIcon, setNewCertTypeIcon] = useState('📄');
+  const [newCertTypeRefillingDue, setNewCertTypeRefillingDue] = useState(false);
   const [showClientEquipmentModal, setShowClientEquipmentModal] = useState(false);
   const [selectedCustomerForEquipment, setSelectedCustomerForEquipment] = useState(null);
   const getFilteredStaffList = (deptOrStage) => {
@@ -761,6 +783,40 @@ export default function AdminDashboard() {
       setTags(prev => prev.filter(t => t.Tag_ID !== tagId));
       setActiveTagFilters(prev => prev.filter(id => id !== tagId));
       setTasks(prev => prev.map(t => (t.Tags || []).includes(tagId) ? { ...t, Tags: t.Tags.filter(id => id !== tagId) } : t));
+    } catch (err) { alert(err.message); }
+  };
+
+  // --- CUSTOM CERTIFICATE TYPES (admin-added categories for the Certificate Compliance Generator) ---
+  const loadCertificateTypes = async () => {
+    try {
+      const res = await fetch('/api/certificate-types', { headers: { 'Authorization': `Bearer ${token}` } });
+      if (res.ok) setCertificateTypes(await res.json());
+    } catch (err) { console.error('Failed to load certificate types:', err); }
+  };
+
+  const handleCreateCertType = async () => {
+    if (!newCertTypeName.trim()) return;
+    try {
+      const res = await fetch('/api/certificate-types', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ name: newCertTypeName.trim(), icon: newCertTypeIcon.trim() || '📄', generateRefillingDue: newCertTypeRefillingDue })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to create certificate type');
+      setCertificateTypes(prev => [...prev, data.type]);
+      setNewCertTypeName('');
+      setNewCertTypeIcon('📄');
+      setNewCertTypeRefillingDue(false);
+    } catch (err) { alert(err.message); }
+  };
+
+  const handleDeleteCertType = async (typeId) => {
+    if (!window.confirm('Delete this certificate type? Certificates already generated with it are unaffected, but it will no longer appear in the Certificate Type dropdown.')) return;
+    try {
+      const res = await fetch(`/api/certificate-types/${typeId}`, { method: 'DELETE', headers: { 'Authorization': `Bearer ${token}` } });
+      if (!res.ok) throw new Error('Failed to delete certificate type');
+      setCertificateTypes(prev => prev.filter(t => t.Type_ID !== typeId));
     } catch (err) { alert(err.message); }
   };
 
@@ -1138,6 +1194,37 @@ export default function AdminDashboard() {
     }
   };
 
+  const loadNotificationSettings = async () => {
+    try {
+      setIsLoadingNotificationSettings(true);
+      const res = await fetch('/api/settings/notifications', { headers: { Authorization: `Bearer ${token}` } });
+      if (res.ok) setNotificationSettings(await res.json());
+    } catch (err) {
+      console.error('Failed to load notification settings:', err);
+    } finally {
+      setIsLoadingNotificationSettings(false);
+    }
+  };
+
+  const handleToggleNotificationSetting = async (key) => {
+    const updated = { ...notificationSettings, [key]: !notificationSettings[key] };
+    setNotificationSettings(updated);
+    try {
+      setIsSavingNotificationSettings(true);
+      const res = await fetch('/api/settings/notifications', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify(updated)
+      });
+      if (!res.ok) throw new Error('Save failed');
+    } catch (err) {
+      alert('Failed to save notification setting: ' + err.message);
+      setNotificationSettings(prev => ({ ...prev, [key]: !prev[key] }));
+    } finally {
+      setIsSavingNotificationSettings(false);
+    }
+  };
+
   const handleRestoreCertificateFromBin = async (cert) => {
     const guid = cert.verificationGuid || cert.Verification_GUID || cert.Certificate_No || cert.certificateNo;
     try {
@@ -1182,6 +1269,10 @@ export default function AdminDashboard() {
 
   useEffect(() => {
     if (activeTab === 'RECYCLE_BIN') loadRecycleBin();
+  }, [activeTab]);
+
+  useEffect(() => {
+    if (activeTab === 'PUSH_SETTINGS') loadNotificationSettings();
   }, [activeTab]);
 
   useEffect(() => {
@@ -2605,7 +2696,8 @@ export default function AdminDashboard() {
             { id: 'LOGS', label: '5. Live Activity Logs', shortLabel: '5. Logs', icon: Activity },
             { id: 'CERTIFICATES', label: '6. Certificate Module', shortLabel: '6. Certificates', icon: Award },
             { id: 'SERVICE_REPORTS', label: '7. Service Reports Queue', shortLabel: '7. Reports', icon: FileCheck },
-            { id: 'RECYCLE_BIN', label: '8. Recycle Bin', shortLabel: '8. Recycle Bin', icon: Trash2 }
+            { id: 'RECYCLE_BIN', label: '8. Recycle Bin', shortLabel: '8. Recycle Bin', icon: Trash2 },
+            { id: 'PUSH_SETTINGS', label: '9. Push Notifications', shortLabel: '9. Notifications', icon: Bell }
           ].map(tab => {
             const Icon = tab.icon;
             return (
@@ -4515,6 +4607,97 @@ export default function AdminDashboard() {
         </div>
       )}
 
+      {/* MANAGE CERTIFICATE TYPES MODAL — admin adds custom certificate categories, in addition to
+          the 7 built-in ones. Each new type is immediately selectable in the Certificate Compliance
+          Generator's Certificate Type dropdown and configured there via the same settings panel
+          (drag to reorder / tick to print) the built-in types already use. */}
+      {showCertTypeManagerModal && (
+        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4">
+          <div className="bg-white border border-slate-200 rounded-2xl max-w-md w-full p-4 sm:p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto animate-fadeIn">
+            <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+              <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                <Award className="w-4 h-4 text-amber-600" />
+                <span>Manage Certificate Types</span>
+              </h3>
+              <button
+                onClick={() => setShowCertTypeManagerModal(false)}
+                className="text-slate-400 hover:text-slate-700 text-sm font-semibold"
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="text-[11px] text-slate-500 -mt-2">
+              Add a custom certificate category (e.g. "Pest Control Service", "Water Tank Cleaning"). It appears immediately in the Certificate Type dropdown — open the Settings tab there to configure its title, body text and sections, same as the built-in types.
+            </p>
+
+            {/* Create New Type */}
+            <div className="space-y-2 bg-slate-50 border border-slate-200 rounded-xl p-2.5">
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={newCertTypeIcon}
+                  onChange={(e) => setNewCertTypeIcon(e.target.value)}
+                  maxLength={2}
+                  className="w-11 h-9 rounded-lg border border-slate-300 text-center text-base shrink-0 bg-white"
+                  title="Emoji icon"
+                />
+                <input
+                  type="text"
+                  value={newCertTypeName}
+                  onChange={(e) => setNewCertTypeName(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') handleCreateCertType(); }}
+                  placeholder="New certificate type name"
+                  className="flex-1 min-w-0 px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-bold focus:ring-2 focus:ring-amber-500 focus:outline-none"
+                />
+                <button
+                  type="button"
+                  onClick={handleCreateCertType}
+                  disabled={!newCertTypeName.trim()}
+                  className="px-3 py-2 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs shadow-sm transition disabled:opacity-40 shrink-0 flex items-center gap-1"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Add</span>
+                </button>
+              </div>
+              <label className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-600 pl-0.5">
+                <input
+                  type="checkbox"
+                  checked={newCertTypeRefillingDue}
+                  onChange={(e) => setNewCertTypeRefillingDue(e.target.checked)}
+                  className="w-3.5 h-3.5 rounded border-slate-300 text-amber-600 focus:ring-amber-500"
+                />
+                Auto-generate a follow-up Sales task 30 days before this certificate's expiry
+              </label>
+            </div>
+
+            {/* Existing Custom Types List */}
+            <div className="space-y-1.5 max-h-72 overflow-y-auto pr-1">
+              {certificateTypes.length === 0 && (
+                <p className="text-xs text-slate-400 text-center py-6">No custom certificate types yet. Add your first one above.</p>
+              )}
+              {certificateTypes.map(ctype => (
+                <div key={ctype.Type_ID} className="flex items-center gap-2 p-2 rounded-xl border border-slate-200 bg-white">
+                  <span className="text-base shrink-0 w-6 text-center">{ctype.icon || '📄'}</span>
+                  <span className="flex-1 min-w-0 truncate text-xs font-bold text-slate-800">{ctype.name}</span>
+                  {ctype.generateRefillingDue && (
+                    <span className="text-[9px] font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5 shrink-0">Auto-Refill Task</span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteCertType(ctype.Type_ID)}
+                    className="w-7 h-7 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 flex items-center justify-center shrink-0"
+                    title="Delete Certificate Type"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* REMARKS & INTERACTION HISTORY MODAL (ADMIN) — full-screen with back button, so the History list gets maximum screen space */}
       {showRemarksModal && remarkTask && (
             <div className="fixed inset-0 z-50 bg-white flex flex-col">
@@ -5316,13 +5499,16 @@ export default function AdminDashboard() {
                 </div>
                 <div>
                   <label className="block font-semibold text-slate-700 mb-1">Mobile Number</label>
-                  <input
-                    type="text" maxLength={10}
-                    value={editCustomerForm.contact}
-                    onChange={e => setEditCustomerForm({ ...editCustomerForm, contact: e.target.value.replace(/\D/g, '') })}
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-slate-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    placeholder="10-digit mobile"
-                  />
+                  <div className="relative">
+                    <input
+                      type="text"
+                      value={editCustomerForm.contact}
+                      onChange={e => setEditCustomerForm({ ...editCustomerForm, contact: cleanPhoneDigits(e.target.value) })}
+                      className="w-full pl-3 pr-8 py-2 bg-slate-50 border border-slate-200 rounded-xl text-slate-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      placeholder="10-digit mobile"
+                    />
+                    <PhonePasteButton onPaste={digits => setEditCustomerForm({ ...editCustomerForm, contact: digits })} />
+                  </div>
                 </div>
               </div>
 
@@ -5446,7 +5632,10 @@ export default function AdminDashboard() {
                     <div className="grid grid-cols-2 gap-2">
                       <input type="text" placeholder="Name" value={c.name || ''} onChange={e => { const nc = [...editCustomerForm.coordinators]; nc[i] = { ...nc[i], name: e.target.value }; setEditCustomerForm({ ...editCustomerForm, coordinators: nc }); }} className="px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-[11px]" />
                       <input type="text" placeholder="Designation" value={c.designation || ''} onChange={e => { const nc = [...editCustomerForm.coordinators]; nc[i] = { ...nc[i], designation: e.target.value }; setEditCustomerForm({ ...editCustomerForm, coordinators: nc }); }} className="px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-[11px]" />
-                      <input type="text" placeholder="Phone" maxLength={10} value={(c.phone || c.contactNumber || '').replace(/^\+91\s?/, '')} onChange={e => { const nc = [...editCustomerForm.coordinators]; nc[i] = { ...nc[i], phone: e.target.value.replace(/\D/g, ''), contactNumber: e.target.value.replace(/\D/g, '') }; setEditCustomerForm({ ...editCustomerForm, coordinators: nc }); }} className="px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-[11px]" />
+                      <div className="relative">
+                        <input type="text" placeholder="Phone" value={(c.phone || c.contactNumber || '').replace(/^\+91\s?/, '')} onChange={e => { const digits = cleanPhoneDigits(e.target.value); const nc = [...editCustomerForm.coordinators]; nc[i] = { ...nc[i], phone: digits, contactNumber: digits }; setEditCustomerForm({ ...editCustomerForm, coordinators: nc }); }} className="w-full pl-2.5 pr-7 py-1.5 bg-white border border-slate-200 rounded-lg text-[11px]" />
+                        <PhonePasteButton iconClassName="w-3 h-3" onPaste={digits => { const nc = [...editCustomerForm.coordinators]; nc[i] = { ...nc[i], phone: digits, contactNumber: digits }; setEditCustomerForm({ ...editCustomerForm, coordinators: nc }); }} />
+                      </div>
                       <input type="email" placeholder="Email" value={c.email || ''} onChange={e => { const nc = [...editCustomerForm.coordinators]; nc[i] = { ...nc[i], email: e.target.value }; setEditCustomerForm({ ...editCustomerForm, coordinators: nc }); }} className="px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-[11px]" />
                     </div>
                   </div>
@@ -6117,6 +6306,17 @@ export default function AdminDashboard() {
       {/* TAB CONTENT 6: CERTIFICATE MODULE - FIRE SAFETY & IS:2190 COMPLIANCE CERTIFICATES */}
       {(activeTab === 'CERTIFICATES' || (activeTab === 'OVERVIEW' && expandedOverviewModule === 'CERTIFICATES')) && (
         <div className="space-y-6">
+          <div className="flex justify-end">
+            <button
+              type="button"
+              onClick={() => { loadCertificateTypes(); setShowCertTypeManagerModal(true); }}
+              className="flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold rounded-lg border border-dashed border-amber-300 text-amber-700 bg-amber-50 hover:bg-amber-100 transition"
+              title="Add or remove custom Certificate Types"
+            >
+              <Settings className="w-3 h-3" />
+              <span>Manage Certificate Types</span>
+            </button>
+          </div>
           <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-sm">
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse text-xs">
@@ -6454,6 +6654,64 @@ export default function AdminDashboard() {
                   })}
                 </div>
               )
+            )}
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'PUSH_SETTINGS' && (
+        <div className="space-y-4">
+          <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 text-white rounded-2xl p-6 shadow-xl relative overflow-hidden">
+            <div className="absolute right-0 top-0 bottom-0 w-1/3 bg-white/5 transform skew-x-12 pointer-events-none"></div>
+            <div className="relative z-10">
+              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-indigo-500/30 border border-indigo-300/40 text-indigo-200 text-xs font-bold mb-2">
+                <Bell className="w-3.5 h-3.5 text-indigo-300" />
+                <span>Native Mobile Pop-up Alerts</span>
+              </div>
+              <h2 className="text-xl sm:text-2xl font-black text-white">🔔 Push Notifications</h2>
+              <p className="text-indigo-200 text-xs sm:text-sm mt-1 max-w-2xl">
+                Control which events send staff a push notification, even when their phone is locked or the app is closed. Turning an event off stops the alert only — the underlying action (task assignment, leave approval, etc.) still happens as normal.
+              </p>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-2xl border border-slate-200 p-4 sm:p-5 shadow-xs">
+            {isLoadingNotificationSettings ? (
+              <div className="px-4 py-12 text-xs text-slate-400 text-center font-bold">Loading…</div>
+            ) : (
+              <div className="divide-y divide-slate-100">
+                {[
+                  { key: 'TASK_ASSIGNED', label: 'Task Assigned', desc: 'When a new task is created for a staff member, or a task is reassigned to them.' },
+                  { key: 'TASK_STAGE_HANDOFF', label: 'Task Stage Hand-off', desc: 'When a task moves to the next workflow stage and lands on a staff member’s desk (e.g. Sales → Production).' },
+                  { key: 'LEAVE_STATUS', label: 'Leave Approved / Rejected', desc: 'When an Admin approves or rejects a staff member’s leave request.' },
+                  { key: 'PHOTO_ICARD_APPROVAL', label: 'Photo / I-Card Approval', desc: 'When an Admin approves or rejects a staff member’s profile photo or I-Card update request.' }
+                ].map(item => {
+                  const enabled = !!notificationSettings[item.key];
+                  return (
+                    <div key={item.key} className="flex items-center justify-between gap-4 py-4 first:pt-1 last:pb-1">
+                      <div className="min-w-0 flex items-center gap-3">
+                        <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${enabled ? 'bg-indigo-50 border border-indigo-100' : 'bg-slate-100 border border-slate-200'}`}>
+                          {enabled ? <Bell className="w-5 h-5 text-indigo-600" /> : <BellOff className="w-5 h-5 text-slate-400" />}
+                        </div>
+                        <div className="min-w-0">
+                          <div className="text-sm font-extrabold text-slate-900">{item.label}</div>
+                          <div className="text-[11px] text-slate-500 mt-0.5">{item.desc}</div>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={enabled}
+                        disabled={isSavingNotificationSettings}
+                        onClick={() => handleToggleNotificationSetting(item.key)}
+                        className={`relative shrink-0 w-12 h-7 rounded-full transition disabled:opacity-50 ${enabled ? 'bg-indigo-600' : 'bg-slate-300'}`}
+                      >
+                        <span className={`absolute top-1 left-1 w-5 h-5 rounded-full bg-white shadow-sm transition-transform ${enabled ? 'translate-x-5' : 'translate-x-0'}`} />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
             )}
           </div>
         </div>
@@ -7457,18 +7715,19 @@ export default function AdminDashboard() {
                         onChange={e => setCustomerForm({ ...customerForm, authPerson: e.target.value })}
                         className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl"
                       />
-                      <input
-                        type="text"
-                        placeholder="Mobile Number *"
-                        maxLength={10}
-                        required={isNewCustomerMode}
-                        value={customerForm.contact}
-                        onChange={e => {
-                          const val = e.target.value.replace(/\D/g, '');
-                          setCustomerForm({ ...customerForm, contact: val });
-                        }}
-                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl"
-                      />
+                      <div className="relative">
+                        <input
+                          type="text"
+                          placeholder="Mobile Number *"
+                          required={isNewCustomerMode}
+                          value={customerForm.contact}
+                          onChange={e => {
+                            setCustomerForm({ ...customerForm, contact: cleanPhoneDigits(e.target.value) });
+                          }}
+                          className="w-full pl-3 pr-8 py-2 bg-white border border-slate-300 rounded-xl"
+                        />
+                        <PhonePasteButton onPaste={digits => setCustomerForm({ ...customerForm, contact: digits })} />
+                      </div>
                     </div>
                     <div className="flex gap-1.5">
                       <input
@@ -7519,7 +7778,10 @@ export default function AdminDashboard() {
                           <div className="grid grid-cols-2 gap-2">
                             <input type="text" placeholder="Name" value={c.name} onChange={e => { const newC = [...customerForm.contacts]; newC[i].name = e.target.value; setCustomerForm({ ...customerForm, contacts: newC }); }} className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded-md text-[11px]" />
                             <input type="text" placeholder="Designation" value={c.designation} onChange={e => { const newC = [...customerForm.contacts]; newC[i].designation = e.target.value; setCustomerForm({ ...customerForm, contacts: newC }); }} className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded-md text-[11px]" />
-                            <input type="text" placeholder="Phone" maxLength={10} value={c.contactNumber} onChange={e => { const val = e.target.value.replace(/\D/g, ''); const newC = [...customerForm.contacts]; newC[i].contactNumber = val; setCustomerForm({ ...customerForm, contacts: newC }); }} className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded-md text-[11px]" />
+                            <div className="relative">
+                              <input type="text" placeholder="Phone" value={c.contactNumber} onChange={e => { const val = cleanPhoneDigits(e.target.value); const newC = [...customerForm.contacts]; newC[i].contactNumber = val; setCustomerForm({ ...customerForm, contacts: newC }); }} className="w-full pl-2 pr-7 py-1 bg-slate-50 border border-slate-200 rounded-md text-[11px]" />
+                              <PhonePasteButton iconClassName="w-3 h-3" onPaste={digits => { const newC = [...customerForm.contacts]; newC[i].contactNumber = digits; setCustomerForm({ ...customerForm, contacts: newC }); }} />
+                            </div>
                             <input type="email" placeholder="Email" value={c.email} onChange={e => { const newC = [...customerForm.contacts]; newC[i].email = e.target.value; setCustomerForm({ ...customerForm, contacts: newC }); }} className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded-md text-[11px]" />
                           </div>
                         </div>
@@ -7686,18 +7948,19 @@ export default function AdminDashboard() {
                 </div>
                 <div>
                   <label className="block text-slate-700 font-semibold mb-1">Contact Phone *</label>
-                  <input
-                    type="text"
-                    required
-                    maxLength={10}
-                    placeholder="+91 99888 77665"
-                    value={customerForm.contact}
-                    onChange={e => {
-                      const val = e.target.value.replace(/\D/g, '');
-                      setCustomerForm({ ...customerForm, contact: val });
-                    }}
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-slate-800 focus:bg-white focus:outline-none focus:ring-2 focus:ring-rose-500"
-                  />
+                  <div className="relative">
+                    <input
+                      type="text"
+                      required
+                      placeholder="+91 99888 77665"
+                      value={customerForm.contact}
+                      onChange={e => {
+                        setCustomerForm({ ...customerForm, contact: cleanPhoneDigits(e.target.value) });
+                      }}
+                      className="w-full pl-3 pr-8 py-2 bg-slate-50 border border-slate-200 rounded-xl text-slate-800 focus:bg-white focus:outline-none focus:ring-2 focus:ring-rose-500"
+                    />
+                    <PhonePasteButton onPaste={digits => setCustomerForm({ ...customerForm, contact: digits })} />
+                  </div>
                 </div>
               </div>
 
@@ -7736,7 +7999,10 @@ export default function AdminDashboard() {
                     <div className="grid grid-cols-2 gap-2">
                       <input type="text" placeholder="Name" value={c.name} onChange={e => { const newC = [...customerForm.contacts]; newC[i].name = e.target.value; setCustomerForm({ ...customerForm, contacts: newC }); }} className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded-md text-[11px]" />
                       <input type="text" placeholder="Designation" value={c.designation} onChange={e => { const newC = [...customerForm.contacts]; newC[i].designation = e.target.value; setCustomerForm({ ...customerForm, contacts: newC }); }} className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded-md text-[11px]" />
-                      <input type="text" placeholder="Phone" maxLength={10} value={c.contactNumber} onChange={e => { const val = e.target.value.replace(/\D/g, ''); const newC = [...customerForm.contacts]; newC[i].contactNumber = val; setCustomerForm({ ...customerForm, contacts: newC }); }} className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded-md text-[11px]" />
+                      <div className="relative">
+                        <input type="text" placeholder="Phone" value={c.contactNumber} onChange={e => { const val = cleanPhoneDigits(e.target.value); const newC = [...customerForm.contacts]; newC[i].contactNumber = val; setCustomerForm({ ...customerForm, contacts: newC }); }} className="w-full pl-2 pr-7 py-1 bg-slate-50 border border-slate-200 rounded-md text-[11px]" />
+                        <PhonePasteButton iconClassName="w-3 h-3" onPaste={digits => { const newC = [...customerForm.contacts]; newC[i].contactNumber = digits; setCustomerForm({ ...customerForm, contacts: newC }); }} />
+                      </div>
                       <input type="email" placeholder="Email" value={c.email} onChange={e => { const newC = [...customerForm.contacts]; newC[i].email = e.target.value; setCustomerForm({ ...customerForm, contacts: newC }); }} className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded-md text-[11px]" />
                     </div>
                   </div>

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useDocSettings } from '../context/DocSettingsContext';
@@ -231,8 +231,22 @@ const findMatchingMasterItem = (masterList, searchId, searchName) => {
   return null;
 };
 
-// Shrinks table/paragraph density as the item count grows so the certificate keeps fitting on one A4 page
-const getCertDensity = (itemCount) => {
+// Certificate types with their own extra "format-specific" fields box (HP Testing's Test
+// Pressure/Result, New FE's ISI Mark/Warranty, System Installation's Type/Status, AMC's
+// Period/Frequency, Visit Report's Observations) carry more fixed content than Refilling or
+// Training Certificate at the same item count, so they need a size class earlier — see
+// getCertDensity's extraContent param below.
+const FORMAT_TYPES_WITH_EXTRA_FIELDS_BOX = ['HP Testing', 'New Fire Extinguisher', 'System Installation', 'AMC Certificate', 'Visit Report'];
+
+// Shrinks table/paragraph density as the item count grows so the certificate keeps fitting on one
+// A4 page. extraContent bumps the effective item count for types that render their own extra
+// fields box (see FORMAT_TYPES_WITH_EXTRA_FIELDS_BOX above), so e.g. an HP Testing certificate
+// gets the same density as a Refilling one carrying ~2 more items — reflecting the actual extra
+// vertical space that box takes. This is a best-effort match to the common case; genuinely
+// oversized content (many items, long custom notes) still safely spills to a second PDF page
+// rather than being clipped — see generateCertificateCanvas's scrollHeight measurement.
+const getCertDensity = (itemCount, extraContent = false) => {
+  itemCount = extraContent ? itemCount + 2 : itemCount;
   if (itemCount === 1) {
     return { cellPad: 'py-8 px-4', cellText: 'text-[11.5px]', bodyText: 'text-[12.5px]', bodySpace: 'space-y-4 mb-6', badgeMy: 'my-6', headerMb: 'mb-6', tableMt: 'mt-6', imgMaxH: 'max-h-28' };
   }
@@ -329,6 +343,10 @@ export default function CertificateComplianceGeneratorPage() {
   const scrollFieldIntoView = (e) => {
     const el = e.target;
     setTimeout(() => {
+      // Tell the scroll-up detector below to ignore this smooth scroll — centering a field that
+      // sits above the viewport scrolls UP, which would otherwise read as "user scrolled up" and
+      // re-expand the collapsed client-detail groups.
+      programmaticScrollUntilRef.current = Date.now() + 1000;
       el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }, 300);
   };
@@ -387,6 +405,10 @@ export default function CertificateComplianceGeneratorPage() {
   const [customersLoadFailed, setCustomersLoadFailed] = useState(false);
   const [customers, setCustomers] = useState([]);
   const [equipmentMasterList, setEquipmentMasterList] = useState([]);
+  const [certificateTypes, setCertificateTypes] = useState([]); // admin-added custom types, in addition to the 7 built-in ones
+  const [showAddCertTypeForm, setShowAddCertTypeForm] = useState(false);
+  const [newCertTypeName, setNewCertTypeName] = useState('');
+  const [newCertTypeIcon, setNewCertTypeIcon] = useState('📄');
   const [task, setTask] = useState(null);
   const [adminSubmitting, setAdminSubmitting] = useState('');
 
@@ -657,10 +679,19 @@ export default function CertificateComplianceGeneratorPage() {
       seqSuffix = `TR${nextSeq}`;
       defaultBodyIntro = ["This is to certify that we have conducted practical fire extinguisher operation and basic fire safety training for the safety program participants."];
       defaultCustomCertify = ["The trainees participated in mock fire drill demonstrations and basic instruction on fire safety guidelines."];
-    } else {
+    } else if (newFormat === 'Refilling') {
       seqSuffix = `R${nextSeq}`;
       defaultBodyIntro = ["This is to certify that the under noted fire extinguisher/s has/have been refilled by us on as per below details."];
       defaultCustomCertify = ["It is strongly recommended that the maintenance of Fire Extinguishers must be performed as per IS 2190."];
+    } else {
+      // A custom, admin-added type (see Manage Certificate Types) — generic, name-derived defaults
+      // until the admin configures Title/Body Text/etc. for it via the Settings tab, same mechanism
+      // the built-in types above use (systemSettings, merged below, overrides all of this anyway).
+      title = `${newFormat.toUpperCase()} CERTIFICATE`;
+      details = `${newFormat} Service & Compliance Record`;
+      seqSuffix = `C${nextSeq}`;
+      defaultBodyIntro = [`This is to certify that the "${newFormat}" service described below has been carried out and verified as per the details recorded.`];
+      defaultCustomCertify = ["It is recommended that routine maintenance and inspection schedules be followed as applicable."];
     }
 
     const currentPrefix = certForm.certPrefix || 'Expert/';
@@ -729,6 +760,27 @@ export default function CertificateComplianceGeneratorPage() {
     });
   };
 
+  // Admin-only: add a new custom Certificate Type from the inline form next to the type selector
+  // (mirrors "Manage Certificate Types" in the Admin Dashboard, which manages the full list).
+  const handleCreateCertTypeInline = async () => {
+    const trimmedName = newCertTypeName.trim();
+    if (!trimmedName) return;
+    try {
+      const res = await fetch('/api/certificate-types', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ name: trimmedName, icon: newCertTypeIcon.trim() || '📄' })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to create certificate type');
+      setCertificateTypes(prev => [...prev, data.type]);
+      setShowAddCertTypeForm(false);
+      setNewCertTypeName('');
+      setNewCertTypeIcon('📄');
+      handleCertFormatChange(data.type.name);
+    } catch (err) { alert(err.message); }
+  };
+
   // Load customers, equipment master, and (if opened from a task) the task itself
   useEffect(() => {
     let cancelled = false;
@@ -737,20 +789,23 @@ export default function CertificateComplianceGeneratorPage() {
       setLoadError(null);
       try {
         const headers = { Authorization: `Bearer ${token}` };
-        const [custRes, eqRes, tasksRes, certsRes] = await Promise.all([
+        const [custRes, eqRes, tasksRes, certsRes, certTypesRes] = await Promise.all([
           fetch('/api/customers', { headers }),
           fetch('/api/equipment-master', { headers }),
           taskId ? fetch('/api/tasks', { headers }) : Promise.resolve(null),
-          fetch('/api/certificates', { headers })
+          fetch('/api/certificates', { headers }),
+          fetch('/api/certificate-types', { headers })
         ]);
         const custData = custRes.ok ? await custRes.json() : [];
         const eqData = eqRes.ok ? await eqRes.json() : [];
         const certsData = certsRes.ok ? await certsRes.json() : [];
+        const certTypesData = certTypesRes.ok ? await certTypesRes.json() : [];
         if (cancelled) return;
         setCustomers(Array.isArray(custData) ? custData : []);
         setCustomersLoadFailed(!custRes.ok);
         setEquipmentMasterList(Array.isArray(eqData) ? eqData : []);
         setAllCertificates(Array.isArray(certsData) ? certsData : []);
+        setCertificateTypes(Array.isArray(certTypesData) ? certTypesData : []);
 
         if (taskId) {
           if (!tasksRes || !tasksRes.ok) throw new Error('Failed to load work order');
@@ -885,6 +940,148 @@ export default function CertificateComplianceGeneratorPage() {
     loadAllCertAssets();
   }, []);
 
+  // ── Progressive field collapse (phones only) ─────────────────────────────────────────────────
+  // The form scroller (the overflow-y-auto panel below the tab bar) is only ~250-270px tall on a
+  // phone once the page header, the Edit/Preview strip, the type selector, the tab bar and the
+  // bottom action-bar gutter are subtracted — and the client fields alone are taller than that. So
+  // the "Add Equipment Row" box always started below the fold. Each satisfied group therefore folds
+  // into a one-line summary chip, freeing up screen, and scrolling back up re-expands them.
+  // Invariant that keeps this stable: SCROLLING ONLY EVER EXPANDS, NEVER COLLAPSES. Collapses are
+  // driven purely by focus/blur, so no scroll -> collapse -> scroll feedback loop can form.
+  const [datesCollapsed, setDatesCollapsed] = useState(false);
+  const [clientCollapsed, setClientCollapsed] = useState(false);
+  // Certificate Type selector + the Certificate Details/gear tab bar — the chrome ABOVE the
+  // scroller. It auto-hides on scroll-down (once past the very top) to hand equipment entry the
+  // rest of the screen, and reappears on scroll-up, same as the two field groups below.
+  const [showFormChrome, setShowFormChrome] = useState(true);
+
+  const formScrollRef = useRef(null);        // the overflow-y-auto panel
+  const datesGroupRef = useRef(null);        // wrapper: dates summary chip + dates fields
+  const clientGroupRef = useRef(null);       // wrapper: client summary chip + name/address/cert-no
+  const formScrollAnchorRef = useRef(null);  // { mode, scrollTop, scrollHeight } captured pre-collapse
+  const lastFormScrollTopRef = useRef(0);
+  const upScrollAccumRef = useRef(0);
+  const downScrollAccumRef = useRef(0);
+  const programmaticScrollUntilRef = useRef(0);
+
+  // Hysteresis, mirroring the filter-bar auto-hide in StaffDashboard.jsx.
+  const REVEAL_ON_UP_PX = 72;   // accumulated upward travel that re-expands mid-scroll
+  const REVEAL_AT_TOP_PX = 24;  // within this many px of the top, reveal in place instead
+  const HIDE_CHROME_ON_DOWN_PX = 48; // accumulated downward travel that hides the top chrome
+
+  const datesGroupReady = Boolean(certForm.issueDate && certForm.challanDate);
+  const clientGroupReady = Boolean((certForm.customerName || '').trim() && (certForm.address || '').trim());
+  // Mirrored so the deferred (setTimeout) blur handlers below always read the latest values rather
+  // than the closure from the render in which the blur fired.
+  const datesGroupReadyRef = useRef(datesGroupReady);
+  datesGroupReadyRef.current = datesGroupReady;
+  const clientGroupReadyRef = useRef(clientGroupReady);
+  clientGroupReadyRef.current = clientGroupReady;
+
+  // Snapshot the scroll geometry immediately BEFORE a collapse/expand state change, so the
+  // useLayoutEffect below can put the content back under the user's finger.
+  //   'preserve' — keep the content at the current scroll position visually still (used when the
+  //                group being folded is off-screen above, and for mid-scroll re-expansion).
+  //   'reveal'   — the user is at the top and asked to see the fields: jump to 0 and let the rest
+  //                of the form push down. This is the visual the user actually asked for.
+  const captureFormScrollAnchor = (mode) => {
+    const el = formScrollRef.current;
+    if (!el) return;
+    formScrollAnchorRef.current = { mode, scrollTop: el.scrollTop, scrollHeight: el.scrollHeight };
+  };
+
+  const maybeCollapseDatesGroup = () => {
+    const el = datesGroupRef.current;
+    if (!el || el.contains(document.activeElement)) return;   // still editing a date
+    if (!datesGroupReadyRef.current) return;
+    captureFormScrollAnchor('preserve');
+    setDatesCollapsed(true);
+  };
+
+  const maybeCollapseClientGroup = () => {
+    const el = clientGroupRef.current;
+    // The company-search dropdown lives inside this wrapper, so `contains` also covers
+    // "don't collapse while the client picker is open".
+    if (!el || el.contains(document.activeElement)) return;
+    if (!clientGroupReadyRef.current) return;
+    captureFormScrollAnchor('preserve');
+    setClientCollapsed(true);
+    maybeCollapseDatesGroup();
+  };
+
+  // Re-anchor the scroll position in the same frame the group folds/unfolds, before paint, so the
+  // content the user is looking at does not slide under their finger. Native scroll anchoring is
+  // switched off on the container (overflow-anchor:none) because Chrome/Android would apply its own
+  // correction on top of this one (double jump) while iOS Safari applies none at all.
+  useLayoutEffect(() => {
+    const el = formScrollRef.current;
+    const anchor = formScrollAnchorRef.current;
+    formScrollAnchorRef.current = null;
+    if (!el || !anchor) return;
+    const removed = anchor.scrollHeight - el.scrollHeight;  // >0 collapsed, <0 expanded
+    if (removed === 0) return;                              // desktop (lg:) — nothing changed
+    el.scrollTop = anchor.mode === 'reveal' ? 0 : Math.max(0, anchor.scrollTop - removed);
+    // Re-baseline the detector synchronously: the scroll event this assignment queues would
+    // otherwise be read as a large user gesture and bounce the groups straight back open.
+    lastFormScrollTopRef.current = el.scrollTop;
+    upScrollAccumRef.current = 0;
+    programmaticScrollUntilRef.current = Date.now() + 250;
+  }, [datesCollapsed, clientCollapsed]);
+
+  // Scroll down -> the top chrome (type selector + tab bar) folds away for more room. Scroll back
+  // up -> the chrome, then the field groups, come back. rAF-throttled + accumulated-delta
+  // hysteresis, same shape as the filter-bar auto-hide in StaffDashboard.jsx. Any reversal resets
+  // the opposing accumulator, so a jittery finger cannot trip either direction.
+  useEffect(() => {
+    const el = formScrollRef.current;
+    if (!el) return;
+    let ticking = false;
+    const onFormScroll = () => {
+      if (ticking) return;
+      ticking = true;
+      requestAnimationFrame(() => {
+        ticking = false;
+        const top = el.scrollTop;
+        const prev = lastFormScrollTopRef.current;
+        lastFormScrollTopRef.current = top;
+        if (Date.now() < programmaticScrollUntilRef.current) {
+          upScrollAccumRef.current = 0;
+          downScrollAccumRef.current = 0;
+          return;
+        }
+        const delta = top - prev;
+
+        if (delta > 0) {
+          // Scrolling down: hide the chrome once clearly past the very top of the panel.
+          upScrollAccumRef.current = 0;
+          if (showFormChrome && top > REVEAL_AT_TOP_PX) {
+            downScrollAccumRef.current += delta;
+            if (downScrollAccumRef.current >= HIDE_CHROME_ON_DOWN_PX) {
+              downScrollAccumRef.current = 0;
+              setShowFormChrome(false);
+            }
+          }
+          return;
+        }
+        if (delta === 0) return;
+
+        // Scrolling up: bring the chrome back immediately, and once far enough (or near the top),
+        // the field groups too.
+        downScrollAccumRef.current = 0;
+        if (!showFormChrome) setShowFormChrome(true);
+        if (!datesCollapsed && !clientCollapsed) { upScrollAccumRef.current = 0; return; }
+        upScrollAccumRef.current += -delta;
+        if (upScrollAccumRef.current < REVEAL_ON_UP_PX && top > REVEAL_AT_TOP_PX) return;
+        upScrollAccumRef.current = 0;
+        captureFormScrollAnchor(top <= REVEAL_AT_TOP_PX ? 'reveal' : 'preserve');
+        setDatesCollapsed(false);
+        setClientCollapsed(false);
+      });
+    };
+    el.addEventListener('scroll', onFormScroll, { passive: true });
+    return () => el.removeEventListener('scroll', onFormScroll);
+  }, [isPageLoading, certTab, datesCollapsed, clientCollapsed, showFormChrome]);
+
   // Client details (date/name/address) must be filled before the Equipment section reveals itself —
   // computed here (not after the early returns below) so this hook always runs, per Rules of Hooks.
   const clientDetailsComplete = Boolean(certForm.issueDate && (certForm.customerName || '').trim() && (certForm.address || '').trim());
@@ -892,12 +1089,27 @@ export default function CertificateComplianceGeneratorPage() {
   useEffect(() => {
     if (clientDetailsComplete && !hasAutoRevealedEquipment.current) {
       hasAutoRevealedEquipment.current = true;
+      const editingClient = clientGroupRef.current?.contains(document.activeElement);
+      if (!editingClient) {
+        // Filled by picking a client from the directory / loading a previous certificate: nothing
+        // is focused, so fold both groups (and the chrome above them) away and hand the screen to
+        // the equipment box.
+        setDatesCollapsed(true);
+        setClientCollapsed(true);
+        setShowFormChrome(false);
+      }
       setTimeout(() => {
+        programmaticScrollUntilRef.current = Date.now() + 1000;
         equipmentSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }, 150);
     }
     if (!clientDetailsComplete) {
       hasAutoRevealedEquipment.current = false;
+      // Save -> new blank certificate clears name/address: bring the fields back so the next
+      // certificate starts from a visible form.
+      setDatesCollapsed(false);
+      setClientCollapsed(false);
+      setShowFormChrome(true);
     }
   }, [clientDetailsComplete]);
 
@@ -925,7 +1137,10 @@ export default function CertificateComplianceGeneratorPage() {
     );
   }
 
-  const density = getCertDensity((certForm.itemsList || []).length);
+  const density = getCertDensity(
+    (certForm.itemsList || []).length,
+    isSectionVisible('formatSpecific') && FORMAT_TYPES_WITH_EXTRA_FIELDS_BOX.includes(certForm.formatType)
+  );
   // Main details and equipment grid entries are always editable (the page is never locked)
   const contentEditable = true;
   const lockWrapClass = '';
@@ -1119,6 +1334,15 @@ export default function CertificateComplianceGeneratorPage() {
   const generateCertificateCanvas = async () => {
     if (!certPreviewRef.current) throw new Error('Certificate preview container is not ready.');
     const { default: html2canvas } = await import('html2canvas');
+    // The certificate can need more than one A4 page's worth of height — extra items, a format's
+    // own extra fields box (HP Testing/AMC/New FE/System Installation/Visit Report all render one),
+    // long custom notes/lines — even after getCertDensity shrinks spacing to try to keep it to one
+    // page. scrollHeight reflects the TRUE rendered height regardless of the fixed 1123px style
+    // below or the parent's overflow:hidden (scrollHeight is never clipped by either), so measuring
+    // it here and using it as the capture height instead of hard-coding one page means nothing below
+    // the fold (footer/QR/signature block) is silently cut out of the exported PDF — it lands on a
+    // second PDF page instead, via the multi-page split buildCertificatePdf() already does.
+    const neededHeightPx = Math.max(1123, certPreviewRef.current.scrollHeight);
     let assets = certBase64Assets;
     if (!assets.header || !assets.stamp || !assets.footer || !assets.watermark) {
       const [h, s, f, w] = await Promise.all([
@@ -1142,9 +1366,9 @@ export default function CertificateComplianceGeneratorPage() {
         if (document.fonts && document.fonts.ready) await document.fonts.ready;
         if (clonedDoc.fonts && clonedDoc.fonts.ready) await clonedDoc.fonts.ready;
         const cw = clonedDoc.getElementById('cert-scale-wrapper');
-        if (cw) { cw.style.width = '794px'; cw.style.height = '1123px'; cw.style.overflow = 'visible'; }
+        if (cw) { cw.style.width = '794px'; cw.style.height = `${neededHeightPx}px`; cw.style.overflow = 'visible'; }
         const cr = clonedDoc.getElementById('certificate-print-root');
-        if (cr) { cr.style.transform = 'none'; cr.style.width = '794px'; cr.style.height = '1123px'; }
+        if (cr) { cr.style.transform = 'none'; cr.style.width = '794px'; cr.style.height = `${neededHeightPx}px`; }
         const imgs = Array.from(clonedDoc.querySelectorAll('img'));
         await Promise.all(imgs.map(async img => {
           img.crossOrigin = 'anonymous';
@@ -1345,6 +1569,11 @@ export default function CertificateComplianceGeneratorPage() {
 
 
 
+          {/* Type selector + tab bar auto-hide on scroll-down (mobile only) to give equipment
+              entry the full screen, and reappear on scroll-up. Hiding a sibling ABOVE the
+              overflow-y-auto scroller only changes its clientHeight via flexbox, never its
+              scrollTop/scrollHeight, so this needs no scroll-position compensation. */}
+          <div className={`overflow-hidden transition-all duration-300 ease-in-out lg:max-h-none lg:opacity-100 ${showFormChrome ? 'max-h-[220px] opacity-100' : 'max-h-0 opacity-0'}`}>
           {/* Format Selector */}
           <div className="bg-amber-50/80 border border-amber-200/80 rounded-t-xl px-3.5 py-2.5 flex flex-col sm:flex-row sm:items-center gap-1.5 sm:gap-2.5 shadow-sm">
             <div className="flex items-center gap-2">
@@ -1363,8 +1592,63 @@ export default function CertificateComplianceGeneratorPage() {
               <option value="AMC Certificate" className="bg-white text-slate-900">📋 AMC — Annual Maintenance Contract</option>
               <option value="Visit Report" className="bg-white text-slate-900">📝 Visit Report — Field Safety Inspection</option>
               <option value="Training Certificate" className="bg-white text-slate-900">🎓 Training Certificate — Practical Operations Training</option>
+              {certificateTypes.length > 0 && (
+                <optgroup label="Custom Types">
+                  {certificateTypes.map(ctype => (
+                    <option key={ctype.Type_ID} value={ctype.name} className="bg-white text-slate-900">
+                      {ctype.icon || '📄'} {ctype.name}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
             </select>
+            {(user?.Role === 'Admin' || user?.role === 'Admin') && (
+              <button
+                type="button"
+                onClick={() => setShowAddCertTypeForm(p => !p)}
+                title="Add a new Certificate Type"
+                className="shrink-0 w-8 h-8 flex items-center justify-center rounded-lg bg-white border border-amber-300/80 text-amber-700 hover:bg-amber-100 transition"
+              >
+                <PlusCircle className="w-4 h-4" />
+              </button>
+            )}
           </div>
+          {showAddCertTypeForm && (
+            <div className="bg-amber-50/80 border-x border-amber-200/80 px-3.5 py-2.5 flex items-center gap-2">
+              <input
+                type="text"
+                value={newCertTypeIcon}
+                onChange={e => setNewCertTypeIcon(e.target.value)}
+                maxLength={2}
+                className="w-10 h-8 rounded-lg border border-amber-300 text-center text-sm shrink-0 bg-white"
+                title="Emoji icon"
+              />
+              <input
+                type="text"
+                value={newCertTypeName}
+                onChange={e => setNewCertTypeName(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') handleCreateCertTypeInline(); }}
+                placeholder="New certificate type name…"
+                className="flex-1 min-w-0 px-2.5 py-1.5 bg-white border border-amber-300 rounded-lg text-xs font-bold focus:ring-2 focus:ring-amber-500 focus:outline-none"
+                autoFocus
+              />
+              <button
+                type="button"
+                onClick={handleCreateCertTypeInline}
+                disabled={!newCertTypeName.trim()}
+                className="px-2.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-bold text-[11px] shadow-sm transition disabled:opacity-40 shrink-0"
+              >
+                Add
+              </button>
+              <button
+                type="button"
+                onClick={() => { setShowAddCertTypeForm(false); setNewCertTypeName(''); setNewCertTypeIcon('📄'); }}
+                className="w-8 h-8 flex items-center justify-center rounded-lg bg-white border border-slate-300 text-slate-500 hover:bg-slate-100 transition shrink-0"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
 
           {/* Tab Bar — Client + Equipment merged into one guided flow; Settings stays separate */}
           <div className="flex items-center justify-between border-b border-slate-200 bg-white">
@@ -1381,16 +1665,42 @@ export default function CertificateComplianceGeneratorPage() {
               <Settings className="w-4 h-4" />
             </button>
           </div>
+          </div>
 
           {/* Tab Content */}
-          <div className="flex-1 overflow-y-auto bg-white border border-slate-200 rounded-b-xl">
+          {/* overflowAnchor:none — the collapsible client groups adjust scrollTop themselves in a
+              useLayoutEffect; leaving Chrome/Android's native scroll anchoring on would apply a
+              second correction on top of it (double jump), and iOS Safari applies none at all. */}
+          <div
+            ref={formScrollRef}
+            style={{ overflowAnchor: 'none' }}
+            className="flex-1 overflow-y-auto bg-white border border-slate-200 rounded-b-xl"
+          >
 
             {/* TAB: CLIENT */}
             {certTab === 'client' && (
               <div className="p-3 space-y-3">
                 <div className="space-y-3">
                 {/* 1. Certificate Date & Validity Quick Selector */}
-                <div className="space-y-2 bg-slate-50 p-2.5 rounded-xl border border-slate-200">
+                <div ref={datesGroupRef}>
+                <button
+                  type="button"
+                  onClick={() => setDatesCollapsed(false)}
+                  aria-expanded="false"
+                  title="Tap to edit the certificate & challan dates"
+                  className={`${datesCollapsed ? 'flex' : 'hidden'} lg:hidden w-full items-center justify-between gap-2 px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-left active:bg-slate-100 transition`}
+                >
+                  <span className="flex items-baseline gap-1.5 min-w-0">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wide shrink-0">📅 Dates</span>
+                    <span className="text-[11px] font-bold text-slate-900 truncate">
+                      {formatDateDDMMYYYY(certForm.issueDate)}
+                      <span className="mx-1 text-slate-300">·</span>
+                      <span className="text-amber-900">Challan {formatDateDDMMYYYY(certForm.challanDate)}</span>
+                    </span>
+                  </span>
+                  <ChevronDown className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                </button>
+                <div className={`space-y-2 bg-slate-50 p-2.5 rounded-xl border border-slate-200 ${datesCollapsed ? 'hidden lg:block' : ''}`}>
                   <div className="grid grid-cols-2 gap-2">
                     <div className="space-y-1">
                       <label className="block text-[11px] font-bold text-slate-600 uppercase tracking-wide">Certificate Date *</label>
@@ -1432,6 +1742,7 @@ export default function CertificateComplianceGeneratorPage() {
                             setNewItemNextDate(nextCappedDue);
                           }
                         }}
+                        onBlur={() => setTimeout(maybeCollapseDatesGroup, 0)}
                         className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg font-bold text-slate-900 text-xs focus:ring-2 focus:ring-amber-500 focus:outline-none shadow-2xs"
                       />
                     </div>
@@ -1465,12 +1776,38 @@ export default function CertificateComplianceGeneratorPage() {
                             setNewItemNextDate(nextDt);
                           }
                         }}
+                        onBlur={() => setTimeout(maybeCollapseDatesGroup, 0)}
                         className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg font-bold text-amber-900 text-xs focus:ring-2 focus:ring-amber-500 focus:outline-none shadow-2xs"
                       />
                     </div>
                   </div>
                 </div>
+                </div>
 
+                {/* 2-4. Company / Address / Certificate No — folded into one summary chip once the
+                    company and address are set, so the equipment box climbs above the fold. */}
+                <div ref={clientGroupRef}>
+                <button
+                  type="button"
+                  onClick={() => setClientCollapsed(false)}
+                  aria-expanded="false"
+                  title="Tap to edit the client details"
+                  className={`${clientCollapsed ? 'flex' : 'hidden'} lg:hidden w-full items-center justify-between gap-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-xl text-left active:bg-amber-100 transition`}
+                >
+                  <span className="min-w-0 flex-1">
+                    <span className="flex items-center gap-1.5 min-w-0">
+                      <Building2 className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+                      <span className="text-[11px] font-bold text-amber-950 truncate">{certForm.customerName}</span>
+                    </span>
+                    <span className="block text-[10px] font-semibold text-amber-800 truncate mt-0.5">
+                      {certForm.address}
+                      <span className="mx-1 text-amber-400">·</span>
+                      {certForm.certificateNo}
+                    </span>
+                  </span>
+                  <ChevronDown className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                </button>
+                <div className={`space-y-3 ${clientCollapsed ? 'hidden lg:block' : ''}`}>
                 {/* 2. Company Name */}
                 <div className="space-y-1">
                   <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wide">Company Name *</label>
@@ -1486,8 +1823,14 @@ export default function CertificateComplianceGeneratorPage() {
                         setCertForm(prev => ({ ...prev, customerName: val }));
                         setShowCertCustDropdown(true);
                       }}
-                      onFocus={() => setShowCertCustDropdown(true)}
-                      onBlur={() => setTimeout(() => setShowCertCustDropdown(false), 180)}
+                      onFocus={() => {
+                        setShowCertCustDropdown(true);
+                        // Moving on to Company Name = fold the dates away. Delayed so it lands
+                        // after the on-screen keyboard's open animation instead of fighting it
+                        // (same 300ms convention as scrollFieldIntoView above).
+                        setTimeout(maybeCollapseDatesGroup, 300);
+                      }}
+                      onBlur={() => setTimeout(() => { setShowCertCustDropdown(false); maybeCollapseClientGroup(); }, 180)}
                       className="w-full pl-8 pr-3 py-2 bg-slate-50 border border-slate-300 rounded-lg font-bold text-slate-900 text-xs focus:ring-2 focus:ring-amber-500 focus:border-amber-500 focus:outline-none focus:bg-white transition"
                     />
                     {showCertCustDropdown && (
@@ -1544,6 +1887,7 @@ export default function CertificateComplianceGeneratorPage() {
                     placeholder="Full client address..."
                     value={certForm.address}
                     onChange={e => setCertForm(prev => ({ ...prev, address: e.target.value }))}
+                    onBlur={() => setTimeout(maybeCollapseClientGroup, 180)}
                     className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg font-medium text-slate-800 text-xs focus:ring-2 focus:ring-amber-500 focus:outline-none"
                   />
                 </div>
@@ -1560,6 +1904,8 @@ export default function CertificateComplianceGeneratorPage() {
                     title="Certificate No is generated by default and cannot be edited"
                     className="w-full px-3 py-2 bg-slate-100 border border-slate-300 rounded-lg font-bold text-slate-600 text-xs cursor-not-allowed select-none focus:outline-none"
                   />
+                </div>
+                </div>
                 </div>
                 </div>
 
@@ -1779,7 +2125,7 @@ export default function CertificateComplianceGeneratorPage() {
                     <div className="bg-slate-50 px-3 py-1.5 text-[10px] font-bold text-slate-600 uppercase tracking-wide border-b border-slate-200">
                       Certificate Items — {(certForm.itemsList||[]).length} row(s)
                     </div>
-                    <div className="divide-y divide-slate-100 max-h-[60vh] overflow-y-auto">
+                    <div className="divide-y divide-slate-100">
                       {(certForm.itemsList||[]).map((it, idx) => (
                         <div key={it.id||idx} className="flex items-start justify-between px-3 py-2 hover:bg-slate-50 gap-2">
                           <div className="flex items-start gap-2 flex-1 min-w-0">
@@ -2843,7 +3189,13 @@ export default function CertificateComplianceGeneratorPage() {
                     {(certCfg.show_qr_code !== false) && (
                     <div className="flex flex-col items-center justify-between text-center bg-slate-50 p-2.5 rounded-xl border border-slate-300 w-[130px] h-[140px] shrink-0 shadow-2xs">
                       <div className="bg-white p-1 rounded-lg border border-slate-200 shadow-2xs">
-                        <QRCodeCanvas value={`${window.location.origin}/api/verify-certificate/${certForm.verificationGuid}`} size={84} level="H" includeMargin={false}/>
+                        {/* level="H" (30% redundancy) with no margin produced a QR dense enough, and with
+                            no quiet zone, that phone cameras frequently failed to lock onto it once printed
+                            and JPEG-compressed. "M" is plenty of error correction for a plain URL with no
+                            embedded logo, and yields a noticeably less dense grid; includeMargin restores the
+                            quiet zone required for reliable real-world scanning (drawn within the same
+                            `size`, so it doesn't affect surrounding layout). */}
+                        <QRCodeCanvas value={`${window.location.origin}/api/verify-certificate/${certForm.verificationGuid}`} size={84} level="M" includeMargin={true}/>
                       </div>
                       <div className="flex flex-col items-center">
                         <span className="text-[8.5px] font-extrabold text-indigo-900 uppercase leading-tight">Scan to Verify</span>
@@ -3271,6 +3623,13 @@ export default function CertificateComplianceGeneratorPage() {
                   <option value="AMC Certificate">AMC Certificate</option>
                   <option value="Visit Report">Visit Report</option>
                   <option value="Training Certificate">Training Certificate</option>
+                  {certificateTypes.length > 0 && (
+                    <optgroup label="Custom Types">
+                      {certificateTypes.map(ctype => (
+                        <option key={ctype.Type_ID} value={ctype.name}>{ctype.icon || '📄'} {ctype.name}</option>
+                      ))}
+                    </optgroup>
+                  )}
                 </select>
               </div>
             </div>

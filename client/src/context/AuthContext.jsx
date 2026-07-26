@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { getOfflineQueue, flushOfflineQueue } from '../utils/offlineQueue';
+import { subscribeToPush, unsubscribeFromPush } from '../utils/pushNotifications';
 
 const AuthContext = createContext();
 
@@ -140,6 +141,14 @@ export function AuthProvider({ children }) {
     updateQueueCount();
     refreshUserProfile();
 
+    // Returning user with an already-valid token from a previous session (page reload, not a
+    // fresh login): re-register the push subscription only if permission was already granted
+    // earlier — never trigger a fresh browser permission prompt outside the login action.
+    const existingToken = localStorage.getItem(TOKEN_KEY);
+    if (existingToken && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+      subscribeToPush(existingToken);
+    }
+
     return () => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
@@ -183,11 +192,18 @@ export function AuthProvider({ children }) {
       // Non-fatal: the data from login is still valid
     }
 
+    // Fire-and-forget: prompts for notification permission and registers the push
+    // subscription. Never blocks login if the browser denies/lacks push support.
+    subscribeToPush(data.token);
+
     return data.user;
   };
 
   const logout = () => {
     isLoggedOutRef.current = true;
+    // Best-effort: remove this device's push subscription before the token it needs to
+    // authenticate the removal call is cleared below.
+    if (token) unsubscribeFromPush(token);
     localStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem(USER_KEY);
     localStorage.removeItem(IMPERSON_KEY);

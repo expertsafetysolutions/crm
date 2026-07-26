@@ -4,6 +4,7 @@ const sheetsService = require('../services/sheetsService');
 const { computeServiceReportStats } = require('../services/serviceReportStats');
 const workflowEngine = require('../services/workflowEngine');
 const attendanceService = require('../services/attendanceService');
+const pushService = require('../services/pushService');
 const { authenticateToken } = require('./authRoutes');
 const { verifyStaffPassword, validatePasswordPolicy } = require('../utils/passwordUtils');
 
@@ -632,6 +633,58 @@ router.delete('/tags/:id', async (req, res) => {
   }
 });
 
+// --- CERTIFICATE TYPES (admin-defined custom certificate categories, in addition to the 7 built-in ones) ---
+// The 7 built-in types (Refilling, HP Testing, New Fire Extinguisher, System Installation,
+// AMC Certificate, Visit Report, Training Certificate) are hardcoded client-side and never stored
+// here — this collection only holds admin-added custom types. A type's `name` IS its identifier
+// (same convention as the built-in types: no separate id-to-name indirection anywhere else in the
+// certificate flow), so names must be unique against both the built-ins and each other.
+const BUILT_IN_CERTIFICATE_TYPES = ['Refilling', 'HP Testing', 'New Fire Extinguisher', 'System Installation', 'AMC Certificate', 'Visit Report', 'Training Certificate'];
+
+router.get('/certificate-types', async (req, res) => {
+  try {
+    const types = await sheetsService.getAllCertificateTypes();
+    res.json(types);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch certificate types' });
+  }
+});
+
+router.post('/certificate-types', async (req, res) => {
+  try {
+    if (req.user.role !== 'Admin') return res.status(403).json({ error: 'Admin access required' });
+    const { name, icon, generateRefillingDue } = req.body;
+    const trimmedName = (name || '').trim();
+    if (!trimmedName) return res.status(400).json({ error: 'Certificate type name is required' });
+    const existingTypes = await sheetsService.getAllCertificateTypes();
+    const nameTaken = BUILT_IN_CERTIFICATE_TYPES.some(t => t.toLowerCase() === trimmedName.toLowerCase())
+      || existingTypes.some(t => (t.name || '').toLowerCase() === trimmedName.toLowerCase());
+    if (nameTaken) return res.status(400).json({ error: 'A certificate type with this name already exists' });
+    const newType = {
+      Type_ID: 'ct-' + Date.now(),
+      name: trimmedName,
+      icon: (icon || '📄').trim(),
+      generateRefillingDue: !!generateRefillingDue,
+      createdAt: new Date().toISOString()
+    };
+    await sheetsService.insertRow('Certificate_Type_Master', newType);
+    res.json({ success: true, type: newType });
+  } catch (err) {
+    console.error('Create certificate type failed:', err);
+    res.status(500).json({ error: 'Failed to create certificate type' });
+  }
+});
+
+router.delete('/certificate-types/:id', async (req, res) => {
+  try {
+    if (req.user.role !== 'Admin') return res.status(403).json({ error: 'Admin access required' });
+    await sheetsService.deleteRow('Certificate_Type_Master', 'Type_ID', req.params.id);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to delete certificate type' });
+  }
+});
+
 
 // --- STAFF MASTER ---
 router.get('/staff', async (req, res) => {
@@ -803,6 +856,15 @@ router.put('/staff/:id/photo-approve', async (req, res) => {
     }
     const updated = await sheetsService.updateRow('Staff_Master', 'Staff_ID', req.params.id, updateData);
     const { Password, ...clean } = (updated || target);
+
+    pushService.notifyStaff(req.params.id, {
+      type: pushService.NOTIFICATION_TYPES.PHOTO_ICARD_APPROVAL,
+      title: `Profile Photo ${updateData.Photo_Status}`,
+      body: `Your profile photo request was ${updateData.Photo_Status.toLowerCase()}.`,
+      url: '/',
+      tag: `photo-${req.params.id}`
+    });
+
     res.json({ success: true, staff: clean });
   } catch (err) {
     res.status(500).json({ error: 'Failed to process photo approval' });
@@ -919,6 +981,17 @@ router.put('/staff/:id/icard-approve', async (req, res) => {
 
     const updated = await sheetsService.updateRow('Staff_Master', 'Staff_ID', req.params.id, updateData);
     const { Password, ...clean } = (updated || target);
+
+    if (action === 'APPROVE' || action === 'REJECT') {
+      pushService.notifyStaff(req.params.id, {
+        type: pushService.NOTIFICATION_TYPES.PHOTO_ICARD_APPROVAL,
+        title: `I-Card Request ${updateData.ICard_Status}`,
+        body: `Your I-Card update request was ${updateData.ICard_Status.toLowerCase()}.`,
+        url: '/',
+        tag: `icard-${req.params.id}`
+      });
+    }
+
     res.json({ success: true, staff: clean });
   } catch (err) {
     console.error('I-Card approve error:', err);
@@ -1459,6 +1532,14 @@ router.post('/tasks', async (req, res) => {
         staffId: req.user.staffId,
         staffName
       });
+
+      pushService.notifyStaff(newTask.Assigned_Staff, {
+        type: pushService.NOTIFICATION_TYPES.TASK_ASSIGNED,
+        title: 'New Task Assigned',
+        body: `${staffName} assigned you a new task: ${newTask.Description || ''}`,
+        url: `/?targetType=TASK&targetId=${newTask.Task_ID}`,
+        tag: `task-${newTask.Task_ID}`
+      });
     } catch (logErr) {
       console.error('Error logging task remark:', logErr);
     }
@@ -1526,6 +1607,14 @@ const updateTaskHandler = async (req, res) => {
           remarkText: `[TASK REASSIGNED] Assigned from: ${oldStaffName} to: ${newStaffName} | Reassigned by: ${staffName}`,
           staffId: req.user.staffId,
           staffName
+        });
+
+        pushService.notifyStaff(targetAssignedStaff, {
+          type: pushService.NOTIFICATION_TYPES.TASK_ASSIGNED,
+          title: 'Task Reassigned to You',
+          body: `${staffName} assigned you: ${oldTask.Description || ''}`,
+          url: `/?targetType=TASK&targetId=${oldTask.Task_ID}`,
+          tag: `task-${oldTask.Task_ID}`
         });
       } catch (logErr) {
         console.error('Error logging task reassignment remark:', logErr);
@@ -2157,6 +2246,15 @@ const updateLeaveStatusHandler = async (req, res) => {
     if (!updated) {
       return res.status(404).json({ error: 'Leave request not found' });
     }
+
+    pushService.notifyStaff(updated.Staff_ID, {
+      type: pushService.NOTIFICATION_TYPES.LEAVE_STATUS,
+      title: `Leave ${status}`,
+      body: `Your leave request for ${updated.Leave_Date || 'the requested date'} was ${status.toLowerCase()}.`,
+      url: `/?targetType=LEAVE&targetId=${updated.Request_ID}`,
+      tag: `leave-${updated.Request_ID}`
+    });
+
     res.json(updated);
   } catch (err) {
     res.status(500).json({ error: 'Failed to update leave request status' });
@@ -2167,6 +2265,76 @@ router.put('/leaves/status', updateLeaveStatusHandler);
 router.patch('/leaves/status', updateLeaveStatusHandler);
 router.put('/leaves/:requestId/status', updateLeaveStatusHandler);
 router.patch('/leaves/:requestId/status', updateLeaveStatusHandler);
+
+// --- WEB PUSH NOTIFICATIONS ---
+router.get('/push/vapid-public-key', (req, res) => {
+  res.json({ publicKey: process.env.VAPID_PUBLIC_KEY || '' });
+});
+
+router.post('/staff/push-subscribe', async (req, res) => {
+  try {
+    const { subscription } = req.body;
+    if (!subscription || !subscription.endpoint) {
+      return res.status(400).json({ error: 'Valid push subscription is required' });
+    }
+    await sheetsService.addPushSubscription(req.user.staffId, subscription);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Push subscribe error:', err);
+    res.status(500).json({ error: 'Failed to save push subscription' });
+  }
+});
+
+router.post('/staff/push-unsubscribe', async (req, res) => {
+  try {
+    const { endpoint } = req.body;
+    if (!endpoint) return res.status(400).json({ error: 'endpoint is required' });
+    await sheetsService.removePushSubscription(req.user.staffId, endpoint);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Push unsubscribe error:', err);
+    res.status(500).json({ error: 'Failed to remove push subscription' });
+  }
+});
+
+const DEFAULT_NOTIFICATION_SETTINGS = {
+  TASK_ASSIGNED: true,
+  TASK_STAGE_HANDOFF: true,
+  LEAVE_STATUS: true,
+  PHOTO_ICARD_APPROVAL: true
+};
+
+router.get('/settings/notifications', async (req, res) => {
+  try {
+    if (req.user.role !== 'Admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    const settings = await sheetsService.getNotificationSettings();
+    res.json({ ...DEFAULT_NOTIFICATION_SETTINGS, ...(settings || {}) });
+  } catch (err) {
+    console.error('Fetch notification settings error:', err);
+    res.status(500).json({ error: 'Failed to fetch notification settings' });
+  }
+});
+
+router.put('/settings/notifications', async (req, res) => {
+  try {
+    if (req.user.role !== 'Admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    const { TASK_ASSIGNED, TASK_STAGE_HANDOFF, LEAVE_STATUS, PHOTO_ICARD_APPROVAL } = req.body;
+    const updated = await sheetsService.saveNotificationSettings('DEFAULT', {
+      TASK_ASSIGNED: Boolean(TASK_ASSIGNED),
+      TASK_STAGE_HANDOFF: Boolean(TASK_STAGE_HANDOFF),
+      LEAVE_STATUS: Boolean(LEAVE_STATUS),
+      PHOTO_ICARD_APPROVAL: Boolean(PHOTO_ICARD_APPROVAL)
+    });
+    res.json(updated);
+  } catch (err) {
+    console.error('Save notification settings error:', err);
+    res.status(500).json({ error: 'Failed to save notification settings' });
+  }
+});
 
 // --- DOCUMENT & TEMPLATE SETTINGS (read: any authenticated user, write: Admin only) ---
 // Staff need read access so admin-configured report templates, checkpoint libraries and

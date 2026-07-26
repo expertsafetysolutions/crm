@@ -25,7 +25,12 @@
       "Bash(node -e ' *)",
       "Bash(netstat -ano)",
       "Bash(taskkill //F //PID 14300)",
-      "Bash(npm run *)"
+      "Bash(npm run *)",
+      "Bash(curl -s \"http://localhost:5174/src/pages/CertificateComplianceGeneratorPage.jsx\" -o /dev/null -w \"status: %{http_code}\\\\n\")",
+      "Bash(curl -s \"http://localhost:5174/\" -o /dev/null -w \"root: %{http_code}\\\\n\")",
+      "Bash(grep -Hm1 ^description: 'c:/Users/DELL/Desktop/CRM 150726/Expert CRM 2026/.claude/skills/*/SKILL.md')",
+      "Bash(npx web-push *)",
+      "Bash(npm install *)"
     ]
   }
 }

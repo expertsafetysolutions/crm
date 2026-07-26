@@ -2014,11 +2014,14 @@ export default function CertificateGeneratorPage() {
                       {/* Left: QR Code Verification */}
                       <div className="flex flex-col items-center justify-between text-center bg-slate-50 p-1.5 rounded-xl border border-slate-300 w-[110px] h-[115px] shrink-0 shadow-2xs">
                         <div className="bg-white p-0.5 rounded border border-slate-200 shadow-2xs">
+                          {/* See CertificateComplianceGeneratorPage.jsx for why level dropped from H to M
+                              and includeMargin flipped to true: no-margin + max redundancy made this QR too
+                              dense/quiet-zone-less to reliably scan once printed and JPEG-compressed. */}
                           <QRCodeCanvas
                             value={`${window.location.origin}/api/verify-certificate/${reportForm.verificationGuid}`}
                             size={56}
-                            level="H"
-                            includeMargin={false}
+                            level="M"
+                            includeMargin={true}
                           />
                         </div>
                         <div className="flex flex-col items-center">

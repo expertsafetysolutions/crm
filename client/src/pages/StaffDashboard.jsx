@@ -4,6 +4,8 @@ import { useAuth } from '../context/AuthContext';
 import { enqueueOfflineAction } from '../utils/offlineQueue';
 import { compressImageToDataURL } from '../utils/imageCompression';
 import { getAccurateGpsPosition } from '../utils/gpsHelper';
+import PhonePasteButton from '../components/PhonePasteButton';
+import { cleanPhoneDigits } from '../utils/clipboardUtils';
 import {
   formatDateDDMMYYYY,
   formatDateWithDayName,
@@ -4219,13 +4221,16 @@ export default function StaffDashboard() {
                 </div>
                 <div>
                   <label className="block font-semibold text-slate-700 mb-1">Mobile Number</label>
-                  <input
-                    type="text" maxLength={10}
-                    value={editCustomerForm.contact}
-                    onChange={e => setEditCustomerForm({ ...editCustomerForm, contact: e.target.value.replace(/\D/g, '') })}
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-slate-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    placeholder="10-digit mobile"
-                  />
+                  <div className="relative">
+                    <input
+                      type="text"
+                      value={editCustomerForm.contact}
+                      onChange={e => setEditCustomerForm({ ...editCustomerForm, contact: cleanPhoneDigits(e.target.value) })}
+                      className="w-full pl-3 pr-8 py-2 bg-slate-50 border border-slate-200 rounded-xl text-slate-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      placeholder="10-digit mobile"
+                    />
+                    <PhonePasteButton onPaste={digits => setEditCustomerForm({ ...editCustomerForm, contact: digits })} />
+                  </div>
                 </div>
               </div>
 
@@ -4385,7 +4390,10 @@ export default function StaffDashboard() {
                     <div className="grid grid-cols-2 gap-2">
                       <input type="text" placeholder="Name" value={c.name || ''} onChange={e => { const nc = [...editCustomerForm.coordinators]; nc[i] = { ...nc[i], name: e.target.value }; setEditCustomerForm({ ...editCustomerForm, coordinators: nc }); }} className="px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-[11px]" />
                       <input type="text" placeholder="Designation" value={c.designation || ''} onChange={e => { const nc = [...editCustomerForm.coordinators]; nc[i] = { ...nc[i], designation: e.target.value }; setEditCustomerForm({ ...editCustomerForm, coordinators: nc }); }} className="px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-[11px]" />
-                      <input type="text" placeholder="Phone" maxLength={10} value={(c.phone || c.contactNumber || '').replace(/^\+91\s?/, '')} onChange={e => { const nc = [...editCustomerForm.coordinators]; nc[i] = { ...nc[i], phone: e.target.value.replace(/\D/g, ''), contactNumber: e.target.value.replace(/\D/g, '') }; setEditCustomerForm({ ...editCustomerForm, coordinators: nc }); }} className="px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-[11px]" />
+                      <div className="relative">
+                        <input type="text" placeholder="Phone" value={(c.phone || c.contactNumber || '').replace(/^\+91\s?/, '')} onChange={e => { const digits = cleanPhoneDigits(e.target.value); const nc = [...editCustomerForm.coordinators]; nc[i] = { ...nc[i], phone: digits, contactNumber: digits }; setEditCustomerForm({ ...editCustomerForm, coordinators: nc }); }} className="w-full pl-2.5 pr-7 py-1.5 bg-white border border-slate-200 rounded-lg text-[11px]" />
+                        <PhonePasteButton iconClassName="w-3 h-3" onPaste={digits => { const nc = [...editCustomerForm.coordinators]; nc[i] = { ...nc[i], phone: digits, contactNumber: digits }; setEditCustomerForm({ ...editCustomerForm, coordinators: nc }); }} />
+                      </div>
                       <input type="email" placeholder="Email" value={c.email || ''} onChange={e => { const nc = [...editCustomerForm.coordinators]; nc[i] = { ...nc[i], email: e.target.value }; setEditCustomerForm({ ...editCustomerForm, coordinators: nc }); }} className="px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-[11px]" />
                     </div>
                   </div>
@@ -4597,18 +4605,19 @@ export default function StaffDashboard() {
                         onChange={e => setNewCustomerForm({ ...newCustomerForm, authPerson: e.target.value })}
                         className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs"
                       />
-                      <input
-                        type="text"
-                        placeholder="Mobile Number *"
-                        maxLength={10}
-                        required={isNewCustomerMode}
-                        value={newCustomerForm.contact}
-                        onChange={e => {
-                          const val = e.target.value.replace(/\D/g, '');
-                          setNewCustomerForm({ ...newCustomerForm, contact: val });
-                        }}
-                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs"
-                      />
+                      <div className="relative">
+                        <input
+                          type="text"
+                          placeholder="Mobile Number *"
+                          required={isNewCustomerMode}
+                          value={newCustomerForm.contact}
+                          onChange={e => {
+                            setNewCustomerForm({ ...newCustomerForm, contact: cleanPhoneDigits(e.target.value) });
+                          }}
+                          className="w-full pl-3 pr-8 py-2 bg-white border border-slate-300 rounded-xl text-xs"
+                        />
+                        <PhonePasteButton onPaste={digits => setNewCustomerForm({ ...newCustomerForm, contact: digits })} />
+                      </div>
                     </div>
                     <div className="flex gap-1.5">
                       <input
@@ -4659,7 +4668,10 @@ export default function StaffDashboard() {
                           <div className="grid grid-cols-2 gap-2">
                             <input type="text" placeholder="Name" value={c.name} onChange={e => { const newC = [...newCustomerForm.contacts]; newC[i].name = e.target.value; setNewCustomerForm({ ...newCustomerForm, contacts: newC }); }} className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded-md text-[11px]" />
                             <input type="text" placeholder="Designation" value={c.designation} onChange={e => { const newC = [...newCustomerForm.contacts]; newC[i].designation = e.target.value; setNewCustomerForm({ ...newCustomerForm, contacts: newC }); }} className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded-md text-[11px]" />
-                            <input type="text" placeholder="Phone" maxLength={10} value={c.contactNumber} onChange={e => { const val = e.target.value.replace(/\D/g, ''); const newC = [...newCustomerForm.contacts]; newC[i].contactNumber = val; setNewCustomerForm({ ...newCustomerForm, contacts: newC }); }} className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded-md text-[11px]" />
+                            <div className="relative">
+                              <input type="text" placeholder="Phone" value={c.contactNumber} onChange={e => { const val = cleanPhoneDigits(e.target.value); const newC = [...newCustomerForm.contacts]; newC[i].contactNumber = val; setNewCustomerForm({ ...newCustomerForm, contacts: newC }); }} className="w-full pl-2 pr-7 py-1 bg-slate-50 border border-slate-200 rounded-md text-[11px]" />
+                              <PhonePasteButton iconClassName="w-3 h-3" onPaste={digits => { const newC = [...newCustomerForm.contacts]; newC[i].contactNumber = digits; setNewCustomerForm({ ...newCustomerForm, contacts: newC }); }} />
+                            </div>
                             <input type="email" placeholder="Email" value={c.email} onChange={e => { const newC = [...newCustomerForm.contacts]; newC[i].email = e.target.value; setNewCustomerForm({ ...newCustomerForm, contacts: newC }); }} className="w-full px-2 py-1 bg-slate-50 border border-slate-200 rounded-md text-[11px]" />
                           </div>
                         </div>

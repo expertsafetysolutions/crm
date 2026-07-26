@@ -24,7 +24,16 @@ const models = {
   Tag_Master: createModel('Tag_Master'),
   Field_Visits: createModel('Field_Visits'),
   Certificate_Type_Master: createModel('Certificate_Type_Master'),
-  Notification_Settings: createModel('Notification_Settings')
+  Notification_Settings: createModel('Notification_Settings'),
+  Quotation_Settings: createModel('Quotation_Settings'),
+  Item_Master: createModel('Item_Master'),
+  Quotation_Master: createModel('Quotation_Master'),
+  PI_Master: createModel('PI_Master'),
+  Sales_Invoice_Master: createModel('Sales_Invoice_Master'),
+  Inventory_Master: createModel('Inventory_Master'),
+  Stock_Transactions: createModel('Stock_Transactions'),
+  Counter_Master: createModel('Counter_Master'),
+  Media_Store: createModel('Media_Store')
 };
 
 class MongoService {
@@ -327,6 +336,112 @@ class MongoService {
     ).lean();
     if (result) { delete result._id; delete result.__v; }
     return result;
+  }
+
+  async getQuotationSettings(companyId = 'DEFAULT') {
+    await this.connect();
+    const Model = models['Quotation_Settings'];
+    const doc = await Model.findOne({ company_id: companyId }).lean();
+    if (doc) { delete doc._id; delete doc.__v; }
+    return doc || null;
+  }
+
+  async saveQuotationSettings(companyId = 'DEFAULT', settingsData) {
+    await this.connect();
+    const Model = models['Quotation_Settings'];
+    const payload = { ...settingsData, company_id: companyId };
+    const result = await Model.findOneAndUpdate(
+      { company_id: companyId },
+      { $set: payload },
+      { new: true, upsert: true, returnDocument: 'after' }
+    ).lean();
+    if (result) { delete result._id; delete result.__v; }
+    return result;
+  }
+
+  async getAllItems() { return this.getTab('Item_Master'); }
+  async getItemById(itemId) {
+    const items = await this.getAllItems();
+    return items.find(i => i.Item_ID === itemId) || null;
+  }
+
+  /**
+   * Media (product photos etc.) is stored as base64 in its own collection and served by
+   * GET /api/media/:id. These deliberately query Mongo directly instead of going through
+   * getTab() — that helper loads and caches an entire collection, which would pull every
+   * image blob into memory on any read.
+   */
+  async insertMedia(doc) {
+    const Model = models['Media_Store'];
+    await Model.create(doc);
+    return doc;
+  }
+
+  async getMediaById(mediaId) {
+    const Model = models['Media_Store'];
+    const found = await Model.findOne({ Media_ID: String(mediaId || '') }).lean();
+    if (found) { delete found._id; delete found.__v; }
+    return found || null;
+  }
+
+  async deleteMediaById(mediaId) {
+    const Model = models['Media_Store'];
+    const result = await Model.deleteOne({ Media_ID: String(mediaId || '') });
+    return result.deletedCount > 0;
+  }
+
+  async getAllQuotations() { return this.getTab('Quotation_Master'); }
+  async getQuotationById(quotationId) {
+    const quotes = await this.getAllQuotations();
+    return quotes.find(q => q.Quotation_ID === quotationId) || null;
+  }
+  async getQuotationByPortalGuid(guid) {
+    if (!guid) return null;
+    const quotes = await this.getAllQuotations();
+    const target = String(guid).trim().toLowerCase();
+    return quotes.find(q => String(q.Portal_Guid || '').toLowerCase() === target) || null;
+  }
+  // All revisions of one quotation share a Root_Quotation_ID (R0's own ID), so the whole
+  // version history is one filter rather than a recursive walk up Parent_Quotation_ID.
+  async getQuotationRevisions(rootId) {
+    const quotes = await this.getAllQuotations();
+    return quotes
+      .filter(q => (q.Root_Quotation_ID || q.Quotation_ID) === rootId)
+      .sort((a, b) => (a.Revision_No || 0) - (b.Revision_No || 0));
+  }
+
+  async getAllPIs() { return this.getTab('PI_Master'); }
+  async getPIById(piId) {
+    const pis = await this.getAllPIs();
+    return pis.find(p => p.PI_ID === piId) || null;
+  }
+  async getAllSalesInvoices() { return this.getTab('Sales_Invoice_Master'); }
+  async getSalesInvoiceById(invoiceId) {
+    const invoices = await this.getAllSalesInvoices();
+    return invoices.find(i => i.Invoice_ID === invoiceId) || null;
+  }
+
+  async getInventory() { return this.getTab('Inventory_Master'); }
+  async getInventoryByItem(itemId) {
+    const rows = await this.getInventory();
+    return rows.find(r => r.Item_ID === itemId) || null;
+  }
+  async getStockTransactions() { return this.getTab('Stock_Transactions'); }
+
+  // Atomic per-key sequence used for customer-facing document numbers (quotations, PIs,
+  // invoices). $inc inside findOneAndUpdate is the only safe way to hand out gap-free numbers
+  // here — computing "max existing + 1" from getTab() would race under concurrent requests and
+  // could issue the same number twice.
+  async getNextSequence(counterKey) {
+    await this.connect();
+    const Model = models['Counter_Master'];
+    const result = await Model.findOneAndUpdate(
+      { Counter_Key: counterKey },
+      { $inc: { Current_Value: 1 } },
+      { new: true, upsert: true, returnDocument: 'after' }
+    ).lean();
+    delete this.cache['Counter_Master'];
+    return result.Current_Value;
   }
 
   // Read-modify-write since updateRow only supports $set (no array-push primitive) — dedupes by

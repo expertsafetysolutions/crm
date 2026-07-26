@@ -10,7 +10,16 @@ const SALES_STAGES = [
   'Certificate',
   'Certification',
   'Payment Follow-up',
-  'Completed'
+  'Completed',
+  // Quotation-engine milestones. These are only ever reached by passing an explicit `targetStage`
+  // (from quotationEngine / conversionService), never by the switch below — so the legacy linear
+  // Sales/Production hand-off path is unaffected. They must be listed here regardless, because
+  // department attribution is decided by membership in this array (see below).
+  'Draft-Quotation',
+  'Quotation FLP',
+  'PI',
+  'Sales Invoice',
+  'Order Closed'
 ];
 
 const PRODUCTION_STAGES = [
@@ -100,8 +109,10 @@ async function advanceTaskStage(taskId, actionPayload) {
     nextDepartment = 'Sales';
   }
 
-  if (nextStage === 'Completed') {
-    nextStatus = 'Completed';
+  // 'Order Closed' is the quotation pipeline's terminal stage and must settle the task the same
+  // way 'Completed' does, otherwise a closed order would sit at Status 'In Progress' forever.
+  if (nextStage === 'Completed' || nextStage === 'Order Closed') {
+    nextStatus = actionPayload.status || 'Completed';
   }
 
   // Update task in Google Sheets
@@ -128,9 +139,13 @@ async function advanceTaskStage(taskId, actionPayload) {
   // AUTOMATION: If task completed AND is a Fire Extinguisher Service or Recurring task,
   // generate a new task for "Recurring Inquiry" scheduled exactly 11 months from completion date.
   let generatedRecurringTask = null;
-  if (nextStatus === 'Completed') {
-    const isExtinguisher = task.Description.toLowerCase().includes('extinguisher') ||
-                           task.Description.toLowerCase().includes('refill') ||
+  // A lost order must not spawn an 11-month recurring inquiry — Module F's annual-prospect job
+  // handles unconverted leads instead, off the quotation record rather than the task.
+  const isLostClose = String(nextStatus).toLowerCase().includes('lost');
+  if (nextStatus === 'Completed' && !isLostClose) {
+    const description = String(task.Description || '').toLowerCase();
+    const isExtinguisher = description.includes('extinguisher') ||
+                           description.includes('refill') ||
                            task.Type === 'Recurring';
     if (isExtinguisher) {
       const completionDate = new Date();

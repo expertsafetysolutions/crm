@@ -1,5 +1,13 @@
-const CACHE_NAME = 'expert-safety-pwa-v4';
+// Bumped to v5: v4 caches may hold stale Vite dev-module URLs that now 504. The activate handler
+// deletes every cache whose name isn't current, so raising this evicts the poisoned entries.
+const CACHE_NAME = 'expert-safety-pwa-v5';
 const MAX_CACHE_ENTRIES = 80;
+
+// Uploaded media lives in its own cache so large immutable images can't evict dynamic API
+// responses, and so it survives an app-shell version bump (the URLs are content-addressed).
+const MEDIA_CACHE_NAME = 'expert-safety-media-v1';
+const MAX_MEDIA_CACHE_ENTRIES = 60;
+
 const STATIC_ASSETS = [
   '/',
   '/index.html',
@@ -32,7 +40,7 @@ self.addEventListener('activate', (event) => {
     caches.keys().then((cacheNames) => {
       return Promise.all(
         cacheNames
-          .filter((name) => name !== CACHE_NAME)
+          .filter((name) => name !== CACHE_NAME && name !== MEDIA_CACHE_NAME)
           .map((name) => caches.delete(name))
       );
     })
@@ -40,8 +48,43 @@ self.addEventListener('activate', (event) => {
   self.clients.claim();
 });
 
+// Vite's dev server rewrites module URLs whenever it re-optimises dependencies. Caching those
+// responses makes the SW serve stale module URLs that no longer exist, which surfaces as
+// "504 (Outdated Optimize Dep)" plus a blank page until the cache is cleared by hand. Dev traffic
+// is therefore passed straight through, untouched. Production builds emit content-hashed
+// /assets/* filenames and are unaffected.
+const DEV_PASSTHROUGH = /^\/(@vite|@react-refresh|@id|@fs|src\/|node_modules\/)/;
+
+function isDevRequest(url) {
+  return DEV_PASSTHROUGH.test(url.pathname) || url.search.includes('import&');
+}
+
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
+
+  // Never intercept cross-origin requests or Vite's dev module graph.
+  if (url.origin !== self.location.origin || isDevRequest(url)) return;
+
+  // Uploaded media (/api/media/:id) is immutable — a re-upload always mints a new ID — so it is
+  // served cache-first rather than network-first. This keeps product photos available offline and
+  // avoids a revalidation round-trip per image on every list render.
+  if (url.pathname.startsWith('/api/media/')) {
+    if (event.request.method === 'GET') {
+      event.respondWith(
+        caches.match(event.request).then((cached) => cached || fetch(event.request).then((response) => {
+          if (response.ok) {
+            const resClone = response.clone();
+            caches.open(MEDIA_CACHE_NAME).then((cache) => {
+              cache.put(event.request, resClone);
+              trimCache(MEDIA_CACHE_NAME, MAX_MEDIA_CACHE_ENTRIES);
+            });
+          }
+          return response;
+        }))
+      );
+    }
+    return;
+  }
 
   // Do not intercept API POST/PUT/DELETE requests in Service Worker fetch handler
   // API GET requests can use Network-First strategy with cache fallback
@@ -72,8 +115,12 @@ self.addEventListener('fetch', (event) => {
     caches.match(event.request).then((cachedResponse) => {
       const fetchPromise = fetch(event.request).then((networkResponse) => {
         if (networkResponse.ok) {
+          // Clone SYNCHRONOUSLY, before the response is returned and its body consumed by the
+          // page. Cloning inside the caches.open() callback runs a microtask too late and throws
+          // "Failed to execute 'clone' on 'Response': Response body is already used".
+          const resClone = networkResponse.clone();
           caches.open(CACHE_NAME).then((cache) => {
-            cache.put(event.request, networkResponse.clone());
+            cache.put(event.request, resClone);
             trimCache(CACHE_NAME, MAX_CACHE_ENTRIES);
           });
         }

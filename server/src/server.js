@@ -22,6 +22,26 @@ const sheetsService = require('./services/sheetsService');
 // Serve static assets (Header, Footer, Stamp images) from the root assets directory
 app.use('/assets', express.static(path.join(__dirname, '../../assets')));
 
+// Serves uploaded media (product photos) stored in Mongo as base64. Deliberately unauthenticated,
+// like /assets above: these URLs are consumed by plain <img> tags — including inside html2canvas
+// PDF captures and the public quotation portal — which cannot send an Authorization header. The
+// Media_ID is a random unguessable token, so the URL itself is the capability.
+app.get('/api/media/:id', async (req, res) => {
+  try {
+    const media = await sheetsService.getMediaById(req.params.id);
+    if (!media || !media.Data) return res.status(404).json({ error: 'Media not found' });
+
+    const buffer = Buffer.from(media.Data, 'base64');
+    res.set('Content-Type', media.Mime_Type || 'image/jpeg');
+    // Immutable: a new upload always mints a new Media_ID, so a cached copy can never go stale.
+    res.set('Cache-Control', 'public, max-age=31536000, immutable');
+    res.send(buffer);
+  } catch (err) {
+    console.error('GET /api/media error:', err);
+    res.status(500).json({ error: 'Failed to load media' });
+  }
+});
+
 // Public Certificate Verification API (No Auth Required for QR Code Verification)
 app.get('/api/verify-certificate/:guid', async (req, res) => {
   try {
@@ -400,11 +420,103 @@ app.get('/api/verify-certificate/:guid', async (req, res) => {
   }
 });
 
-// Vercel Cron target — must be registered before apiRouter (which requires a staff JWT on
+// Public Customer Quotation Portal (Module C) — no auth by design: the link is opened cold from an
+// email/WhatsApp message by a customer who has no login. The unguessable Portal_Guid in the URL is
+// the credential, same model as the certificate verification link above.
+app.get('/api/quote-portal/:guid', async (req, res) => {
+  const quotePortalView = require('./services/quotePortalView');
+  try {
+    const quotation = await sheetsService.getQuotationByPortalGuid(req.params.guid);
+    if (!quotation) {
+      return res.status(404).send(quotePortalView.renderPortalErrorPage({
+        code: 404,
+        title: 'Quotation Not Found',
+        message: 'This link is invalid or has been withdrawn. Please contact us for an up-to-date quotation.'
+      }));
+    }
+    // Superseded revisions must not stay actionable, or a customer could accept stale pricing.
+    if (quotation.Status === 'Revised') {
+      return res.status(410).send(quotePortalView.renderPortalErrorPage({
+        code: 410,
+        title: 'A Newer Version Is Available',
+        message: 'This quotation has been revised. Please refer to the latest version we sent you, or contact us for a fresh copy.'
+      }));
+    }
+
+    const quotationEngine = require('./services/quotationEngine');
+    const settings = await quotationEngine.getSettings();
+
+    // Best-effort view tracking — a write failure must never block the customer from reading.
+    sheetsService.updateRow('Quotation_Master', 'Quotation_ID', quotation.Quotation_ID, {
+      Portal_Last_Viewed_At: new Date().toISOString(),
+      Portal_View_Count: (Number(quotation.Portal_View_Count) || 0) + 1
+    }).catch(e => console.error('Portal view tracking failed:', e.message));
+
+    res.set('Cache-Control', 'no-store');
+    res.send(quotePortalView.renderQuotePortalPage({
+      quotation,
+      settings,
+      sellerName: settings.seller_profile?.legal_name || 'Expert Safety Solutions'
+    }));
+  } catch (err) {
+    console.error('Quote portal render error:', err);
+    res.status(500).send(quotePortalView.renderPortalErrorPage({
+      code: 500,
+      title: 'Something Went Wrong',
+      message: 'We could not load this quotation right now. Please try again shortly.'
+    }));
+  }
+});
+
+app.post('/api/quote-portal/:guid/action', async (req, res) => {
+  try {
+    const quotePortalView = require('./services/quotePortalView');
+    const quotationEngine = require('./services/quotationEngine');
+
+    const quotation = await sheetsService.getQuotationByPortalGuid(req.params.guid);
+    if (!quotation) return res.status(404).json({ error: 'This quotation link is no longer valid.' });
+    if (!quotePortalView.isActionable(quotation.Status)) {
+      return res.status(409).json({ error: 'This quotation is no longer open for changes. Please contact us directly.' });
+    }
+
+    const settings = await quotationEngine.getSettings();
+    const requested = String(req.body.action || '');
+    // Only actions the Admin has enabled in settings are honoured, regardless of what the client
+    // posts — the rendered buttons are not the security boundary.
+    const allowed = (settings.customer_actions || []).filter(a => a.enabled !== false).map(a => a.action_key);
+    if (!allowed.includes(requested)) {
+      return res.status(400).json({ error: 'That action is not available on this quotation.' });
+    }
+
+    const result = await quotationEngine.applyCustomerAction(quotation.Quotation_ID, requested, {
+      note: req.body.note,
+      requestedDate: req.body.requestedDate,
+      autoCreateRevision: requested === 'REQUEST_REVISION'
+    });
+
+    const messages = {
+      ACCEPT: 'Thank you! Your acceptance has been recorded and our team has been notified.',
+      REQUEST_REVISION: 'Thank you — we have received your revision request and will send an updated quotation shortly.',
+      CHANGE_REQUIREMENT: 'Thank you — your updated requirement has been shared with our team.',
+      REQUEST_REMINDER_DATE: 'Noted. We will follow up with you on the date you selected.'
+    };
+
+    res.json({ success: true, status: result.quotation?.Status, message: messages[requested] || 'Your response has been recorded.' });
+  } catch (err) {
+    console.error('Quote portal action error:', err);
+    res.status(500).json({ error: 'We could not record your response. Please try again.' });
+  }
+});
+
+// Vercel Cron targets — must be registered before apiRouter (which requires a staff JWT on
 // everything) since Vercel authenticates cron requests with `Authorization: Bearer $CRON_SECRET`,
-// not a login token. See vercel.json's "crons" entry.
+// not a login token. See vercel.json's "crons" entries.
+function isAuthorizedCron(req) {
+  return !process.env.CRON_SECRET || req.headers.authorization === `Bearer ${process.env.CRON_SECRET}`;
+}
+
 app.get('/api/cron/refilling-due-check', async (req, res) => {
-  if (process.env.CRON_SECRET && req.headers.authorization !== `Bearer ${process.env.CRON_SECRET}`) {
+  if (!isAuthorizedCron(req)) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
   try {
@@ -414,6 +526,47 @@ app.get('/api/cron/refilling-due-check', async (req, res) => {
   } catch (err) {
     console.error('Refilling-due cron job error:', err);
     res.status(500).json({ error: 'Refilling-due check failed' });
+  }
+});
+
+// Module D: fans out follow-up reminders for every quotation due today, and expires stale ones.
+app.get('/api/cron/quotation-followup-check', async (req, res) => {
+  if (!isAuthorizedCron(req)) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const quotationCronService = require('./services/quotationCronService');
+    const quotationEngine = require('./services/quotationEngine');
+    const expired = await quotationEngine.expireStaleQuotations();
+    const reminders = await quotationCronService.runQuotationFollowUpReminders();
+    res.json({ success: true, reminders, expired });
+  } catch (err) {
+    console.error('Quotation follow-up cron job error:', err);
+    res.status(500).json({ error: 'Quotation follow-up check failed' });
+  }
+});
+
+// Module G: payment-due reminders at each configured offset around the invoice due date.
+app.get('/api/cron/payment-due-reminder-check', async (req, res) => {
+  if (!isAuthorizedCron(req)) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const quotationCronService = require('./services/quotationCronService');
+    const result = await quotationCronService.runPaymentDueReminders();
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('Payment-due cron job error:', err);
+    res.status(500).json({ error: 'Payment-due check failed' });
+  }
+});
+
+// Module F: generates annual renewal leads from quotations that never converted.
+app.get('/api/cron/annual-prospect-check', async (req, res) => {
+  if (!isAuthorizedCron(req)) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const quotationCronService = require('./services/quotationCronService');
+    const result = await quotationCronService.generateAnnualProspectTasks();
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('Annual-prospect cron job error:', err);
+    res.status(500).json({ error: 'Annual-prospect check failed' });
   }
 });
 

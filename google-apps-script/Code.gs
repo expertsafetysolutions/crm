@@ -1,8 +1,10 @@
 /**
- * Expert Safety Solutions — PDF intake Web App.
+ * Expert Safety Solutions — document intake Web App.
  *
- * Receives a base64-encoded PDF (Certificate or Service Report) posted from the CRM and
- * saves it into the matching Google Drive folder, creating the folders on first run.
+ * Receives a base64-encoded file posted from the CRM — a PDF (Certificate or Service Report)
+ * or a product image (Product Photo) — and saves it into the matching Google Drive folder,
+ * creating the folders on first run. Product photos are additionally shared link-readable so
+ * the CRM can render them through Drive's thumbnail endpoint.
  *
  * SETUP
  * 1. Open script.google.com, open the project behind your existing Web App exec URL
@@ -16,9 +18,11 @@
  *                                                no Google session, so DriveApp would have
  *                                                no permissions under that setting]
  *      "Who has access" → Anyone
- * 5. First real POST from the app will create "Certificate" and "Service Report" folders
- *    in the Apps Script account's My Drive root — move them wherever you like afterwards,
- *    the script finds them by name on every run regardless of location.
+ * 5. Folders "Certificate", "Service Report" and "Product Photos" live under
+ *    "Expert Certificate & Service Report" in the sales.expertsafety@gmail.com Drive. They are
+ *    looked up by name anywhere in that Drive (created at the root only if no match exists), so
+ *    they can be moved freely — but renaming one breaks the match and the script will silently
+ *    create a new empty folder at the root instead. Keep the names exactly as spelled above.
  *
  * DEBUGGING
  * Every run writes to the Executions log (left sidebar, clock icon). Click any doPost row
@@ -30,6 +34,14 @@
 
 var CERTIFICATE_FOLDER_NAME = 'Certificate';
 var SERVICE_REPORT_FOLDER_NAME = 'Service Report';
+var PRODUCT_PHOTO_FOLDER_NAME = 'Product Photos';
+
+/** documentType (as sent by the CRM) → Drive folder name. */
+var FOLDER_BY_DOCUMENT_TYPE = {
+  'Certificate': CERTIFICATE_FOLDER_NAME,
+  'Service Report': SERVICE_REPORT_FOLDER_NAME,
+  'Product Photo': PRODUCT_PHOTO_FOLDER_NAME
+};
 
 function doPost(e) {
   try {
@@ -43,21 +55,22 @@ function doPost(e) {
     console.log('Raw body length: %s chars', e.postData.contents.length);
 
     var data = JSON.parse(e.postData.contents);
-    var pdfBase64 = data.pdfBase64;
-    var fileName = data.fileName || ('Document-' + new Date().getTime() + '.pdf');
+    // Images post imageBase64, PDFs post pdfBase64 — the image helper sends both for
+    // compatibility with older script revisions, so either key is accepted here.
+    var fileBase64 = data.pdfBase64 || data.imageBase64;
+    var mimeType = data.mimeType || 'application/pdf';
+    var fileName = data.fileName || ('Document-' + new Date().getTime());
     var documentType = data.documentType || '';
 
-    console.log('Parsed fields — fileName: %s, documentType: %s, pdfBase64 length: %s',
-      fileName, documentType, pdfBase64 ? pdfBase64.length : 0);
+    console.log('Parsed fields — fileName: %s, documentType: %s, mimeType: %s, base64 length: %s',
+      fileName, documentType, mimeType, fileBase64 ? fileBase64.length : 0);
 
-    if (!pdfBase64) {
-      console.log('Missing pdfBase64 field — aborting.');
-      return jsonResponse({ success: false, error: 'Missing pdfBase64 field' });
+    if (!fileBase64) {
+      console.log('Missing file data — aborting.');
+      return jsonResponse({ success: false, error: 'Missing pdfBase64/imageBase64 field' });
     }
 
-    var folderName = (documentType === 'Certificate')
-      ? CERTIFICATE_FOLDER_NAME
-      : (documentType === 'Service Report' ? SERVICE_REPORT_FOLDER_NAME : null);
+    var folderName = FOLDER_BY_DOCUMENT_TYPE[documentType] || null;
 
     if (!folderName) {
       console.log('Unrecognized documentType: "%s" — aborting.', documentType);
@@ -68,12 +81,23 @@ function doPost(e) {
     var folder = getOrCreateFolder(folderName);
     console.log('Folder resolved. ID: %s, URL: %s', folder.getId(), folder.getUrl());
 
-    var bytes = Utilities.base64Decode(pdfBase64);
-    console.log('Decoded PDF bytes: %s', bytes.length);
+    var bytes = Utilities.base64Decode(fileBase64);
+    console.log('Decoded bytes: %s', bytes.length);
 
-    var blob = Utilities.newBlob(bytes, data.mimeType || 'application/pdf', fileName);
+    var blob = Utilities.newBlob(bytes, mimeType, fileName);
     var file = folder.createFile(blob);
     console.log('File created. ID: %s, URL: %s', file.getId(), file.getUrl());
+
+    // Product photos are rendered in <img> tags via the Drive thumbnail endpoint, which only
+    // serves bytes for files readable without a Google session — so grant link access.
+    if (documentType === 'Product Photo') {
+      try {
+        file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+        console.log('Sharing set to anyone-with-link for %s', file.getId());
+      } catch (shareErr) {
+        console.warn('Could not set sharing on %s: %s', file.getId(), shareErr.message);
+      }
+    }
 
     return jsonResponse({
       success: true,
@@ -87,7 +111,10 @@ function doPost(e) {
   }
 }
 
-/** Finds a top-level "My Drive" folder by name, creating it if this is the first upload of that type. */
+/**
+ * Finds a folder by name anywhere in the executing account's Drive (getFoldersByName is not
+ * scoped to the root), creating it at the root only if no folder with that name exists.
+ */
 function getOrCreateFolder(name) {
   var folders = DriveApp.getFoldersByName(name);
   if (folders.hasNext()) {

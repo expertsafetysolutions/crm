@@ -20,6 +20,18 @@
     {
       "path": "/api/cron/refilling-due-check",
       "schedule": "0 3 * * *"
+    },
+    {
+      "path": "/api/cron/quotation-followup-check",
+      "schedule": "30 3 * * *"
+    },
+    {
+      "path": "/api/cron/payment-due-reminder-check",
+      "schedule": "0 4 * * *"
+    },
+    {
+      "path": "/api/cron/annual-prospect-check",
+      "schedule": "30 4 * * *"
     }
   ]
 }

@@ -1,0 +1,470 @@
+import React, { useRef, useLayoutEffect, useState, useImperativeHandle } from 'react';
+import { QRCodeCanvas } from 'qrcode.react';
+import { formatMoney, formatDate, amountInWords, buildUpiUri, isUpiDeepLink, extractUpiVpa } from '../utils/quotationUtils';
+
+/**
+ * Print/PDF layout for a quotation, proforma invoice or sales invoice.
+ *
+ * Branding deliberately mirrors the Certificate module exactly — double amber border, MSME/FSAI
+ * badges, centred header logo, 8%-opacity centre watermark, 80x80 stamp slot above the signature
+ * line, footer image — so every document the company issues looks like one family. Orientation is
+ * A4 PORTRAIT (794x1123 at 96dpi) rather than the certificate's landscape, because tax invoices
+ * are conventionally portrait and long item lists paginate better that way.
+ *
+ * html2canvas constraints preserved from the certificate implementation:
+ *  - fixed-aspect boxes with max-width/max-height instead of CSS object-fit, which html2canvas
+ *    ignores (a round seal would otherwise be stretched into an ellipse);
+ *  - explicit px sizing rather than relative units, so the capture matches the on-screen preview.
+ */
+
+const A4_PORTRAIT_WIDTH = 794;   // 210mm @ 96dpi
+const A4_PORTRAIT_HEIGHT = 1123; // 297mm @ 96dpi
+
+const DOC_TITLES = {
+  QUOTATION: 'QUOTATION',
+  PI: 'PROFORMA INVOICE',
+  INVOICE: 'TAX INVOICE'
+};
+
+/**
+ * Fixed A4 sheet that guarantees nothing escapes the printable area.
+ *
+ * Width/height are hard-pinned so the capture matches a real page. Rather than clipping a document
+ * whose items overflow, the inner block is measured and uniformly scaled down to fit — a long
+ * quotation prints smaller but complete, which is preferable to a silently truncated tax document.
+ * Scaling only ever shrinks (never enlarges), so a normal one-page document renders at 1:1.
+ *
+ * Declared ABOVE QuotationPdfTemplate on purpose: it is referenced in that component's JSX, and a
+ * `const` arrow component is not hoisted — defining it below throws a ReferenceError on render.
+ */
+const PageFrame = React.forwardRef(({ children }, ref) => {
+  const outerRef = useRef(null);
+  const innerRef = useRef(null);
+  const [scale, setScale] = useState(1);
+
+  // The forwarded ref must resolve to the fixed-size outer sheet: that is the node html2canvas
+  // captures, and it is what keeps the exported bitmap exactly A4-shaped.
+  useImperativeHandle(ref, () => outerRef.current);
+
+  useLayoutEffect(() => {
+    const el = innerRef.current;
+    if (!el) return;
+
+    const measure = () => {
+      // scrollHeight is read while unscaled, so compare against the natural height.
+      const natural = el.scrollHeight;
+      const next = natural > A4_PORTRAIT_HEIGHT
+        ? Math.max(0.55, A4_PORTRAIT_HEIGHT / natural)
+        : 1;
+      setScale(prev => (Math.abs(prev - next) > 0.002 ? next : prev));
+    };
+
+    measure();
+    // Late-loading logos and QR canvases change the height after first paint.
+    if (typeof ResizeObserver === 'undefined') return undefined;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [children]);
+
+  return (
+    <div
+      ref={outerRef}
+      style={{
+        width: `${A4_PORTRAIT_WIDTH}px`,
+        height: `${A4_PORTRAIT_HEIGHT}px`,
+        overflow: 'hidden',
+        backgroundColor: '#ffffff',
+        boxSizing: 'border-box',
+        isolation: 'isolate'
+      }}
+      className="text-slate-900"
+    >
+      <div
+        ref={innerRef}
+        style={{
+          width: `${A4_PORTRAIT_WIDTH}px`,
+          minHeight: `${A4_PORTRAIT_HEIGHT}px`,
+          boxSizing: 'border-box',
+          transform: scale < 1 ? `scale(${scale})` : undefined,
+          transformOrigin: 'top left'
+        }}
+        className="flex flex-col"
+      >
+        {children}
+      </div>
+    </div>
+  );
+});
+
+PageFrame.displayName = 'PageFrame';
+
+const QuotationPdfTemplate = React.forwardRef(({
+  doc,
+  docType = 'QUOTATION',
+  settings,
+  branding = {},
+  paymentTerm,
+  tncItems = []
+}, ref) => {
+  if (!doc) return null;
+
+  const isIgst = doc.GST_Type === 'IGST';
+  const seller = settings?.seller_profile || {};
+  const bank = settings?.banking_details || {};
+  const overlay = settings?.signature_stamp_overlay || {};
+
+  // The photo column only appears when at least one line actually has an image, so a
+  // service-only quotation isn't left with a column of dashes.
+  const showPhotos = overlay.show_product_photos !== false
+    && (doc.Line_Items || []).some(l => l.Photo_URL);
+
+  const docNo = doc.Quote_No_Display || doc.PI_No || doc.Invoice_No || '';
+  const docDate = doc.Created_At || doc.PI_Date || doc.Invoice_Date || '';
+
+  // Admins sometimes paste a whole scanner deep-link ("upi://pay?pa=…&sign=…", ~200 chars) into the
+  // UPI ID field. Encode that verbatim so the QR still scans, but never print it as text — it is an
+  // unbreakable token that blows the bank card past the page edge.
+  const rawUpi = String(bank.upi_id || '').trim();
+  const upiIsDeepLink = isUpiDeepLink(rawUpi);
+  const upiVpa = upiIsDeepLink ? extractUpiVpa(rawUpi) : rawUpi;
+
+  const upiUri = upiIsDeepLink
+    ? rawUpi
+    : buildUpiUri({
+      upiId: rawUpi,
+      payeeName: seller.legal_name,
+      amount: doc.Grand_Total,
+      note: docNo
+    });
+
+  const cell = 'border border-slate-400 px-1.5 py-1 align-top';
+
+  return (
+    <PageFrame ref={ref}>
+      {/* Double amber border, matching the certificate frame.
+          The frame is the flex column that owns the page: content grows from the top, the
+          signature/footer block is pinned to the bottom by a flexible spacer between them.
+          It must NOT repeat the parent's minHeight — nesting two min-heights of a full page
+          inside a border-box parent overflows the sheet and pushes the footer off the page. */}
+      <div
+        className="flex flex-col border-4 border-double border-amber-800 p-4 flex-1 bg-white relative"
+        style={{ boxSizing: 'border-box' }}
+      >
+        {overlay.show_watermark !== false && (
+          <img
+            src={branding.watermark || '/assets/Watermark Logo.jpg'}
+            onError={e => { e.target.onerror = null; e.target.src = '/assets/watermark-logo.jpg'; }}
+            alt=""
+            aria-hidden="true"
+            className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-2/5 object-contain pointer-events-none select-none"
+            style={{ opacity: 0.08, zIndex: 0 }}
+          />
+        )}
+
+        {/* ---------- HEADER + BODY ----------
+            One flow region that sizes to its content. Everything that must sit directly under
+            the previous block lives here; the spacer below absorbs the leftover page height. */}
+        <div className="relative" style={{ zIndex: 1 }}>
+          <div className="flex items-center justify-between border-b-2 border-amber-700 pb-2 mb-2">
+            <div className="flex flex-col gap-1 shrink-0">
+              <div className="bg-amber-100 text-amber-950 px-2 py-0.5 rounded font-black text-[8px] border border-amber-300 text-center">
+                MSME REGISTERED
+              </div>
+              <div className="bg-red-100 text-red-950 px-2 py-0.5 rounded font-black text-[8px] border border-red-300 text-center">
+                FSAI MEMBER
+              </div>
+            </div>
+
+            <div className="text-center px-2">
+              <img
+                src={branding.header || '/assets/header_logo.png'}
+                onError={e => { e.target.onerror = null; e.target.src = '/assets/header.jpg'; }}
+                alt="Company Header"
+                className="h-11 w-auto max-w-full object-contain mx-auto"
+              />
+            </div>
+
+            <div className="text-right text-[8.5px] font-bold text-slate-700 space-y-0.5 shrink-0">
+              <div><span className="text-amber-950 font-black">Ref No:</span> {docNo}</div>
+              <div><span className="text-amber-950 font-black">Date:</span> {formatDate(docDate)}</div>
+              {seller.gstin && (
+                <div><span className="text-amber-950 font-black">GSTIN:</span> {seller.gstin}</div>
+              )}
+            </div>
+          </div>
+
+          {/* Document title band */}
+          <div className="text-center mb-2">
+            <div className="inline-block border-2 border-amber-800 px-6 py-0.5 bg-amber-50">
+              <h1 className="text-[13px] font-black tracking-[0.2em] text-amber-950">
+                {DOC_TITLES[docType] || 'QUOTATION'}
+              </h1>
+            </div>
+          </div>
+
+          {/* ---------- PARTIES ---------- */}
+          <div className="flex gap-2 mb-2 text-[9px]">
+            <div className="flex-1 border border-slate-400" style={{ minWidth: 0 }}>
+              <div className="bg-amber-50 px-1.5 py-0.5 font-black uppercase text-[8px] tracking-wide border-b border-slate-400 text-amber-950">
+                Bill To
+              </div>
+              {/* A long email or unspaced address must wrap rather than widen the column. */}
+              <div className="px-1.5 py-1 leading-snug" style={{ overflowWrap: 'anywhere' }}>
+                <div className="font-black text-[10px]">{doc.Customer_Name_Snapshot}</div>
+                {doc.Customer_Auth_Person_Snapshot && (
+                  <div><span className="text-slate-500">Attn:</span> {doc.Customer_Auth_Person_Snapshot}</div>
+                )}
+                <div className="whitespace-pre-line">{doc.Customer_Address_Snapshot}</div>
+                {doc.Customer_GSTIN_Snapshot && (
+                  <div><span className="font-bold">GSTIN:</span> {doc.Customer_GSTIN_Snapshot}</div>
+                )}
+                {doc.Customer_Contact_Snapshot && (
+                  <div><span className="font-bold">Mob:</span> {doc.Customer_Contact_Snapshot}</div>
+                )}
+                {doc.Customer_Email_Snapshot && (
+                  <div><span className="font-bold">Email:</span> {doc.Customer_Email_Snapshot}</div>
+                )}
+              </div>
+            </div>
+
+            <div style={{ width: '250px' }} className="border border-slate-400 shrink-0">
+              <div className="bg-amber-50 px-1.5 py-0.5 font-black uppercase text-[8px] tracking-wide border-b border-slate-400 text-amber-950">
+                Details
+              </div>
+              <table className="w-full">
+                <tbody>
+                  <Meta k="Document No." v={docNo} bold />
+                  <Meta k="Date" v={formatDate(docDate)} />
+                  {doc.Revision_No > 0 && <Meta k="Revision" v={`R${doc.Revision_No}`} />}
+                  {docType === 'QUOTATION' && doc.Expiry_Date && <Meta k="Valid Until" v={formatDate(doc.Expiry_Date)} />}
+                  {docType !== 'QUOTATION' && doc.Due_Date && <Meta k="Due Date" v={formatDate(doc.Due_Date)} />}
+                  <Meta k="Supply Type" v={isIgst ? 'Inter-State' : 'Intra-State'} />
+                  {paymentTerm && <Meta k="Payment Terms" v={paymentTerm.label} />}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {doc.Subject && (
+            <div className="mb-1.5 text-[9px] border border-slate-300 px-1.5 py-1 bg-slate-50">
+              <span className="font-black">Subject: </span>{doc.Subject}
+            </div>
+          )}
+
+          {/* ---------- LINE ITEMS ---------- */}
+          {/* table-fixed honours the explicit column widths below; with auto layout a long product
+              name overrides them and stretches the table wider than the page. */}
+          <table className="w-full text-[8.5px] border-collapse" style={{ tableLayout: 'fixed' }}>
+            <thead>
+              <tr className="bg-amber-50 text-amber-950">
+                <th className={`${cell} text-center`} style={{ width: '26px' }}>#</th>
+                {showPhotos && <th className={`${cell} text-center`} style={{ width: '52px' }}>Photo</th>}
+                <th className={`${cell} text-left`}>Description of Goods / Services</th>
+                <th className={`${cell} text-center`} style={{ width: '58px' }}>HSN</th>
+                <th className={`${cell} text-right`} style={{ width: '40px' }}>Qty</th>
+                <th className={`${cell} text-center`} style={{ width: '34px' }}>Unit</th>
+                <th className={`${cell} text-right`} style={{ width: '62px' }}>Rate</th>
+                <th className={`${cell} text-right`} style={{ width: '54px' }}>Disc.</th>
+                <th className={`${cell} text-right`} style={{ width: '66px' }}>Taxable</th>
+                <th className={`${cell} text-center`} style={{ width: '34px' }}>GST</th>
+                <th className={`${cell} text-right`} style={{ width: '72px' }}>Amount</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(doc.Line_Items || []).map((l, i) => (
+                <tr key={i}>
+                  <td className={`${cell} text-center`}>{i + 1}</td>
+                  {showPhotos && (
+                    <td className={`${cell} text-center`}>
+                      {/* Loaded eagerly here: html2canvas captures a static DOM snapshot, so a
+                          lazy image would rasterise as a blank box in the exported PDF. */}
+                      {l.Photo_URL ? (
+                        <img
+                          src={l.Photo_URL}
+                          alt=""
+                          crossOrigin="anonymous"
+                          referrerPolicy="no-referrer"
+                          style={{ width: '44px', height: '44px', objectFit: 'cover', display: 'block', margin: '0 auto' }}
+                        />
+                      ) : (
+                        <span className="text-slate-300">—</span>
+                      )}
+                    </td>
+                  )}
+                  <td className={cell} style={{ overflowWrap: 'anywhere' }}>
+                    <div className="font-bold">{l.Item_Name}</div>
+                    {(l.Long_Description || l.Description) && (
+                      <div className="text-slate-500 text-[7.5px] leading-snug whitespace-pre-line">
+                        {l.Long_Description || l.Description}
+                      </div>
+                    )}
+                  </td>
+                  <td className={`${cell} text-center`}>{l.HSN_Code || '-'}</td>
+                  <td className={`${cell} text-right`}>{Number(l.Qty) || 0}</td>
+                  <td className={`${cell} text-center`}>{l.Unit || 'Nos'}</td>
+                  <td className={`${cell} text-right`}>{formatMoney(l.Rate, false)}</td>
+                  <td className={`${cell} text-right`}>{Number(l.Discount_Amt) > 0 ? formatMoney(l.Discount_Amt, false) : '-'}</td>
+                  <td className={`${cell} text-right`}>{formatMoney(l.Taxable_Value, false)}</td>
+                  <td className={`${cell} text-center`}>{Number(l.GST_Rate) || 0}%</td>
+                  <td className={`${cell} text-right font-bold`}>{formatMoney(l.Line_Total, false)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          {/* ---------- TOTALS ----------
+              items-start keeps the bank-details card at its natural height instead of stretching
+              it to match the totals table beside it. */}
+          <div className="flex gap-2 mt-2 text-[9px] items-start">
+            {/* minWidth:0 lets this column shrink; a flex item defaults to min-width:auto and would
+                otherwise refuse to go narrower than its longest unbreakable child. */}
+            <div className="flex-1" style={{ minWidth: 0 }}>
+              <div className="border border-slate-400 px-1.5 py-1 mb-1.5">
+                <span className="font-black">Amount in words: </span>
+                <span className="italic">{amountInWords(doc.Grand_Total)}</span>
+              </div>
+
+              {(bank.account_no || rawUpi) && (
+                <div className="border border-slate-400">
+                  <div className="bg-amber-50 px-1.5 py-0.5 font-black uppercase text-[8px] border-b border-slate-400 text-amber-950">
+                    Bank Details
+                  </div>
+                  <div className="flex">
+                    <div className="px-1.5 py-1 flex-1 leading-snug text-[8.5px]"
+                      style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
+                      {bank.account_name && <div><span className="text-slate-500">Name:</span> <b>{bank.account_name}</b></div>}
+                      {bank.bank_name && <div><span className="text-slate-500">Bank:</span> <b>{bank.bank_name}</b></div>}
+                      {bank.account_no && <div><span className="text-slate-500">A/C No:</span> <b>{bank.account_no}</b></div>}
+                      {bank.ifsc && <div><span className="text-slate-500">IFSC:</span> <b>{bank.ifsc}</b></div>}
+                      {bank.branch && <div><span className="text-slate-500">Branch:</span> <b>{bank.branch}</b></div>}
+                      {upiVpa && <div><span className="text-slate-500">UPI:</span> <b>{upiVpa}</b></div>}
+                    </div>
+                    {overlay.show_upi_qr !== false && upiUri && (
+                      <div className="px-1.5 py-1 border-l border-slate-400 text-center shrink-0">
+                        {/* level M + margin: a denser QR does not survive print + JPEG compression */}
+                        <QRCodeCanvas value={upiUri} size={64} level="M" includeMargin={true} />
+                        <div className="text-[7px] text-slate-600 font-bold">SCAN TO PAY</div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div style={{ width: '250px' }} className="shrink-0">
+              <table className="w-full border border-slate-400 text-[9px]">
+                <tbody>
+                  <Total k="Taxable Value" v={formatMoney(doc.Subtotal)} />
+                  {Number(doc.Document_Level_Discount_Amt) > 0 && (
+                    <Total k="Additional Discount" v={`- ${formatMoney(doc.Document_Level_Discount_Amt)}`} />
+                  )}
+                  {isIgst ? (
+                    <Total k="IGST" v={formatMoney(doc.Total_IGST)} />
+                  ) : (
+                    <>
+                      <Total k="CGST" v={formatMoney(doc.Total_CGST)} />
+                      <Total k="SGST" v={formatMoney(doc.Total_SGST)} />
+                    </>
+                  )}
+                  <tr className="bg-amber-50">
+                    <td className="px-1.5 py-1 font-black border-t-2 border-amber-700 text-amber-950">GRAND TOTAL</td>
+                    <td className="px-1.5 py-1 text-right font-black text-[11px] border-t-2 border-amber-700 text-amber-950">
+                      {formatMoney(doc.Grand_Total)}
+                    </td>
+                  </tr>
+                  {docType === 'INVOICE' && Number(doc.Amount_Paid) > 0 && (
+                    <>
+                      <Total k="Amount Paid" v={formatMoney(doc.Amount_Paid)} />
+                      <Total k="Balance Due" v={formatMoney((Number(doc.Grand_Total) || 0) - (Number(doc.Amount_Paid) || 0))} bold />
+                    </>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {tncItems.length > 0 && (
+            <div className="mt-2">
+              <div className="text-[8px] font-black uppercase tracking-wide text-amber-950 mb-0.5">Terms &amp; Conditions</div>
+              <ol className="text-[7.5px] text-slate-700 leading-snug" style={{ paddingLeft: '14px', listStyleType: 'decimal' }}>
+                {tncItems.map(t => <li key={t.id}>{t.text}</li>)}
+              </ol>
+            </div>
+          )}
+
+          {doc.Notes && (
+            <div className="mt-1.5 text-[8.5px]"><span className="font-black">Note: </span>{doc.Notes}</div>
+          )}
+        </div>
+
+        {/* Absorbs leftover height on a short document so the signature and footer sit at the
+            bottom of the sheet; collapses to nothing once the content fills the page. */}
+        <div className="grow" style={{ minHeight: '16px' }} aria-hidden="true" />
+
+        {/* ---------- SIGNATURE + FOOTER ---------- */}
+        <div className="shrink-0 relative" style={{ zIndex: 1 }}>
+          <div className="flex justify-between items-end">
+            <div className="text-[8px] text-slate-600 font-bold max-w-[45%]">
+              {docType === 'QUOTATION'
+                ? 'We look forward to your valued order. This quotation is computer generated.'
+                : 'Certified that the particulars given above are true and correct.'}
+            </div>
+
+            <div className="text-center flex flex-col items-center justify-end shrink-0" style={{ minWidth: '170px' }}>
+              <div className="font-black text-[9px] mb-0.5">For {seller.legal_name || 'Expert Safety Solutions'}</div>
+              {overlay.show_stamp !== false && (
+                /* Fixed 80x80 slot sized by max-width/max-height, not object-fit — html2canvas
+                   ignores object-fit and would stretch the round seal into an ellipse. */
+                <div className="w-20 h-20 mx-auto -mb-1 flex items-center justify-center">
+                  <img
+                    src={branding.stamp || '/assets/company_stamp.png'}
+                    onError={e => { e.target.onerror = null; e.target.src = '/assets/stamp.jpg'; }}
+                    alt="Company Seal"
+                    className="w-auto h-auto max-w-full max-h-full object-contain"
+                  />
+                </div>
+              )}
+              <div className="border-t border-slate-900 pt-0.5 font-black text-[9px] uppercase w-full">
+                {seller.authorized_signatory || 'NILESHKUMAR MANJIBHAI PADAYA'}
+              </div>
+              <div className="text-[7px] text-slate-600 font-bold leading-tight">
+                Authorized Signatory — {seller.legal_name || 'Expert Safety Solutions'}
+              </div>
+            </div>
+          </div>
+
+          <div className="border-t border-slate-300 pt-1.5 mt-2">
+            <img
+              src={branding.footer || '/assets/Footer - Expert (2025).PNG'}
+              onError={e => { e.target.onerror = null; e.target.src = '/assets/footer.png'; }}
+              alt="Footer"
+              className="w-auto h-auto max-w-full max-h-24 object-contain mx-auto"
+            />
+          </div>
+        </div>
+      </div>
+    </PageFrame>
+  );
+});
+
+function Meta({ k, v, bold }) {
+  return (
+    <tr>
+      <td className="px-1.5 py-0.5 text-slate-500 whitespace-nowrap">{k}</td>
+      <td className={`px-1.5 py-0.5 text-right ${bold ? 'font-black' : 'font-bold'}`}>{v}</td>
+    </tr>
+  );
+}
+
+function Total({ k, v, bold }) {
+  return (
+    <tr>
+      <td className="px-1.5 py-0.5 text-slate-600">{k}</td>
+      <td className={`px-1.5 py-0.5 text-right ${bold ? 'font-black' : 'font-bold'}`}>{v}</td>
+    </tr>
+  );
+}
+
+QuotationPdfTemplate.displayName = 'QuotationPdfTemplate';
+export default QuotationPdfTemplate;

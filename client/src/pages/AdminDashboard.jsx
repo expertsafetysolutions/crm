@@ -77,9 +77,13 @@ import {
   Settings,
   CreditCard,
   Bell,
-  BellOff
+  BellOff,
+  FileText,
+  Package,
+  ReceiptIndianRupee
 } from 'lucide-react';
 import { QRCodeCanvas } from 'qrcode.react';
+import GstinInput from '../components/GstinInput';
 
 const REMARK_TAGS = [
   'Call',
@@ -104,6 +108,141 @@ const SYSTEM_REMARK_BADGE_STYLES = {
   'TASK COMPLETED': 'bg-emerald-100 text-emerald-800 border border-emerald-200'
 };
 const remarkBadgeClass = (type, fallback) => SYSTEM_REMARK_BADGE_STYLES[type] || fallback;
+
+// Mirrors REMARK_EDIT_WINDOW_MS in apiRoutes.js — the server is the authority and will reject a
+// late PUT, this only decides whether to offer the button.
+const REMARK_EDIT_WINDOW_MS = 5 * 60 * 1000;
+
+/**
+ * Age of a remark in ms. Created_At is epoch ms; older rows predate that field, so fall back to the
+ * timestamp embedded in the "INT_<ms>_..." id, then to the ISO Timestamp.
+ */
+function remarkAgeMs(item) {
+  const created = Number(item?.Created_At);
+  if (created > 0) return Date.now() - created;
+
+  if (typeof item?.Interaction_ID === 'string' && item.Interaction_ID.startsWith('INT_')) {
+    const ts = Number(item.Interaction_ID.split('_')[1]);
+    if (ts > 0) return Date.now() - ts;
+  }
+
+  const parsed = Date.parse(item?.Timestamp || '');
+  return Number.isNaN(parsed) ? Infinity : Date.now() - parsed;
+}
+
+/**
+ * One entry in a task's remark timeline, with inline editing inside the 5-minute window.
+ *
+ * Edit eligibility deliberately matches PUT /api/customer-interactions/:id exactly — author-only
+ * (an Admin editing someone else's logged call would misattribute it), never system-generated, and
+ * only while the window is open. Showing the button in any other case would just surface a 403.
+ */
+function RemarkTimelineEntry({ item, currentStaffId, badgeClass, formatTimestamp, onSaved, token }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(item.Remarks || '');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  const isAuthor = String(item.Staff_ID || '') === String(currentStaffId || '');
+  const canEdit = isAuthor
+    && !item.System_Generated
+    && remarkAgeMs(item) <= REMARK_EDIT_WINDOW_MS;
+
+  const save = async () => {
+    const text = draft.trim();
+    if (!text || saving) return;
+    setSaving(true);
+    setError('');
+    try {
+      const res = await fetch(`/api/customer-interactions/${item.Interaction_ID}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ remarks: text })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Could not update this remark');
+      setEditing(false);
+      if (onSaved) await onSaved();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const cancel = () => {
+    setDraft(item.Remarks || '');
+    setEditing(false);
+    setError('');
+  };
+
+  return (
+    <div className="p-2 rounded-lg bg-white border border-amber-100 space-y-1">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="flex items-center gap-1.5 flex-wrap min-w-0">
+          <span className={`px-1.5 py-0.5 rounded font-extrabold text-[9px] ${badgeClass}`}>
+            {item.Type || 'Remark'}
+          </span>
+          <span className="text-[11px] font-bold text-slate-700 truncate">
+            {item.Staff_Name || item.Staff_ID || 'Staff'}
+          </span>
+          {item.Is_Edited && (
+            <span className="text-[9px] font-bold text-slate-400 uppercase">edited</span>
+          )}
+        </div>
+        <div className="flex items-center gap-1.5 shrink-0">
+          <span className="text-[10px] font-semibold text-slate-400">
+            {formatTimestamp ? formatTimestamp(item.Timestamp) : ''}
+          </span>
+          {canEdit && !editing && (
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); setEditing(true); }}
+              className="p-1 rounded-md text-amber-700 hover:bg-amber-100 transition"
+              title="Edit this remark (5-minute window)"
+            >
+              <Edit3 className="w-3 h-3" />
+            </button>
+          )}
+        </div>
+      </div>
+
+      {editing ? (
+        <div className="space-y-1.5" onClick={(e) => e.stopPropagation()}>
+          <textarea
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            rows={3}
+            autoFocus
+            className="w-full px-2 py-1.5 border border-amber-300 rounded-lg text-xs focus:outline-hidden focus:ring-2 focus:ring-amber-400"
+          />
+          {error && <div className="text-[10px] font-semibold text-rose-600">{error}</div>}
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={save}
+              disabled={saving || !draft.trim()}
+              className="px-2.5 py-1 rounded-md bg-amber-600 hover:bg-amber-700 text-white text-[11px] font-bold disabled:opacity-40"
+            >
+              {saving ? 'Saving…' : 'Save'}
+            </button>
+            <button
+              type="button"
+              onClick={cancel}
+              className="px-2.5 py-1 rounded-md border border-slate-200 text-slate-600 text-[11px] font-bold hover:bg-slate-50"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : (
+        <p className="text-xs text-slate-700 leading-relaxed font-medium whitespace-pre-wrap">
+          {item.Remarks}
+        </p>
+      )}
+    </div>
+  );
+}
 
 export default function AdminDashboard() {
   const navigate = useNavigate();
@@ -946,6 +1085,10 @@ export default function AdminDashboard() {
     email: '',
     locationLink: '',
     address: '',
+    // GSTIN drives the CGST+SGST vs IGST split on quotations; stateCode is the manual fallback
+    // for unregistered/B2C customers who have no GSTIN to derive it from.
+    gstin: '',
+    stateCode: '',
     contacts: [{ name: '', designation: '', contactNumber: '', email: '' }]
   });
 
@@ -968,6 +1111,7 @@ export default function AdminDashboard() {
   const [editCustomerForm, setEditCustomerForm] = useState({
     companyName: '', authPerson: '', contact: '', email: '',
     locationLink: '', address: '', specialNotes: '',
+    gstin: '', stateCode: '',
     coordinators: []
   });
   const [savingCustomer, setSavingCustomer] = useState(false);
@@ -1769,6 +1913,8 @@ export default function AdminDashboard() {
             email: customerForm.email,
             locationLink: customerForm.locationLink,
             address: customerForm.address,
+            gstin: customerForm.gstin,
+            stateCode: customerForm.stateCode,
             contacts: customerForm.contacts
           })
         });
@@ -2728,6 +2874,41 @@ export default function AdminDashboard() {
             <span>Generate Certificate</span>
           </button>
           <button
+            onClick={() => navigate('/quotations')}
+            className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:opacity-95 text-white text-xs font-bold flex items-center justify-center gap-1.5 transition shadow-sm border border-blue-400/30 shrink-0"
+          >
+            <FileText className="w-4 h-4 text-blue-100 shrink-0" />
+            <span>Quotations</span>
+          </button>
+          <button
+            onClick={() => navigate('/sales-documents')}
+            className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:opacity-95 text-white text-xs font-bold flex items-center justify-center gap-1.5 transition shadow-sm border border-emerald-400/30 shrink-0"
+          >
+            <ReceiptIndianRupee className="w-4 h-4 text-emerald-100 shrink-0" />
+            <span>Invoices &amp; Payments</span>
+          </button>
+          <button
+            onClick={() => navigate('/inventory')}
+            className="px-3.5 py-2 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5 transition shadow-sm shrink-0"
+          >
+            <Package className="w-4 h-4 text-amber-600 shrink-0" />
+            <span>Items &amp; Inventory</span>
+          </button>
+          <button
+            onClick={() => navigate('/settings/quotations')}
+            className="px-3.5 py-2 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5 transition shadow-sm shrink-0"
+          >
+            <Settings className="w-4 h-4 text-slate-500 shrink-0" />
+            <span>Quotation Settings</span>
+          </button>
+          <button
+            onClick={() => navigate('/settings/permissions')}
+            className="px-3.5 py-2 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5 transition shadow-sm shrink-0"
+          >
+            <Shield className="w-4 h-4 text-violet-600 shrink-0" />
+            <span>Module Access</span>
+          </button>
+          <button
             onClick={() => setShowNewCustomerModal(true)}
             className="px-3.5 py-2 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5 transition shadow-sm shrink-0"
           >
@@ -3071,6 +3252,8 @@ export default function AdminDashboard() {
                   locationLink: cust.Location_Link || task.Customer_Location_Link || '',
                   address: cust.Address || task.Customer_Address || '',
                   specialNotes: cust.Special_Notes || '',
+                  gstin: cust.GSTIN || cust.Gst_No || '',
+                  stateCode: cust.State_Code || '',
                   coordinators: parsedCoords
                 });
                 setIsEditCustomerGpsUnlocked(false);
@@ -3419,16 +3602,15 @@ export default function AdminDashboard() {
                               {matchingRemarks.length > 0 ? (
                                 <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
                                   {matchingRemarks.slice().reverse().map((item, idx) => (
-                                    <div key={idx} className="p-2 rounded-lg bg-white border border-amber-100 text-xs text-slate-800">
-                                      <div className="flex items-start justify-between text-[10px] text-slate-500 mb-0.5 gap-2">
-                                        <span className={`font-bold px-1.5 py-0.5 rounded ${remarkBadgeClass(item.Type, 'text-amber-800')}`}>{item.Type || 'Remark'}</span>
-                                        <span className="flex flex-col items-end text-right shrink-0">
-                                          <span className="font-bold text-slate-700">{item.Staff_Name || item.Staff_ID || 'Unknown'}</span>
-                                          <span>{formatInteractionTimestamp(item.Timestamp)}</span>
-                                        </span>
-                                      </div>
-                                      <p className="text-slate-700 font-medium whitespace-pre-wrap">{item.Remarks}</p>
-                                    </div>
+                                    <RemarkTimelineEntry
+                                      key={item.Interaction_ID || idx}
+                                      item={item}
+                                      currentStaffId={user?.Staff_ID}
+                                      badgeClass={remarkBadgeClass(item.Type, 'text-amber-800')}
+                                      formatTimestamp={formatInteractionTimestamp}
+                                      onSaved={() => loadAdminData(true)}
+                                      token={token}
+                                    />
                                   ))}
                                 </div>
                               ) : (
@@ -4232,6 +4414,8 @@ export default function AdminDashboard() {
                               locationLink: cust.Location_Link || '',
                               address: cust.Address || '',
                               specialNotes: cust.Special_Notes || '',
+                  gstin: cust.GSTIN || cust.Gst_No || '',
+                  stateCode: cust.State_Code || '',
                               coordinators: parsedCoords.length > 0 ? parsedCoords : []
                             });
                             setIsEditCustomerNotesUnlocked(!cust.Special_Notes);
@@ -5523,6 +5707,15 @@ export default function AdminDashboard() {
                   placeholder="e.g. info@company.com"
                 />
               </div>
+
+              {/* GST identity — drives the tax split on quotations and invoices */}
+              <GstinInput
+                gstin={editCustomerForm.gstin}
+                stateCode={editCustomerForm.stateCode}
+                compact
+                onChange={({ gstin, stateCode, customerType }) =>
+                  setEditCustomerForm({ ...editCustomerForm, gstin, stateCode, customerType })}
+              />
 
               {/* Address */}
               <div>
@@ -7729,6 +7922,15 @@ export default function AdminDashboard() {
                         <PhonePasteButton onPaste={digits => setCustomerForm({ ...customerForm, contact: digits })} />
                       </div>
                     </div>
+                    {/* GSTIN drives the tax split on quotations. Validated offline (check digit +
+                        state) so a mistyped number is caught before it reaches an invoice. */}
+                    <GstinInput
+                      gstin={customerForm.gstin}
+                      stateCode={customerForm.stateCode}
+                      compact
+                      onChange={({ gstin, stateCode, customerType }) =>
+                        setCustomerForm({ ...customerForm, gstin, stateCode, customerType })}
+                    />
                     <div className="flex gap-1.5">
                       <input
                         type="text"

@@ -7,6 +7,11 @@ const attendanceService = require('../services/attendanceService');
 const pushService = require('../services/pushService');
 const { authenticateToken } = require('./authRoutes');
 const { verifyStaffPassword, validatePasswordPolicy } = require('../utils/passwordUtils');
+const gstUtils = require('../utils/gstUtils');
+const { requirePermission, resolvePermissions, sanitizePermissions, MODULES, ACTIONS } = require('../utils/permissions');
+const quotationEngine = require('../services/quotationEngine');
+const conversionService = require('../services/conversionService');
+const inventoryService = require('../services/inventoryService');
 
 const router = express.Router();
 
@@ -1284,6 +1289,7 @@ router.post('/customers', async (req, res) => {
       });
     }
 
+    const gstin = gstUtils.normalizeGstin(req.body.gstin);
     const newCustomer = {
       Customer_ID: `CUST${Date.now().toString().slice(-4)}`,
       Company_Name: req.body.companyName || 'New Customer',
@@ -1292,6 +1298,13 @@ router.post('/customers', async (req, res) => {
       Email: req.body.email || '',
       Location_Link: req.body.locationLink || '',
       Address: req.body.address || '',
+      GSTIN: gstin,
+      // Derived from the GSTIN when present, else the explicitly-picked state (B2C/unregistered
+      // buyers have no GSTIN but still need a place of supply for the tax split).
+      State_Code: gstin ? gstUtils.extractStateCode(gstin) : String(req.body.stateCode || ''),
+      Customer_Type: req.body.customerType || (gstin ? 'B2B' : 'B2C'),
+      Billing_Address: req.body.billingAddress || req.body.address || '',
+      Shipping_Address: req.body.shippingAddress || '',
       Coordinators: typeof coords === 'string' ? coords : JSON.stringify(coords)
     };
     await sheetsService.insertRow('Customer_Master', newCustomer);
@@ -1321,6 +1334,9 @@ router.post('/customers/bulk', async (req, res) => {
         ? allCustomers.find(c => c.Customer_ID === row.Customer_ID) 
         : null;
 
+      const rowGstin = gstUtils.normalizeGstin(row.GSTIN || row.Gst_No);
+      const rowStateCode = rowGstin ? gstUtils.extractStateCode(rowGstin) : String(row.State_Code || '');
+
       if (existingCust) {
         await sheetsService.updateRow('Customer_Master', 'Customer_ID', row.Customer_ID, {
           Company_Name: row.Company_Name || existingCust.Company_Name,
@@ -1330,6 +1346,9 @@ router.post('/customers/bulk', async (req, res) => {
           Email: row.Email || existingCust.Email,
           Location_Link: row.Location_Link || existingCust.Location_Link,
           Address: row.Address || existingCust.Address,
+          GSTIN: rowGstin || existingCust.GSTIN || '',
+          State_Code: rowStateCode || existingCust.State_Code || '',
+          Customer_Type: row.Customer_Type || existingCust.Customer_Type || (rowGstin ? 'B2B' : 'B2C'),
           Coordinators: row.Coordinators || existingCust.Coordinators
         });
       } else {
@@ -1342,6 +1361,9 @@ router.post('/customers/bulk', async (req, res) => {
           Email: row.Email || '',
           Location_Link: row.Location_Link || '',
           Address: row.Address || '',
+          GSTIN: rowGstin,
+          State_Code: rowStateCode,
+          Customer_Type: row.Customer_Type || (rowGstin ? 'B2B' : 'B2C'),
           Coordinators: row.Coordinators || ''
         };
         await sheetsService.insertRow('Customer_Master', newCustomer);
@@ -1381,6 +1403,17 @@ router.put('/customers/:id', async (req, res) => {
       Address: req.body.address,
       Special_Notes: req.body.specialNotes
     };
+    if (req.body.gstin !== undefined) {
+      const gstin = gstUtils.normalizeGstin(req.body.gstin);
+      updateData.GSTIN = gstin;
+      if (gstin) updateData.State_Code = gstUtils.extractStateCode(gstin);
+    }
+    if (req.body.stateCode !== undefined && !updateData.State_Code) {
+      updateData.State_Code = String(req.body.stateCode || '');
+    }
+    if (req.body.customerType !== undefined) updateData.Customer_Type = req.body.customerType;
+    if (req.body.billingAddress !== undefined) updateData.Billing_Address = req.body.billingAddress;
+    if (req.body.shippingAddress !== undefined) updateData.Shipping_Address = req.body.shippingAddress;
     if (coords) {
       updateData.Coordinators = typeof coords === 'string' ? coords : JSON.stringify(coords);
     }
@@ -1401,6 +1434,17 @@ router.patch('/customers/:id', async (req, res) => {
     if (req.body.authPerson !== undefined) updateData.Auth_Person = req.body.authPerson;
     if (req.body.contact !== undefined) updateData.Contact = req.body.contact;
     if (req.body.address !== undefined) updateData.Address = req.body.address;
+    if (req.body.gstin !== undefined) {
+      const gstin = gstUtils.normalizeGstin(req.body.gstin);
+      updateData.GSTIN = gstin;
+      if (gstin) updateData.State_Code = gstUtils.extractStateCode(gstin);
+    }
+    if (req.body.stateCode !== undefined && !updateData.State_Code) {
+      updateData.State_Code = String(req.body.stateCode || '');
+    }
+    if (req.body.customerType !== undefined) updateData.Customer_Type = req.body.customerType;
+    if (req.body.billingAddress !== undefined) updateData.Billing_Address = req.body.billingAddress;
+    if (req.body.shippingAddress !== undefined) updateData.Shipping_Address = req.body.shippingAddress;
 
     const updated = await sheetsService.updateRow('Customer_Master', 'Customer_ID', req.params.id, updateData);
     if (!updated) return res.status(404).json({ error: 'Customer not found' });
@@ -1451,14 +1495,53 @@ router.post('/customer-interactions', async (req, res) => {
   }
 });
 
+// A remark is a contemporaneous record of a customer conversation, so it stays editable only
+// briefly — long enough to fix a typo, not long enough to rewrite history after the fact.
+const REMARK_EDIT_WINDOW_MS = 5 * 60 * 1000;
+
 router.put('/customer-interactions/:id', async (req, res) => {
   try {
+    const all = await sheetsService.getTab('Customer_Interactions');
+    const existing = all.find(i => i.Interaction_ID === req.params.id);
+    if (!existing) return res.status(404).json({ error: 'Interaction not found' });
+
+    // System-generated timeline entries mirror task events and must stay faithful to them.
+    if (existing.System_Generated) {
+      return res.status(403).json({ error: 'System-generated entries cannot be edited.' });
+    }
+
+    // Only the author may edit — an Admin editing someone else's logged call would misattribute it.
+    if (String(existing.Staff_ID || '') !== String(req.user.staffId || '')) {
+      return res.status(403).json({ error: 'You can only edit remarks you posted yourself.' });
+    }
+
+    // Created_At is epoch ms; fall back to Timestamp for older rows written before that field.
+    const createdMs = Number(existing.Created_At) || Date.parse(existing.Timestamp || '') || 0;
+    const ageMs = Date.now() - createdMs;
+    if (!createdMs || ageMs > REMARK_EDIT_WINDOW_MS) {
+      return res.status(403).json({
+        error: 'The 5-minute edit window for this remark has passed. Add a new remark instead.',
+        expired: true
+      });
+    }
+
+    const newText = String(req.body.remarks ?? '').trim();
+    if (!newText) return res.status(400).json({ error: 'Remark text cannot be empty' });
+
+    // Keep the original wording so the timeline stays auditable even after a correction.
+    const history = Array.isArray(existing.Edit_History) ? existing.Edit_History : [];
     const updated = await sheetsService.updateRow('Customer_Interactions', 'Interaction_ID', req.params.id, {
-      Remarks: req.body.remarks
+      Remarks: newText,
+      Type: req.body.type !== undefined ? req.body.type : existing.Type,
+      Edited_At: new Date().toISOString(),
+      Edited_By: req.user.staffId,
+      Is_Edited: true,
+      Edit_History: [...history, { previousText: existing.Remarks, editedAt: new Date().toISOString(), editedBy: req.user.staffId }]
     });
-    if (!updated) return res.status(404).json({ error: 'Interaction not found' });
-    res.json(updated);
+
+    res.json({ ...updated, editWindowMs: REMARK_EDIT_WINDOW_MS, remainingMs: Math.max(0, REMARK_EDIT_WINDOW_MS - ageMs) });
   } catch (err) {
+    console.error('PUT /customer-interactions error:', err);
     res.status(500).json({ error: 'Failed to update customer interaction' });
   }
 });
@@ -2357,6 +2440,935 @@ router.put('/document-settings', async (req, res) => {
   } catch (err) {
     console.error('PUT /document-settings error:', err);
     res.status(500).json({ error: 'Failed to save document settings' });
+  }
+});
+
+// --- QUOTATION SETTINGS (Module A) ---
+// Staff may read (the quotation builder needs payment terms / T&C / defaults); Admin only writes.
+router.get('/quotation-settings', async (req, res) => {
+  try {
+    const settings = await quotationEngine.getSettings();
+    // Never expose resolved secrets — only whether each channel is actually usable.
+    const emailService = require('../services/emailService');
+    const whatsappService = require('../services/whatsappService');
+    res.json({
+      ...settings,
+      _channel_status: {
+        email_configured: emailService.isConfigured(settings.smtp_config),
+        whatsapp_configured: whatsappService.isConfigured(settings.whatsapp_config)
+      }
+    });
+  } catch (err) {
+    console.error('GET /quotation-settings error:', err);
+    res.status(500).json({ error: 'Failed to load quotation settings' });
+  }
+});
+
+router.put('/quotation-settings', async (req, res) => {
+  try {
+    if (req.user.role !== 'Admin') return res.status(403).json({ error: 'Admin only' });
+    const payload = { ...req.body };
+    delete payload._channel_status;
+    const saved = await sheetsService.saveQuotationSettings('DEFAULT', payload);
+    res.json(saved);
+  } catch (err) {
+    console.error('PUT /quotation-settings error:', err);
+    res.status(500).json({ error: 'Failed to save quotation settings' });
+  }
+});
+
+// --- MODULE PERMISSIONS (Quotation / Inventory) ---
+// The caller's own effective permissions, so the client can show or hide UI accordingly.
+router.get('/my-permissions', async (req, res) => {
+  try {
+    const staff = await sheetsService.getStaffById(req.user.staffId);
+    res.json({
+      staffId: req.user.staffId,
+      role: staff?.Role || req.user.role,
+      permissions: resolvePermissions(staff, req.user.role)
+    });
+  } catch (err) {
+    console.error('GET /my-permissions error:', err);
+    res.status(500).json({ error: 'Could not load permissions' });
+  }
+});
+
+router.get('/staff-permissions', async (req, res) => {
+  try {
+    if (req.user.role !== 'Admin') return res.status(403).json({ error: 'Admin only' });
+    const allStaff = await sheetsService.getAllStaff();
+    res.json({
+      modules: MODULES,
+      actions: ACTIONS,
+      staff: allStaff
+        .filter(s => s.Status !== 'Inactive')
+        .map(s => ({
+          Staff_ID: s.Staff_ID,
+          Name: s.Name,
+          Role: s.Role,
+          permissions: resolvePermissions(s, s.Role),
+          // Distinguishes an explicit admin-set map from an inherited role default.
+          hasExplicitPermissions: Boolean(s.Module_Permissions)
+        }))
+    });
+  } catch (err) {
+    console.error('GET /staff-permissions error:', err);
+    res.status(500).json({ error: 'Could not load staff permissions' });
+  }
+});
+
+router.put('/staff-permissions/:staffId', async (req, res) => {
+  try {
+    if (req.user.role !== 'Admin') return res.status(403).json({ error: 'Admin only' });
+    const staff = await sheetsService.getStaffById(req.params.staffId);
+    if (!staff) return res.status(404).json({ error: 'Staff member not found' });
+    if (String(staff.Role || '').toLowerCase() === 'admin') {
+      return res.status(400).json({ error: 'Admin users always have full access — their permissions cannot be restricted here.' });
+    }
+
+    const clean = sanitizePermissions(req.body.permissions);
+    await sheetsService.updateRow('Staff_Master', 'Staff_ID', req.params.staffId, {
+      Module_Permissions: clean,
+      Permissions_Updated_By: req.user.staffId,
+      Permissions_Updated_At: new Date().toISOString()
+    });
+
+    const updated = await sheetsService.getStaffById(req.params.staffId);
+    res.json({ staffId: req.params.staffId, permissions: resolvePermissions(updated, updated.Role) });
+  } catch (err) {
+    console.error('PUT /staff-permissions error:', err);
+    res.status(500).json({ error: 'Could not save permissions' });
+  }
+});
+
+// Offline GSTIN validation — checksum + state + entity type, no external API call and no cost.
+// Catches mistyped GSTINs before they can reach an invoice.
+router.get('/gstin/validate/:gstin', async (req, res) => {
+  try {
+    res.json(gstUtils.parseGstin(req.params.gstin));
+  } catch (err) {
+    res.status(500).json({ error: 'Could not validate GSTIN' });
+  }
+});
+
+router.get('/quotation-settings/gst-states', async (req, res) => {
+  try {
+    res.json(Object.entries(gstUtils.GST_STATE_CODES).map(([code, name]) => ({ code, name })));
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to load state codes' });
+  }
+});
+
+router.post('/quotation-settings/test-email', async (req, res) => {
+  try {
+    if (req.user.role !== 'Admin') return res.status(403).json({ error: 'Admin only' });
+    const emailService = require('../services/emailService');
+    const settings = await quotationEngine.getSettings();
+    const verified = await emailService.verifyConnection(settings.smtp_config);
+    if (!verified.ok) return res.status(400).json({ error: verified.error });
+    if (req.body.to) {
+      const sent = await emailService.sendEmail(settings.smtp_config, {
+        to: req.body.to,
+        subject: 'Expert Safety Solutions — SMTP test',
+        body: 'This is a test message confirming your SMTP configuration works.'
+      });
+      return res.json(sent);
+    }
+    res.json({ ok: true, message: 'SMTP connection verified' });
+  } catch (err) {
+    console.error('POST /quotation-settings/test-email error:', err);
+    res.status(500).json({ error: 'Email test failed' });
+  }
+});
+
+router.get('/quotation-settings/whatsapp-templates', async (req, res) => {
+  try {
+    if (req.user.role !== 'Admin') return res.status(403).json({ error: 'Admin only' });
+    const whatsappService = require('../services/whatsappService');
+    const settings = await quotationEngine.getSettings();
+    const result = await whatsappService.listTemplates(settings.whatsapp_config);
+    if (!result.ok) return res.status(400).json({ error: result.error });
+    res.json(result.templates);
+  } catch (err) {
+    console.error('GET /quotation-settings/whatsapp-templates error:', err);
+    res.status(500).json({ error: 'Failed to list WhatsApp templates' });
+  }
+});
+
+// --- ITEM MASTER (Module B) ---
+router.get('/items', requirePermission('inventory','view'), async (req, res) => {
+  try {
+    const all = await sheetsService.getAllItems();
+    const { search, category, includeDeleted } = req.query;
+
+    // Deleted items and those awaiting delete approval are hidden by default so they can't be
+    // picked into a new quotation; the recycle bin passes includeDeleted to see them.
+    let rows = includeDeleted === 'true'
+      ? all
+      : all.filter(i => !i.Is_Deleted && i.Delete_Status !== 'Deleted' && i.Delete_Status !== 'PendingApproval');
+
+    if (category) {
+      rows = rows.filter(i => String(i.Category || '').toLowerCase() === String(category).toLowerCase());
+    }
+
+    if (search) {
+      // Searches name, aliases (Tally-style alternate names), HSN and category.
+      const q = String(search).trim().toLowerCase();
+      rows = rows.filter(i => {
+        const aliases = Array.isArray(i.Aliases) ? i.Aliases.join(' ') : '';
+        return `${i.Item_Name || ''} ${aliases} ${i.HSN_Code || ''} ${i.Category || ''}`
+          .toLowerCase().includes(q);
+      });
+    }
+
+    res.json(rows);
+  } catch (err) {
+    console.error('GET /items error:', err);
+    res.status(500).json({ error: 'Failed to fetch items' });
+  }
+});
+
+// Accepts a base64 image (already compressed client-side to <180KB) and stores it in Mongo,
+// returning a URL served by the public GET /api/media/:id. This replaces the Google Apps Script /
+// Drive round-trip for product photos: no external deployment to keep in sync, and it works on
+// Vercel where the filesystem is read-only so uploads can't be written to /assets.
+router.post('/media/upload', requirePermission('inventory','add'), async (req, res) => {
+  try {
+    const { base64, fileName, mimeType, purpose } = req.body;
+    const clean = String(base64 || '').replace(/^data:[^;]+;base64,/, '');
+    if (!clean) return res.status(400).json({ error: 'No image data supplied' });
+
+    const mime = String(mimeType || 'image/jpeg');
+    if (!mime.startsWith('image/')) {
+      return res.status(400).json({ error: 'Only image uploads are supported' });
+    }
+
+    // base64 inflates by ~4/3; 8MB decoded stays clear of the 16MB BSON document ceiling and of
+    // the 10mb express.json limit that would have rejected the request before reaching here.
+    const approxBytes = Math.floor(clean.length * 3 / 4);
+    if (approxBytes > 8 * 1024 * 1024) {
+      return res.status(413).json({ error: 'Image is too large. Please use a smaller photo.' });
+    }
+
+    const mediaId = `MED_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    await sheetsService.insertMedia({
+      Media_ID: mediaId,
+      File_Name: String(fileName || 'upload.jpg'),
+      Mime_Type: mime,
+      Purpose: String(purpose || 'Product Photo'),
+      Size_Bytes: approxBytes,
+      Data: clean,
+      Uploaded_By: req.user.staffId || 'SYSTEM',
+      Uploaded_At: Date.now()
+    });
+
+    res.json({ success: true, mediaId, url: `/api/media/${mediaId}` });
+  } catch (err) {
+    console.error('POST /media/upload error:', err);
+    res.status(500).json({ error: 'Failed to upload image' });
+  }
+});
+
+router.post('/items', requirePermission('inventory','add'), async (req, res) => {
+  try {
+    const settings = await quotationEngine.getSettings();
+    const newItem = {
+      Item_ID: `ITEM${Date.now().toString().slice(-6)}`,
+      Item_Name: req.body.itemName || req.body.Item_Name || '',
+      Category: req.body.category || '',
+      HSN_Code: req.body.hsnCode || '',
+      Unit: req.body.unit || 'Nos',
+      Default_GST_Rate: Number(req.body.defaultGstRate ?? settings.defaults.default_gst_rate),
+      Standard_Rate: Number(req.body.standardRate) || 0,
+      Reorder_Level: Number(req.body.reorderLevel) || 0,
+      Description: req.body.description || '',
+      Linked_Equipment_Type_ID: req.body.linkedEquipmentTypeId || '',
+      // Photo URLs (from POST /media/upload) plus richer copy for the quotation PDF.
+      Aliases: Array.isArray(req.body.aliases) ? req.body.aliases.map(a => String(a).trim()).filter(Boolean) : [],
+      Photo_URL: req.body.photoUrl || '',
+      Photo_File_ID: req.body.photoFileId || '',
+      Photos: Array.isArray(req.body.photos) ? req.body.photos : [],
+      Long_Description: req.body.longDescription || '',
+      Specifications: req.body.specifications || '',
+      Active: req.body.active !== false,
+      Created_By: req.user.staffId || 'SYSTEM',
+      Created_At: quotationEngine.istToday()
+    };
+    if (!newItem.Item_Name) return res.status(400).json({ error: 'Item name is required' });
+    await sheetsService.insertRow('Item_Master', newItem);
+    res.json(newItem);
+  } catch (err) {
+    console.error('POST /items error:', err);
+    res.status(500).json({ error: 'Failed to create item' });
+  }
+});
+
+// Bulk CSV import. Upserts on Item_ID when supplied, else matches on Item_Name so re-importing an
+// edited export updates rows instead of duplicating them.
+router.post('/items/bulk', requirePermission('inventory','add'), async (req, res) => {
+  try {
+    const { items } = req.body;
+    if (!Array.isArray(items)) return res.status(400).json({ error: 'Expected an "items" array' });
+
+    const settings = await quotationEngine.getSettings();
+    const existing = await sheetsService.getAllItems();
+    const byId = new Map(existing.map(i => [String(i.Item_ID || '').trim(), i]));
+    const byName = new Map(existing.map(i => [String(i.Item_Name || '').trim().toLowerCase(), i]));
+
+    let created = 0;
+    let updated = 0;
+    const skipped = [];
+
+    for (let idx = 0; idx < items.length; idx++) {
+      const row = items[idx] || {};
+      // Accept both the Sheet-style headers our export produces and plain camelCase.
+      const name = String(row.Item_Name || row.itemName || '').trim();
+      if (!name) { skipped.push({ row: idx + 2, reason: 'Missing item name' }); continue; }
+
+      const rate = Number(row.Standard_Rate ?? row.standardRate ?? 0) || 0;
+      const gst = Number(row.Default_GST_Rate ?? row.defaultGstRate ?? settings.defaults.default_gst_rate);
+      const payload = {
+        Item_Name: name,
+        Category: String(row.Category || row.category || '').trim(),
+        HSN_Code: String(row.HSN_Code || row.hsnCode || '').trim(),
+        Unit: String(row.Unit || row.unit || 'Nos').trim() || 'Nos',
+        Default_GST_Rate: Number.isFinite(gst) ? gst : 18,
+        Standard_Rate: rate,
+        Reorder_Level: Number(row.Reorder_Level ?? row.reorderLevel ?? 0) || 0,
+        Description: String(row.Description || row.description || '').trim(),
+        Active: String(row.Active ?? row.active ?? 'true').toLowerCase() !== 'false'
+      };
+
+      const suppliedId = String(row.Item_ID || row.itemId || '').trim();
+      const match = suppliedId ? byId.get(suppliedId) : byName.get(name.toLowerCase());
+
+      if (match) {
+        await sheetsService.updateRow('Item_Master', 'Item_ID', match.Item_ID, payload);
+        updated++;
+      } else {
+        const newItem = {
+          Item_ID: suppliedId || `ITEM${Date.now().toString().slice(-6)}${idx.toString().padStart(2, '0')}`,
+          ...payload,
+          Created_By: req.user.staffId || 'SYSTEM',
+          Created_At: quotationEngine.istToday()
+        };
+        await sheetsService.insertRow('Item_Master', newItem);
+        // Keep the maps current so duplicate rows inside one file collapse onto the same item.
+        byId.set(newItem.Item_ID, newItem);
+        byName.set(name.toLowerCase(), newItem);
+        created++;
+      }
+    }
+
+    res.json({ created, updated, skippedCount: skipped.length, skipped: skipped.slice(0, 25) });
+  } catch (err) {
+    console.error('POST /items/bulk error:', err);
+    res.status(500).json({ error: 'Failed to import items' });
+  }
+});
+
+// Admin recycle bin: items awaiting deletion approval, plus already-deleted ones.
+router.get('/items/recycle-bin', async (req, res) => {
+  try {
+    if (req.user.role !== 'Admin') return res.status(403).json({ error: 'Admin only' });
+    const all = await sheetsService.getAllItems();
+    res.json({
+      pending: all.filter(i => i.Delete_Status === 'PendingApproval'),
+      deleted: all.filter(i => i.Delete_Status === 'Deleted' || i.Is_Deleted)
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not load recycle bin' });
+  }
+});
+
+router.put('/items/:id', requirePermission('inventory','edit'), async (req, res) => {
+  try {
+    const updateData = {};
+    if (req.body.itemName !== undefined) updateData.Item_Name = req.body.itemName;
+    if (req.body.category !== undefined) updateData.Category = req.body.category;
+    if (req.body.hsnCode !== undefined) updateData.HSN_Code = req.body.hsnCode;
+    if (req.body.unit !== undefined) updateData.Unit = req.body.unit;
+    if (req.body.defaultGstRate !== undefined) updateData.Default_GST_Rate = Number(req.body.defaultGstRate);
+    if (req.body.standardRate !== undefined) updateData.Standard_Rate = Number(req.body.standardRate);
+    if (req.body.reorderLevel !== undefined) updateData.Reorder_Level = Number(req.body.reorderLevel);
+    if (req.body.description !== undefined) updateData.Description = req.body.description;
+    if (req.body.linkedEquipmentTypeId !== undefined) updateData.Linked_Equipment_Type_ID = req.body.linkedEquipmentTypeId;
+    if (req.body.aliases !== undefined) updateData.Aliases = Array.isArray(req.body.aliases) ? req.body.aliases.map(a => String(a).trim()).filter(Boolean) : [];
+    if (req.body.photoUrl !== undefined) updateData.Photo_URL = req.body.photoUrl;
+    if (req.body.photoFileId !== undefined) updateData.Photo_File_ID = req.body.photoFileId;
+    if (req.body.photos !== undefined) updateData.Photos = Array.isArray(req.body.photos) ? req.body.photos : [];
+    if (req.body.longDescription !== undefined) updateData.Long_Description = req.body.longDescription;
+    if (req.body.specifications !== undefined) updateData.Specifications = req.body.specifications;
+    if (req.body.active !== undefined) updateData.Active = req.body.active;
+
+    const updated = await sheetsService.updateRow('Item_Master', 'Item_ID', req.params.id, updateData);
+    if (!updated) return res.status(404).json({ error: 'Item not found' });
+    res.json(updated);
+  } catch (err) {
+    console.error('PUT /items error:', err);
+    res.status(500).json({ error: 'Failed to update item' });
+  }
+});
+
+/**
+ * Deletion is a two-step approval flow, not an immediate removal:
+ *  - non-Admin staff raise a request; the item is hidden from pickers but keeps its data
+ *  - an Admin then approves (soft-deletes for good) or rejects (restores it)
+ *
+ * Items are never hard-deleted, because historical quotations and invoices reference them and must
+ * keep resolving the item's name and rate.
+ */
+router.delete('/items/:id', requirePermission('inventory','delete'), async (req, res) => {
+  try {
+    const item = await sheetsService.getItemById(req.params.id);
+    if (!item) return res.status(404).json({ error: 'Item not found' });
+
+    const isAdminUser = req.user.role === 'Admin';
+    const nowIso = new Date().toISOString();
+
+    if (isAdminUser && req.query.immediate === 'true') {
+      await sheetsService.updateRow('Item_Master', 'Item_ID', req.params.id, {
+        Active: false, Is_Deleted: true,
+        Deleted_By: req.user.staffId, Deleted_At: nowIso,
+        Delete_Status: 'Deleted'
+      });
+      return res.json({ success: true, status: 'Deleted' });
+    }
+
+    await sheetsService.updateRow('Item_Master', 'Item_ID', req.params.id, {
+      Active: false,
+      Delete_Status: 'PendingApproval',
+      Delete_Requested_By: req.user.staffId,
+      Delete_Requested_At: nowIso,
+      Delete_Reason: req.body?.reason || ''
+    });
+    res.json({
+      success: true,
+      status: 'PendingApproval',
+      message: 'Delete request sent to Admin for approval. The item is hidden from new quotations until then.'
+    });
+  } catch (err) {
+    console.error('DELETE /items error:', err);
+    res.status(500).json({ error: 'Failed to delete item' });
+  }
+});
+
+router.post('/items/:id/delete-decision', async (req, res) => {
+  try {
+    if (req.user.role !== 'Admin') return res.status(403).json({ error: 'Admin only' });
+    const { decision } = req.body;
+    if (decision !== 'approve' && decision !== 'reject') {
+      return res.status(400).json({ error: 'decision must be "approve" or "reject"' });
+    }
+
+    const nowIso = new Date().toISOString();
+    const update = decision === 'approve'
+      ? { Active: false, Is_Deleted: true, Delete_Status: 'Deleted', Deleted_By: req.user.staffId, Deleted_At: nowIso }
+      // Rejecting restores the item to normal use and clears the request trail.
+      : { Active: true, Is_Deleted: false, Delete_Status: '', Delete_Requested_By: '', Delete_Requested_At: '', Delete_Reason: '', Restored_By: req.user.staffId, Restored_At: nowIso };
+
+    const updated = await sheetsService.updateRow('Item_Master', 'Item_ID', req.params.id, update);
+    if (!updated) return res.status(404).json({ error: 'Item not found' });
+    res.json({ success: true, status: decision === 'approve' ? 'Deleted' : 'Restored' });
+  } catch (err) {
+    console.error('POST /items/delete-decision error:', err);
+    res.status(500).json({ error: 'Could not apply decision' });
+  }
+});
+
+// --- ITEM CATEGORY MASTER ---
+// Categories are derived from existing items and merged with an admin-managed list, so the
+// dropdown always reflects what's actually in use without needing a separate seed step.
+router.get('/item-categories', requirePermission('inventory', 'view'), async (req, res) => {
+  try {
+    const [items, settings] = await Promise.all([
+      sheetsService.getAllItems(),
+      quotationEngine.getSettings()
+    ]);
+    const fromItems = items.map(i => String(i.Category || '').trim()).filter(Boolean);
+    const configured = (settings.item_categories || []).map(c => String(c).trim()).filter(Boolean);
+    const merged = [...new Set([...configured, ...fromItems])].sort((a, b) => a.localeCompare(b));
+    res.json(merged);
+  } catch (err) {
+    res.status(500).json({ error: 'Could not load categories' });
+  }
+});
+
+router.post('/item-categories', async (req, res) => {
+  try {
+    if (req.user.role !== 'Admin') return res.status(403).json({ error: 'Admin only' });
+    const name = String(req.body.name || '').trim();
+    if (!name) return res.status(400).json({ error: 'Category name is required' });
+
+    const settings = await quotationEngine.getSettings();
+    const existing = settings.item_categories || [];
+    if (existing.some(c => c.toLowerCase() === name.toLowerCase())) {
+      return res.status(409).json({ error: 'That category already exists' });
+    }
+    settings.item_categories = [...existing, name];
+    await sheetsService.saveQuotationSettings('DEFAULT', settings);
+    res.json({ success: true, categories: settings.item_categories });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not add category' });
+  }
+});
+
+// --- QUOTATIONS (Module B) ---
+router.get('/quotations', requirePermission('quotation','view'), async (req, res) => {
+  try {
+    const all = await sheetsService.getAllQuotations();
+    const { customerId, status, latestOnly } = req.query;
+    let filtered = all;
+    if (customerId) filtered = filtered.filter(q => q.Customer_ID === customerId);
+    if (status) filtered = filtered.filter(q => q.Status === status);
+    // Hides superseded revisions so a list view shows one row per quotation thread.
+    if (latestOnly === 'true') filtered = filtered.filter(q => q.Status !== quotationEngine.STATUS.REVISED);
+    res.json(filtered.sort((a, b) => (Number(b.Created_At_Ms) || 0) - (Number(a.Created_At_Ms) || 0)));
+  } catch (err) {
+    console.error('GET /quotations error:', err);
+    res.status(500).json({ error: 'Failed to fetch quotations' });
+  }
+});
+
+// Literal sub-paths must be declared before '/quotations/:id', otherwise Express matches the
+// parameterized route first and treats "last-rates" as a quotation ID.
+router.get('/quotations/last-rates/:customerId', async (req, res) => {
+  try {
+    res.json(await quotationEngine.getLastQuotedRates(req.params.customerId));
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch historical rates' });
+  }
+});
+
+router.get('/quotations/:id', async (req, res) => {
+  try {
+    const quotation = await sheetsService.getQuotationById(req.params.id);
+    if (!quotation) return res.status(404).json({ error: 'Quotation not found' });
+    res.json(quotation);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch quotation' });
+  }
+});
+
+router.get('/quotations/:rootId/history', async (req, res) => {
+  try {
+    res.json(await sheetsService.getQuotationRevisions(req.params.rootId));
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch quotation history' });
+  }
+});
+
+// Prices a set of line items without persisting — powers live totals in the builder UI.
+router.post('/quotations/preview', async (req, res) => {
+  try {
+    const customer = (await sheetsService.getAllCustomers()).find(c => c.Customer_ID === req.body.customerId);
+    const priced = await quotationEngine.priceQuotation({
+      customer: customer || {},
+      lineItems: req.body.lineItems,
+      documentDiscountPct: req.body.documentDiscountPct,
+      documentDiscountAmt: req.body.documentDiscountAmt,
+      destinationStateCode: req.body.destinationStateCode
+    });
+    res.json({
+      gstType: priced.gstType,
+      isInterState: priced.isInterState,
+      stateResolved: priced.stateResolved,
+      sellerStateCode: priced.sellerStateCode,
+      buyerStateCode: priced.buyerStateCode,
+      approvalRequired: priced.approvalRequired,
+      effectiveDiscountPct: priced.effectiveDiscountPct,
+      ...priced.totals
+    });
+  } catch (err) {
+    console.error('POST /quotations/preview error:', err);
+    res.status(500).json({ error: err.message || 'Failed to price quotation' });
+  }
+});
+
+router.post('/quotations', requirePermission('quotation','add'), async (req, res) => {
+  try {
+    const quotation = await quotationEngine.createQuotation(req.body, req.user);
+    res.json(quotation);
+  } catch (err) {
+    console.error('POST /quotations error:', err);
+    res.status(400).json({ error: err.message || 'Failed to create quotation' });
+  }
+});
+
+router.put('/quotations/:id', requirePermission('quotation','edit'), async (req, res) => {
+  try {
+    const updated = await quotationEngine.updateQuotation(req.params.id, req.body, req.user);
+    res.json(updated);
+  } catch (err) {
+    console.error('PUT /quotations error:', err);
+    res.status(400).json({ error: err.message || 'Failed to update quotation' });
+  }
+});
+
+router.post('/quotations/:id/approve', async (req, res) => {
+  try {
+    if (req.user.role !== 'Admin') return res.status(403).json({ error: 'Admin approval required' });
+    res.json(await quotationEngine.approveQuotation(req.params.id, req.user));
+  } catch (err) {
+    console.error('POST /quotations/approve error:', err);
+    res.status(400).json({ error: err.message || 'Failed to approve quotation' });
+  }
+});
+
+router.post('/quotations/:id/reject', async (req, res) => {
+  try {
+    res.json(await quotationEngine.rejectQuotation(req.params.id, req.body.reason, req.user));
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Failed to reject quotation' });
+  }
+});
+
+router.post('/quotations/:id/revise', requirePermission('quotation','add'), async (req, res) => {
+  try {
+    res.json(await quotationEngine.createRevision(req.params.id, req.body, req.user));
+  } catch (err) {
+    console.error('POST /quotations/revise error:', err);
+    res.status(400).json({ error: err.message || 'Failed to create revision' });
+  }
+});
+
+// Dispatches via Email/WhatsApp per settings, records the attempt, advances the task to
+// Quotation FLP and creates the follow-up task (Module D).
+router.post('/quotations/:id/dispatch', requirePermission('quotation','edit'), async (req, res) => {
+  try {
+    const quotation = await sheetsService.getQuotationById(req.params.id);
+    if (!quotation) return res.status(404).json({ error: 'Quotation not found' });
+    if (quotation.Status === quotationEngine.STATUS.PENDING_APPROVAL) {
+      return res.status(400).json({ error: 'Quotation is awaiting Admin approval and cannot be dispatched yet' });
+    }
+
+    // An optional channel sends over Email or WhatsApp alone, for the per-channel buttons in the
+    // builder; omitting it falls back to the configured dispatch_mode.
+    const channel = req.body.channel;
+    if (channel && !['Email', 'WhatsApp', 'Both'].includes(channel)) {
+      return res.status(400).json({ error: 'channel must be Email, WhatsApp or Both' });
+    }
+    if (channel === 'Email' && !quotation.Customer_Email_Snapshot) {
+      return res.status(400).json({ error: 'This customer has no email address on file.' });
+    }
+    if (channel === 'WhatsApp' && !quotation.Customer_Contact_Snapshot) {
+      return res.status(400).json({ error: 'This customer has no mobile number on file.' });
+    }
+
+    const dispatchService = require('../services/dispatchService');
+    const attachments = Array.isArray(req.body.attachments) ? req.body.attachments : undefined;
+    const results = await dispatchService.sendQuotation(quotation, attachments, channel);
+    const updated = await quotationEngine.markDispatched(req.params.id, results, req.user);
+
+    let followUpTask = null;
+    if (results.some(r => r.ok) && !quotation.Follow_Up_Task_ID) {
+      followUpTask = await createQuotationFollowUpTask(updated || quotation, req.user);
+    }
+
+    res.json({ quotation: updated, dispatchResults: results, followUpTask });
+  } catch (err) {
+    console.error('POST /quotations/dispatch error:', err);
+    res.status(500).json({ error: err.message || 'Failed to dispatch quotation' });
+  }
+});
+
+/**
+ * Module D: creates the "Quotation Follow-up" task that Admin + assigned Sales staff work from.
+ * Kept here (rather than in quotationEngine) because it is a task-pipeline concern that needs the
+ * same Tag_Master lookup the other task generators use.
+ */
+async function createQuotationFollowUpTask(quotation, actor) {
+  const itemSummary = (quotation.Line_Items || [])
+    .map(l => `${l.Item_Name || ''} - ${Number(l.Qty) || 0} ${l.Unit || 'Nos'}`)
+    .join(', ');
+
+  const tags = await sheetsService.getAllTags();
+  let tagId = tags.find(t => String(t.name || '').trim().toLowerCase() === 'quotation follow-up')?.Tag_ID;
+  if (!tagId) {
+    tagId = `TAG${Date.now().toString().slice(-6)}`;
+    await sheetsService.insertRow('Tag_Master', { Tag_ID: tagId, name: 'Quotation Follow-up', color: '#0284c7' });
+  }
+
+  const todayStr = quotationEngine.istToday();
+  const task = {
+    Task_ID: `TASK${Date.now().toString().slice(-6)}${Math.floor(Math.random() * 100).toString().padStart(2, '0')}`,
+    Customer_ID: quotation.Customer_ID,
+    Description: `Quotation Follow-up - ${quotation.Quote_No_Display} - ${itemSummary}`,
+    Assigned_Staff: quotation.Assigned_Staff || actor?.staffId || '',
+    Department: 'Sales',
+    Stage: quotationEngine.TASK_STAGE.QUOTATION_FLP,
+    Type: 'One-time',
+    Scheduled_Date: todayStr,
+    Status: 'Pending',
+    Tags: [tagId],
+    Quotation_ID: quotation.Quotation_ID,
+    Quote_No: quotation.Quote_No_Display,
+    Quote_Amount: quotation.Grand_Total,
+    Created_By: actor?.staffId || 'SYSTEM',
+    Created_At: todayStr
+  };
+
+  await sheetsService.insertRow('Task_Master', task);
+  await sheetsService.updateRow('Quotation_Master', 'Quotation_ID', quotation.Quotation_ID, {
+    Follow_Up_Task_ID: task.Task_ID,
+    Task_ID: quotation.Task_ID || task.Task_ID
+  });
+  return task;
+}
+
+// Module D: closing a quotation-pipeline task. Admin/Sales only, and an unsuccessful close must
+// carry a Reason for Order Lost for analytics.
+const ORDER_LOST_REASONS = ['Price High', 'Competitor', 'Delay', 'Requirement Cancelled', 'Other'];
+
+router.post('/tasks/:id/close-quotation-task', async (req, res) => {
+  try {
+    const role = String(req.user.role || '');
+    if (role !== 'Admin' && role !== 'Sales') {
+      return res.status(403).json({ error: 'Only Admin or Sales staff can close a quotation follow-up task' });
+    }
+
+    const task = await sheetsService.getTaskById(req.params.id);
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+
+    const { outcome, reasonForOrderLost, remarks } = req.body;
+    if (outcome !== 'Won' && outcome !== 'Lost') {
+      return res.status(400).json({ error: 'outcome must be either "Won" or "Lost"' });
+    }
+    if (outcome === 'Lost' && !reasonForOrderLost) {
+      return res.status(400).json({ error: `A Reason for Order Lost is required. One of: ${ORDER_LOST_REASONS.join(', ')}` });
+    }
+
+    const updateData = {
+      Status: outcome === 'Lost' ? 'Closed - Lost' : 'Completed',
+      Stage: quotationEngine.TASK_STAGE.ORDER_CLOSED,
+      Closed_Outcome: outcome,
+      Closed_By: req.user.staffId,
+      Closed_At: new Date().toISOString(),
+      Close_Remarks: remarks || ''
+    };
+    if (outcome === 'Lost') updateData.Reason_For_Order_Lost = reasonForOrderLost;
+
+    const updated = await sheetsService.updateRow('Task_Master', 'Task_ID', req.params.id, updateData);
+
+    if (task.Quotation_ID && outcome === 'Lost') {
+      await quotationEngine.rejectQuotation(task.Quotation_ID, reasonForOrderLost, req.user);
+    }
+
+    res.json(updated);
+  } catch (err) {
+    console.error('POST /tasks/close-quotation-task error:', err);
+    res.status(500).json({ error: 'Failed to close task' });
+  }
+});
+
+router.get('/analytics/order-lost', async (req, res) => {
+  try {
+    const tasks = await sheetsService.getAllTasks();
+    const lost = tasks.filter(t => t.Reason_For_Order_Lost);
+    const byReason = {};
+    ORDER_LOST_REASONS.forEach(r => { byReason[r] = { reason: r, count: 0, value: 0 }; });
+    for (const t of lost) {
+      const key = ORDER_LOST_REASONS.includes(t.Reason_For_Order_Lost) ? t.Reason_For_Order_Lost : 'Other';
+      byReason[key].count++;
+      byReason[key].value += Number(t.Quote_Amount) || 0;
+    }
+    res.json({
+      totalLost: lost.length,
+      totalLostValue: lost.reduce((s, t) => s + (Number(t.Quote_Amount) || 0), 0),
+      byReason: Object.values(byReason).sort((a, b) => b.count - a.count)
+    });
+  } catch (err) {
+    console.error('GET /analytics/order-lost error:', err);
+    res.status(500).json({ error: 'Failed to build order-lost analytics' });
+  }
+});
+
+// --- CONVERSION PIPELINE (Module G) ---
+router.post('/quotations/:id/convert-to-pi', async (req, res) => {
+  try {
+    res.json(await conversionService.convertQuotationToPI(req.params.id, req.user));
+  } catch (err) {
+    console.error('POST /convert-to-pi error:', err);
+    res.status(400).json({ error: err.message || 'Conversion failed' });
+  }
+});
+
+router.post('/quotations/:id/convert-to-invoice', async (req, res) => {
+  try {
+    res.json(await conversionService.convertQuotationToInvoice(req.params.id, req.user));
+  } catch (err) {
+    console.error('POST /convert-to-invoice error:', err);
+    res.status(400).json({ error: err.message || 'Conversion failed' });
+  }
+});
+
+router.get('/proforma-invoices', async (req, res) => {
+  try {
+    const all = await sheetsService.getAllPIs();
+    res.json(all.sort((a, b) => (Number(b.Created_At_Ms) || 0) - (Number(a.Created_At_Ms) || 0)));
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch proforma invoices' });
+  }
+});
+
+router.get('/proforma-invoices/:id', async (req, res) => {
+  try {
+    const pi = await sheetsService.getPIById(req.params.id);
+    if (!pi) return res.status(404).json({ error: 'PI not found' });
+    res.json(pi);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch PI' });
+  }
+});
+
+router.post('/proforma-invoices/:id/convert-to-invoice', async (req, res) => {
+  try {
+    res.json(await conversionService.convertPIToInvoice(req.params.id, req.user));
+  } catch (err) {
+    console.error('POST /pi/convert-to-invoice error:', err);
+    res.status(400).json({ error: err.message || 'Conversion failed' });
+  }
+});
+
+router.get('/sales-invoices', async (req, res) => {
+  try {
+    const all = await sheetsService.getAllSalesInvoices();
+    res.json(all.sort((a, b) => (Number(b.Created_At_Ms) || 0) - (Number(a.Created_At_Ms) || 0)));
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch sales invoices' });
+  }
+});
+
+router.get('/sales-invoices/:id', async (req, res) => {
+  try {
+    const invoice = await sheetsService.getSalesInvoiceById(req.params.id);
+    if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    res.json(invoice);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch invoice' });
+  }
+});
+
+router.post('/sales-invoices/:id/record-payment', async (req, res) => {
+  try {
+    res.json(await conversionService.recordPayment(req.params.id, req.body, req.user));
+  } catch (err) {
+    console.error('POST /record-payment error:', err);
+    res.status(400).json({ error: err.message || 'Failed to record payment' });
+  }
+});
+
+// --- INVENTORY (Module E) ---
+router.get('/inventory/balance', requirePermission('inventory','view'), async (req, res) => {
+  try {
+    res.json(await inventoryService.getBalances());
+  } catch (err) {
+    console.error('GET /inventory/balance error:', err);
+    res.status(500).json({ error: 'Failed to fetch stock balances' });
+  }
+});
+
+router.get('/inventory/low-stock', requirePermission('inventory','view'), async (req, res) => {
+  try {
+    res.json(await inventoryService.getLowStock());
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch low stock items' });
+  }
+});
+
+router.get('/inventory/transactions', requirePermission('inventory','view'), async (req, res) => {
+  try {
+    const all = await sheetsService.getStockTransactions();
+    const { itemId, type, fromDate, toDate } = req.query;
+    let filtered = all;
+    if (itemId) filtered = filtered.filter(t => t.Item_ID === itemId);
+    if (type) filtered = filtered.filter(t => t.Type === type);
+    if (fromDate) filtered = filtered.filter(t => String(t.Date) >= fromDate);
+    if (toDate) filtered = filtered.filter(t => String(t.Date) <= toDate);
+    res.json(filtered.sort((a, b) => String(b.Created_At).localeCompare(String(a.Created_At))));
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch stock transactions' });
+  }
+});
+
+router.post('/inventory/inward', requirePermission('inventory','add'), async (req, res) => {
+  try {
+    const result = await inventoryService.recordInward({
+      itemId: req.body.itemId,
+      qty: req.body.qty,
+      unit: req.body.unit,
+      supplierName: req.body.supplierName,
+      supplierInvoiceNo: req.body.supplierInvoiceNo,
+      notes: req.body.notes,
+      date: req.body.date,
+      recordedBy: req.user.staffId
+    });
+    res.json(result);
+  } catch (err) {
+    console.error('POST /inventory/inward error:', err);
+    res.status(400).json({ error: err.message || 'Failed to record stock inward' });
+  }
+});
+
+router.post('/inventory/usage', requirePermission('inventory','add'), async (req, res) => {
+  try {
+    const result = await inventoryService.recordUsage({
+      itemId: req.body.itemId,
+      qty: req.body.qty,
+      unit: req.body.unit,
+      clientId: req.body.clientId,
+      site: req.body.site,
+      notes: req.body.notes,
+      date: req.body.date,
+      recordedBy: req.user.staffId
+    });
+    res.json(result);
+  } catch (err) {
+    console.error('POST /inventory/usage error:', err);
+    res.status(400).json({ error: err.message || 'Failed to record stock usage' });
+  }
+});
+
+router.post('/inventory/adjustment', requirePermission('inventory','edit'), async (req, res) => {
+  try {
+    const result = await inventoryService.recordAdjustment({
+      itemId: req.body.itemId,
+      qty: req.body.qty,
+      unit: req.body.unit,
+      notes: req.body.notes || 'Manual stock adjustment',
+      date: req.body.date,
+      recordedBy: req.user.staffId
+    });
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Failed to record adjustment' });
+  }
+});
+
+router.put('/inventory/:itemId/reorder-level', requirePermission('inventory','edit'), async (req, res) => {
+  try {
+    await inventoryService.ensureInventoryRow(req.params.itemId);
+    const updated = await sheetsService.updateRow('Inventory_Master', 'Item_ID', req.params.itemId, {
+      Reorder_Level: Number(req.body.reorderLevel) || 0,
+      Last_Updated_At: new Date().toISOString()
+    });
+    res.json(updated);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to update reorder level' });
+  }
+});
+
+router.get('/inventory/consumption-report', requirePermission('inventory','view'), async (req, res) => {
+  try {
+    res.json(await inventoryService.getConsumptionReport({
+      fromDate: req.query.fromDate,
+      toDate: req.query.toDate,
+      itemId: req.query.itemId,
+      clientId: req.query.clientId
+    }));
+  } catch (err) {
+    console.error('GET /inventory/consumption-report error:', err);
+    res.status(500).json({ error: 'Failed to build consumption report' });
   }
 });
 

@@ -65,6 +65,11 @@ export default function QuotationBuilderPage() {
   const [selectedAttachmentIds, setSelectedAttachmentIds] = useState([]);
   // Won/Lost close dialog: null when shut, else { outcome, reason, remarks }.
   const [closeForm, setCloseForm] = useState(null);
+  // Effective module permissions for the signed-in user (Admin always has everything).
+  const [perms, setPerms] = useState(null);
+  // Inline item-create dialog: null when shut, else the draft item plus the line index that opened it.
+  const [itemCreate, setItemCreate] = useState(null);
+  const [savingItem, setSavingItem] = useState(false);
 
   // Draft form state (only meaningful before the quotation is issued)
   const [form, setForm] = useState({
@@ -93,20 +98,26 @@ export default function QuotationBuilderPage() {
     (async () => {
       setLoading(true);
       try {
-        const [sRes, cRes, iRes] = await Promise.all([
+        const [sRes, cRes, iRes, pRes] = await Promise.all([
           fetch('/api/quotation-settings', { headers: authHeaders }),
           fetch('/api/customers', { headers: authHeaders }),
-          fetch('/api/items', { headers: authHeaders })
+          fetch('/api/items', { headers: authHeaders }),
+          // Drives whether the inline "new item" button is offered — POST /api/items is gated on
+          // inventory.add, so showing it to someone without that permission only yields a 403.
+          fetch('/api/my-permissions', { headers: authHeaders })
         ]);
         if (cancelled) return;
 
         const s = sRes.ok ? await sRes.json() : null;
         const c = cRes.ok ? await cRes.json() : [];
         const i = iRes.ok ? await iRes.json() : [];
+        // The route wraps the map as { staffId, role, permissions } — unwrap it, as InventoryPage does.
+        const p = pRes.ok ? (await pRes.json()).permissions : null;
 
         setSettings(s);
         setCustomers(Array.isArray(c) ? c : []);
         setItems((Array.isArray(i) ? i : []).filter(x => x.Active !== false));
+        setPerms(p);
 
         if (s) {
           setForm(f => ({
@@ -266,10 +277,16 @@ export default function QuotationBuilderPage() {
     return items.find(i => i.Item_ID === line.Item_ID)?.Photo_URL || line.Photo_URL || '';
   }, [items]);
 
-  const pickItem = (idx, itemId) => {
-    const item = items.find(i => i.Item_ID === itemId);
+  /**
+   * Copies a catalogue item onto a line.
+   *
+   * Takes the item OBJECT, not an id, so a freshly-created item can be applied straight from the
+   * POST response — resolving by id right after setItems() would read the pre-update `items`
+   * closure, find nothing, and blank the line instead of filling it.
+   */
+  const applyItemToLine = (idx, item) => {
     if (!item) { updateLine(idx, { Item_ID: '', Item_Name: '', Photo_URL: '' }); return; }
-    const suggested = lastRates[itemId];
+    const suggested = lastRates[item.Item_ID];
     updateLine(idx, {
       Item_ID: item.Item_ID,
       Item_Name: item.Item_Name,
@@ -282,6 +299,49 @@ export default function QuotationBuilderPage() {
       Photo_URL: item.Photo_URL || '',
       Long_Description: item.Long_Description || item.Description || ''
     });
+  };
+
+  const pickItem = (idx, itemId) => applyItemToLine(idx, items.find(i => i.Item_ID === itemId));
+
+  /** Opens the item-create dialog for a specific line; `idx` is where the new item will land. */
+  const openItemCreate = (idx) => setItemCreate({
+    idx,
+    itemName: '',
+    unit: 'Nos',
+    standardRate: '',
+    defaultGstRate: settings?.defaults?.default_gst_rate ?? 18,
+    hsnCode: '',
+    category: ''
+  });
+
+  /**
+   * Creates an Item_Master entry and drops it onto the line that opened the dialog, so a product
+   * missing from the catalogue doesn't force the user out to the Inventory screen mid-quotation.
+   */
+  const saveNewItem = async () => {
+    if (!String(itemCreate.itemName || '').trim()) {
+      return flash('Enter an item name.', true);
+    }
+    setSavingItem(true);
+    try {
+      const { idx, ...body } = itemCreate;
+      const res = await fetch('/api/items', {
+        method: 'POST', headers: authHeaders, body: JSON.stringify(body)
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Could not create the item');
+
+      setItems(list => [...list, data]);
+      // Apply the response object directly rather than re-resolving by id — `items` has not
+      // re-rendered yet, so a lookup would miss and blank the line.
+      if (idx < form.lineItems.length) applyItemToLine(idx, data);
+      setItemCreate(null);
+      flash(`${data.Item_Name} added to the catalogue.`);
+    } catch (e) {
+      flash(e.message, true);
+    } finally {
+      setSavingItem(false);
+    }
   };
 
   const addLine = () => setForm(f => ({
@@ -510,9 +570,17 @@ export default function QuotationBuilderPage() {
     }
   };
 
+  /** Opens the shared customer modal in create mode, so a new buyer can be added without
+   *  leaving a half-built quotation. */
+  const openCustomerCreate = () => setCustEdit({
+    mode: 'create',
+    companyName: '', authPerson: '', contact: '', email: '', address: '', gstin: '', stateCode: ''
+  });
+
   const openCustomerEditor = () => {
     if (!selectedCustomer) return;
     setCustEdit({
+      mode: 'edit',
       companyName: selectedCustomer.Company_Name || '',
       authPerson: selectedCustomer.Auth_Person || '',
       contact: String(selectedCustomer.Contact || '').replace(/^\+91\s?/, ''),
@@ -524,19 +592,62 @@ export default function QuotationBuilderPage() {
   };
 
   const saveCustomer = async () => {
+    const isCreate = custEdit.mode === 'create';
+
+    // POST /api/customers has no server-side validation — an empty body would create a row literally
+    // named "New Customer". Checked before the spinner starts so an early return can't leave it on.
+    if (isCreate && !String(custEdit.companyName || '').trim()) {
+      return flash('Enter a company name for the new customer.', true);
+    }
+
     setSavingCust(true);
     try {
-      const res = await fetch(`/api/customers/${selectedCustomer.Customer_ID}`, {
-        method: 'PUT', headers: authHeaders, body: JSON.stringify(custEdit)
-      });
+      const { mode, ...body } = custEdit;
+      const res = await fetch(
+        isCreate ? '/api/customers' : `/api/customers/${selectedCustomer.Customer_ID}`,
+        { method: isCreate ? 'POST' : 'PUT', headers: authHeaders, body: JSON.stringify(body) }
+      );
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Could not update customer');
+      if (!res.ok) throw new Error(data.error || `Could not ${isCreate ? 'create' : 'update'} customer`);
+
+      // A brand-new customer is simply selected. No quotation PUT: updateQuotation re-derives its
+      // snapshot from the row's existing Customer_ID, so it could not pick this one up anyway —
+      // the change of customer goes through the normal Save instead.
+      if (isCreate) {
+        setCustomers(list => [...list, data]);
+        setForm(f => ({ ...f, customerId: data.Customer_ID }));
+        setCustEdit(null);
+        flash(`Customer ${data.Company_Name} created and selected.`);
+        return;
+      }
 
       // Refresh the local list so the card and the tax calculation both pick up the new GSTIN.
       const cRes = await fetch('/api/customers', { headers: authHeaders });
       if (cRes.ok) setCustomers(await cRes.json());
       setCustEdit(null);
-      flash('Customer updated. Totals will re-price with the new GST details.');
+
+      // Refreshing `customers` only updates what's on screen. Dispatch emails the
+      // Customer_*_Snapshot frozen onto the quotation row, so the quotation must be re-saved for
+      // the server to re-derive it — otherwise adding a missing email here still sends nowhere.
+      // The lineItems guard matters: payload() drops incomplete rows, so PUTting mid-edit with no
+      // valid line would persist an empty Line_Items.
+      if (quotation && isEditable(quotation.Status) && payload().lineItems.length > 0) {
+        const qRes = await fetch(`/api/quotations/${quotation.Quotation_ID}`, {
+          method: 'PUT', headers: authHeaders, body: JSON.stringify(payload())
+        });
+        const q = await qRes.json();
+        if (qRes.ok) {
+          setQuotation(q);
+          setTotals(q);
+          flash('Customer updated and applied to this quotation.');
+        } else {
+          flash(`Customer saved, but this quotation could not be updated: ${q.error || 'unknown error'}`, true);
+        }
+      } else if (quotation && !isEditable(quotation.Status)) {
+        flash('Customer details saved for future quotations. This one has already been issued, so it keeps the details it was sent with — use "New revision" to apply them.', true);
+      } else {
+        flash('Customer updated. Totals will re-price with the new GST details.');
+      }
       priceNow();
     } catch (e) {
       flash(e.message, true);
@@ -570,6 +681,9 @@ export default function QuotationBuilderPage() {
   const filteredCustomers = customerSearch
     ? customers.filter(c => `${c.Company_Name} ${c.Auth_Person || ''}`.toLowerCase().includes(customerSearch.toLowerCase())).slice(0, 40)
     : customers.slice(0, 40);
+
+  // POST /api/items is gated on inventory.add, so hide the inline creator rather than let it 403.
+  const canAddItem = isAdmin || Boolean(perms?.inventory?.add);
 
   // Won/Lost only applies once the customer has actually seen the quotation and the outcome is
   // still open: a draft has nothing to win, and an already converted/rejected thread is settled.
@@ -691,6 +805,9 @@ export default function QuotationBuilderPage() {
                     </select>
                     {!customerSearch && <label>Customer</label>}
                   </div>
+                  <button onClick={openCustomerCreate} className="qt-btn qt-btn-text text-xs py-1.5 mt-1">
+                    <Plus className="w-3.5 h-3.5" /> NEW CUSTOMER
+                  </button>
                 </>
               )}
 
@@ -823,11 +940,18 @@ export default function QuotationBuilderPage() {
                       {readOnly ? (
                         <div className="font-semibold text-sm">{line.Item_Name}</div>
                       ) : (
-                        <select value={line.Item_ID} onChange={e => pickItem(idx, e.target.value)}
-                          className="qt-select">
-                          <option value="">— Select item —</option>
-                          {items.map(i => <option key={i.Item_ID} value={i.Item_ID}>{i.Item_Name}</option>)}
-                        </select>
+                        <>
+                          <select value={line.Item_ID} onChange={e => pickItem(idx, e.target.value)}
+                            className="qt-select">
+                            <option value="">— Select item —</option>
+                            {items.map(i => <option key={i.Item_ID} value={i.Item_ID}>{i.Item_Name}</option>)}
+                          </select>
+                          {canAddItem && (
+                            <button onClick={() => openItemCreate(idx)} className="qt-btn qt-btn-text text-xs py-1 mt-0.5">
+                              <Plus className="w-3 h-3" /> NEW ITEM
+                            </button>
+                          )}
+                        </>
                       )}
                     </div>
                     {!readOnly && (
@@ -892,11 +1016,19 @@ export default function QuotationBuilderPage() {
                         {readOnly ? (
                           <div className="font-medium">{line.Item_Name}</div>
                         ) : (
-                          <select value={line.Item_ID} onChange={e => pickItem(idx, e.target.value)}
-                            className="qt-cell">
-                            <option value="">— Select item —</option>
-                            {items.map(i => <option key={i.Item_ID} value={i.Item_ID}>{i.Item_Name}</option>)}
-                          </select>
+                          <>
+                            <select value={line.Item_ID} onChange={e => pickItem(idx, e.target.value)}
+                              className="qt-cell">
+                              <option value="">— Select item —</option>
+                              {items.map(i => <option key={i.Item_ID} value={i.Item_ID}>{i.Item_Name}</option>)}
+                            </select>
+                            {canAddItem && (
+                              <button onClick={() => openItemCreate(idx)}
+                                className="qt-btn qt-btn-text text-[10px] py-0.5 px-1 mt-0.5">
+                                <Plus className="w-3 h-3" /> NEW ITEM
+                              </button>
+                            )}
+                          </>
                         )}
                         {suggestion && !readOnly && (
                           <div className="text-[10px] text-indigo-600 mt-1">
@@ -1246,7 +1378,52 @@ export default function QuotationBuilderPage() {
         </div>
       )}
 
-      {/* Customer quick-edit */}
+      {/* New catalogue item, created straight onto the line that opened it */}
+      {itemCreate && (
+        <div className="fixed inset-0 bg-slate-900/50 z-50 flex items-end md:items-center justify-center md:p-4" onClick={() => setItemCreate(null)}>
+          <div
+            className="bg-white rounded-t-2xl md:rounded-2xl p-4 md:p-5 w-full max-w-md max-h-[92vh] overflow-y-auto"
+            style={{ paddingBottom: 'calc(env(safe-area-inset-bottom) + 16px)' }}
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="w-10 h-1 bg-slate-300 rounded-full mx-auto mb-2 md:hidden" />
+            <div className="flex items-center justify-between mb-3">
+              <div className="font-bold text-slate-900">New item</div>
+              <button onClick={() => setItemCreate(null)} className="p-1.5 hover:bg-slate-100 rounded-lg"><X className="w-4 h-4" /></button>
+            </div>
+            <div className="space-y-3">
+              <CustField label="Item name" value={itemCreate.itemName}
+                onChange={v => setItemCreate(s => ({ ...s, itemName: v }))} />
+              <div className="grid grid-cols-2 gap-3">
+                <CustField label="Unit" value={itemCreate.unit}
+                  onChange={v => setItemCreate(s => ({ ...s, unit: v }))} />
+                <CustField label="HSN code" value={itemCreate.hsnCode}
+                  onChange={v => setItemCreate(s => ({ ...s, hsnCode: v }))} />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <MobileNumField label="Rate" value={itemCreate.standardRate}
+                  onChange={v => setItemCreate(s => ({ ...s, standardRate: v }))} />
+                <MobileNumField label="GST %" value={itemCreate.defaultGstRate}
+                  onChange={v => setItemCreate(s => ({ ...s, defaultGstRate: v }))} />
+              </div>
+              <CustField label="Category" value={itemCreate.category}
+                onChange={v => setItemCreate(s => ({ ...s, category: v }))} />
+              <div className="text-[11px] text-slate-500">
+                Saved to the item catalogue and added to this line. Photos and stock details can be
+                filled in later from Items &amp; Inventory.
+              </div>
+            </div>
+            <div className="flex gap-2 mt-4">
+              <button onClick={() => setItemCreate(null)} className="qt-btn qt-btn-ghost flex-1">CANCEL</button>
+              <button onClick={saveNewItem} disabled={savingItem} className="qt-btn qt-btn-primary flex-1">
+                {savingItem && <Loader2 className="w-4 h-4 animate-spin" />} CREATE
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Customer create / quick-edit — one modal, two modes (custEdit.mode) */}
       {custEdit && (
         <div className="fixed inset-0 bg-slate-900/50 z-50 flex items-end md:items-center justify-center md:p-4" onClick={() => setCustEdit(null)}>
           <div
@@ -1256,7 +1433,9 @@ export default function QuotationBuilderPage() {
           >
             <div className="w-10 h-1 bg-slate-300 rounded-full mx-auto mb-2 md:hidden" />
             <div className="flex items-center justify-between mb-3">
-              <div className="font-bold text-slate-900">Edit customer</div>
+              <div className="font-bold text-slate-900">
+                {custEdit.mode === 'create' ? 'New customer' : 'Edit customer'}
+              </div>
               <button onClick={() => setCustEdit(null)} className="p-1.5 hover:bg-slate-100 rounded-lg"><X className="w-4 h-4" /></button>
             </div>
             <div className="space-y-3">
@@ -1274,13 +1453,16 @@ export default function QuotationBuilderPage() {
                   setCustEdit(s => ({ ...s, gstin, stateCode, customerType }))}
               />
               <div className="text-[11px] text-slate-500">
-                Adding a GSTIN switches this customer to B2B and re-prices the quotation with the correct CGST+SGST or IGST split.
+                {custEdit.mode === 'create'
+                  ? 'A GSTIN makes this a B2B customer; leaving it blank treats them as B2C. Only the company name is required.'
+                  : 'Adding a GSTIN switches this customer to B2B and re-prices the quotation with the correct CGST+SGST or IGST split.'}
               </div>
             </div>
             <div className="flex gap-2 mt-4">
               <button onClick={() => setCustEdit(null)} className="qt-btn qt-btn-ghost flex-1">CANCEL</button>
               <button onClick={saveCustomer} disabled={savingCust} className="qt-btn qt-btn-primary flex-1">
-                {savingCust && <Loader2 className="w-4 h-4 animate-spin" />} SAVE
+                {savingCust && <Loader2 className="w-4 h-4 animate-spin" />}
+                {custEdit.mode === 'create' ? 'CREATE' : 'SAVE'}
               </button>
             </div>
           </div>

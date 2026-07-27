@@ -3058,11 +3058,25 @@ router.post('/quotations/:id/dispatch', requirePermission('quotation','edit'), a
     if (channel && !['Email', 'WhatsApp', 'Both'].includes(channel)) {
       return res.status(400).json({ error: 'channel must be Email, WhatsApp or Both' });
     }
-    if (channel === 'Email' && !quotation.Customer_Email_Snapshot) {
-      return res.status(400).json({ error: 'This customer has no email address on file.' });
-    }
-    if (channel === 'WhatsApp' && !quotation.Customer_Contact_Snapshot) {
-      return res.status(400).json({ error: 'This customer has no mobile number on file.' });
+    // Resolve the channels this send will actually target the same way dispatchService does, then
+    // refuse up front if none of them has a recipient. The combined Send button passes no channel,
+    // so the old `channel === 'Email'` checks never fired for it and a missing address surfaced far
+    // later as a cryptic per-channel failure from nodemailer.
+    const dispatchSettings = await quotationEngine.getSettings();
+    const mode = channel || dispatchSettings.dispatch_mode || 'Email';
+    const wantEmail = mode === 'Email' || mode === 'Both';
+    const wantWhatsapp = mode === 'WhatsApp' || mode === 'Both';
+
+    const missing = [];
+    if (wantEmail && !quotation.Customer_Email_Snapshot) missing.push('email address');
+    if (wantWhatsapp && !quotation.Customer_Contact_Snapshot) missing.push('mobile number');
+
+    // Only block when EVERY targeted channel is unreachable — on 'Both' with just a phone number,
+    // WhatsApp must still go out and email is reported as a per-channel failure.
+    if (missing.length && missing.length === [wantEmail, wantWhatsapp].filter(Boolean).length) {
+      return res.status(400).json({
+        error: `This customer has no ${missing.join(' or ')} on file. Tap the customer card to add one.`
+      });
     }
 
     // Either a legacy ready-made nodemailer array, or the builder's picker payload

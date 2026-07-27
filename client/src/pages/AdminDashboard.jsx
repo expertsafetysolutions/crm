@@ -4916,7 +4916,9 @@ export default function AdminDashboard() {
                   </p>
                 </div>
               </div>
-              <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4 sm:space-y-5 animate-fadeIn">
+              {/* Centred with a max width on very wide monitors: full-bleed rows would stretch a
+                  one-line remark across 1900px and make the timestamp unreadably far from its text. */}
+              <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4 sm:space-y-5 animate-fadeIn w-full max-w-6xl mx-auto">
 
                 {/* ADD NEW REMARK FORM (Auto-hidden after submit or when search / full-page history mode is active) */}
                 {!showHistorySearch && !isMasterRemarksSearch && (
@@ -5314,8 +5316,12 @@ export default function AdminDashboard() {
                           </div>
                         );
                       }
+                      // No inner height cap or scrollbar: the modal is already full-screen with its
+                      // own scroll, so a nested 256px box wasted most of the window and forced two
+                      // scrollbars. Letting the list grow means the outer container scrolls once
+                      // and the full history uses the whole screen.
                       return (
-                        <div className="space-y-2.5 max-h-64 overflow-y-auto pr-1">
+                        <div className="space-y-2.5">
                           {history.slice().reverse().map((item, idx) => (
                             <div key={item.Interaction_ID || idx} className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-1.5 shadow-2xs">
                               <div className="flex items-center justify-between gap-2">

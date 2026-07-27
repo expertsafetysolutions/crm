@@ -278,11 +278,16 @@ export default function QuotationSettingsPage() {
                 onChange={rows => set('payment_terms', rows)}
                 newRow={() => ({ id: `PT_${Date.now()}`, label: '', days: 0, description: '' })}
                 render={(row, update) => (
-                  <div className="flex gap-2 flex-1">
-                    <input value={row.label} onChange={e => update({ label: e.target.value })} placeholder="e.g. 30 Days Credit"
-                      className="qt-cell flex-1" />
-                    <input type="number" value={row.days} onChange={e => update({ days: Number(e.target.value) })} placeholder="days"
-                      className="qt-cell w-24" />
+                  /* Stacks on mobile — three inputs side by side leave each one too narrow to read. */
+                  <div className="flex flex-col md:flex-row gap-2 flex-1">
+                    <div className="flex gap-2">
+                      <input value={row.label} onChange={e => update({ label: e.target.value })} placeholder="e.g. 30 Days Credit"
+                        className="qt-cell flex-1" />
+                      <input type="number" value={row.days} onChange={e => update({ days: Number(e.target.value) })} placeholder="days"
+                        className="qt-cell w-24" />
+                    </div>
+                    <input value={row.description || ''} onChange={e => update({ description: e.target.value })}
+                      placeholder="Note (optional)" className="qt-cell flex-1" />
                   </div>
                 )} />
             </Card>

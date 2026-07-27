@@ -30,7 +30,9 @@
       "Bash(curl -s \"http://localhost:5174/\" -o /dev/null -w \"root: %{http_code}\\\\n\")",
       "Bash(grep -Hm1 ^description: 'c:/Users/DELL/Desktop/CRM 150726/Expert CRM 2026/.claude/skills/*/SKILL.md')",
       "Bash(npx web-push *)",
-      "Bash(npm install *)"
+      "Bash(npm install *)",
+      "Bash(curl -s -o /dev/null http://localhost:5000/api/health)",
+      "Bash(node tests/tmpSnapshotCheck.js)"
     ]
   }
 }

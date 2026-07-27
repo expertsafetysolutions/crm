@@ -338,14 +338,15 @@ const QuotationPdfTemplate = React.forwardRef(({
           </div>
 
           {/* Document title band.
-              Colour and metrics are set inline, matching the table header and grand-total rows.
-              Those two render correctly in the exported PDF while this band — the one element here
-              that relied on Tailwind utility classes — came out as an empty red box, so the
-              styling is pinned inline to take the class layer out of the equation entirely.
-              Letter-spacing adds a trailing gap after the last glyph, which pushes centred text
-              right; textIndent of the same size cancels it. */}
+              MUST NOT use text-indent. html2canvas 1.4.1 does not implement that property at all,
+              and because letter-spacing is non-zero it redraws the text glyph-by-glyph starting at
+              the element's measured left edge (renderTextWithLetterSpacing). The browser applies
+              the indent, the canvas does not, so the two disagree and the lettering lands outside
+              the band — which printed as an empty red box. The trailing gap that letter-spacing
+              leaves after the last glyph is compensated with asymmetric padding instead, which
+              html2canvas does honour. */}
           <div className="text-center mb-2">
-            <div className="inline-block" style={{ backgroundColor: BRAND_RED, padding: '4px 28px' }}>
+            <div className="inline-block" style={{ backgroundColor: BRAND_RED, padding: '4px 28px 4px 32px' }}>
               <h1
                 style={{
                   color: '#ffffff',
@@ -353,7 +354,6 @@ const QuotationPdfTemplate = React.forwardRef(({
                   lineHeight: 1.25,
                   fontWeight: 900,
                   letterSpacing: '0.2em',
-                  textIndent: '0.2em',
                   margin: 0,
                   whiteSpace: 'nowrap'
                 }}

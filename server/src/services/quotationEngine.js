@@ -252,6 +252,13 @@ async function updateQuotation(quotationId, payload, actor) {
   });
 
   const updateData = {
+    // Re-derive the buyer snapshot from the live customer row, so contact details fixed after the
+    // quotation was drafted (a missing email, say) actually reach dispatch — which reads only these
+    // Customer_*_Snapshot fields, never Customer_Master. Only DRAFT/PENDING_APPROVAL reach this
+    // point (guard above), so an issued document still never shifts under a later customer edit.
+    // The `customer ?` test matters: line below passes `customer || {}`, and snapshotting an empty
+    // object would blank a good snapshot if the customer row had been deleted.
+    ...(customer ? priced.snapshot : {}),
     GST_Type: priced.gstType,
     Destination_State_Code: priced.buyerStateCode,
     Line_Items: priced.totals.lineItems,

@@ -5,20 +5,133 @@ import { formatMoney, formatDate, amountInWords, buildUpiUri, isUpiDeepLink, ext
 /**
  * Print/PDF layout for a quotation, proforma invoice or sales invoice.
  *
- * Branding deliberately mirrors the Certificate module exactly — double amber border, MSME/FSAI
- * badges, centred header logo, 8%-opacity centre watermark, 80x80 stamp slot above the signature
- * line, footer image — so every document the company issues looks like one family. Orientation is
- * A4 PORTRAIT (794x1123 at 96dpi) rather than the certificate's landscape, because tax invoices
- * are conventionally portrait and long item lists paginate better that way.
+ * Layout follows the Certificate module — full-width header logo, 8%-opacity centre watermark,
+ * 80x80 stamp slot above the signature line, footer image — so every document the company issues
+ * looks like one family. Orientation is A4 PORTRAIT (794x1123 at 96dpi) rather than the
+ * certificate's landscape, because tax invoices are conventionally portrait and long item lists
+ * paginate better that way.
+ *
+ * Colour comes from the EXPERT logo (red on black) instead of the certificate's amber: red is
+ * reserved for the three moments that identify the document — page border, title band, grand total
+ * — with everything structural in black/grey. Restricting the accent that way keeps the sheet
+ * readable when printed in mono and stops the page competing with the logo itself.
  *
  * html2canvas constraints preserved from the certificate implementation:
  *  - fixed-aspect boxes with max-width/max-height instead of CSS object-fit, which html2canvas
  *    ignores (a round seal would otherwise be stretched into an ellipse);
  *  - explicit px sizing rather than relative units, so the capture matches the on-screen preview.
+ *  - brand colours are inline style objects, not Tailwind classes: these exact hexes are not in the
+ *    palette, and html2canvas resolves computed styles either way.
  */
 
 const A4_PORTRAIT_WIDTH = 794;   // 210mm @ 96dpi
 const A4_PORTRAIT_HEIGHT = 1123; // 297mm @ 96dpi
+
+// Sampled from assets/header_logo.png — the EXPERT wordmark's red and its black keyline.
+const BRAND_RED = '#E01B24';      // page border, title band, grand total
+const BRAND_RED_DARK = '#A3111A'; // small red text, where pure red would vibrate
+const BRAND_INK = '#111827';      // table header fill and emphasised labels
+const BRAND_HEAD_BG = '#F1F5F9';  // section-header fill (Bill To / Details / Bank)
+
+/**
+ * Anti-copy watermark: the company name repeated in small diagonal lettering across the entire
+ * sheet, so a screenshot of ANY region of the document still carries the name and cannot be passed
+ * off to another vendor.
+ *
+ * Each row is ONE continuous rotated strip whose text repeats along its full length, rather than a
+ * grid of separate word tiles. Separate tiles leave visible blank gaps wherever a short word sits
+ * in a wide cell; a continuous strip keeps the lettering unbroken end to end. Repeats within a
+ * strip are separated by SEPARATOR (three spaces) so each occurrence still reads as its own phrase.
+ *
+ * Plain absolutely-positioned text is used rather than an SVG <pattern> or a
+ * repeating-linear-gradient: html2canvas rasterises both of those inconsistently (patterns often
+ * drop out of the capture entirely), whereas text always survives.
+ *
+ * Strips are sized to the page DIAGONAL and the band is over-sized and re-centred, so a 45°
+ * rotation still covers all four corners. Everything sits inside a fixed-size, overflow-hidden A4
+ * box, so the rotation is clipped to the page rather than expanding it. Deliberately drawn ABOVE
+ * the page content (but non-interactive and very low opacity) — a watermark sitting under an
+ * opaque table cell would be invisible exactly where a screenshot is most likely to be cropped.
+ */
+const SEPARATOR = '   ';
+
+function SecurityWatermark({ config = {}, width, height }) {
+  const text = String(config.text || '').trim();
+  if (!text) return null;
+
+  const gapY = Number(config.gap_y_px) || 74;
+  const fontSize = Number(config.font_size_px) || 9;
+  const angle = config.angle_deg !== undefined ? Number(config.angle_deg) : -45;
+  const opacity = config.opacity !== undefined ? Number(config.opacity) : 0.07;
+
+  // The rotated band must cover the page diagonal in both directions, else the corners fall
+  // outside it once rotated.
+  const diagonal = Math.ceil(Math.sqrt(width * width + height * height));
+  const rows = Math.ceil(diagonal / gapY) + 2;
+
+  // Enough repeats to fill a full diagonal-length line at this font size. ~0.62em average glyph
+  // advance for bold sans text is a deliberate over-estimate, so the line always overruns rather
+  // than stopping short and reintroducing a gap.
+  const unit = text + SEPARATOR;
+  const perLine = Math.ceil(diagonal / (unit.length * fontSize * 0.62)) + 2;
+  const line = unit.repeat(Math.max(perLine, 2));
+
+  const strips = [];
+  for (let r = 0; r < rows; r++) {
+    strips.push(
+      <div
+        key={r}
+        style={{
+          position: 'absolute',
+          left: 0,
+          top: `${r * gapY}px`,
+          width: `${diagonal}px`,
+          fontSize: `${fontSize}px`,
+          fontWeight: 700,
+          color: BRAND_INK,
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          letterSpacing: '0.06em',
+          // Alternate rows start half a phrase in, so repeats don't line up into vertical columns.
+          textIndent: r % 2 ? `${unit.length * fontSize * 0.31}px` : 0
+        }}
+      >
+        {line}
+      </div>
+    );
+  }
+
+  return (
+    <div
+      aria-hidden="true"
+      style={{
+        position: 'absolute',
+        inset: 0,
+        overflow: 'hidden',
+        pointerEvents: 'none',
+        userSelect: 'none',
+        opacity,
+        zIndex: 5
+      }}
+    >
+      {/* Square band of side = diagonal, centred on the page, then rotated about its own centre.
+          Sizing it to the diagonal is what guarantees full coverage at any angle. */}
+      <div
+        style={{
+          position: 'absolute',
+          width: `${diagonal}px`,
+          height: `${diagonal}px`,
+          left: `${(width - diagonal) / 2}px`,
+          top: `${(height - diagonal) / 2}px`,
+          transform: `rotate(${angle}deg)`,
+          transformOrigin: 'center center'
+        }}
+      >
+        {strips}
+      </div>
+    </div>
+  );
+}
 
 const DOC_TITLES = {
   QUOTATION: 'QUOTATION',
@@ -113,6 +226,11 @@ const QuotationPdfTemplate = React.forwardRef(({
   const seller = settings?.seller_profile || {};
   const bank = settings?.banking_details || {};
   const overlay = settings?.signature_stamp_overlay || {};
+  const security = settings?.security_watermark || {};
+
+  // The discount column only appears when at least one line is actually discounted, so a
+  // full-price quotation isn't left with a column of dashes. Mirrors the photo column below.
+  const showDiscount = (doc.Line_Items || []).some(l => Number(l.Discount_Amt) > 0);
 
   // The photo column only appears when at least one line actually has an image, so a
   // service-only quotation isn't left with a column of dashes.
@@ -142,14 +260,14 @@ const QuotationPdfTemplate = React.forwardRef(({
 
   return (
     <PageFrame ref={ref}>
-      {/* Double amber border, matching the certificate frame.
+      {/* Double border in the logo's red.
           The frame is the flex column that owns the page: content grows from the top, the
           signature/footer block is pinned to the bottom by a flexible spacer between them.
           It must NOT repeat the parent's minHeight — nesting two min-heights of a full page
           inside a border-box parent overflows the sheet and pushes the footer off the page. */}
       <div
-        className="flex flex-col border-4 border-double border-amber-800 p-4 flex-1 bg-white relative"
-        style={{ boxSizing: 'border-box' }}
+        className="flex flex-col border-4 border-double p-4 flex-1 bg-white relative"
+        style={{ boxSizing: 'border-box', borderColor: BRAND_RED }}
       >
         {overlay.show_watermark !== false && (
           <img
@@ -157,8 +275,19 @@ const QuotationPdfTemplate = React.forwardRef(({
             onError={e => { e.target.onerror = null; e.target.src = '/assets/watermark-logo.jpg'; }}
             alt=""
             aria-hidden="true"
-            className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-2/5 object-contain pointer-events-none select-none"
-            style={{ opacity: 0.08, zIndex: 0 }}
+            /* Near page width so it reads as a proper background mark, held just under full
+               width (and at a lower opacity to suit the larger area) so it stays subtle behind
+               the tax figures rather than overpowering them. */
+            className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[82%] object-contain pointer-events-none select-none"
+            style={{ opacity: 0.06, zIndex: 0 }}
+          />
+        )}
+
+        {security.enabled !== false && (
+          <SecurityWatermark
+            config={{ ...security, text: security.text || seller.legal_name || 'Expert Safety Solutions' }}
+            width={A4_PORTRAIT_WIDTH}
+            height={A4_PORTRAIT_HEIGHT}
           />
         )}
 
@@ -166,38 +295,31 @@ const QuotationPdfTemplate = React.forwardRef(({
             One flow region that sizes to its content. Everything that must sit directly under
             the previous block lives here; the spacer below absorbs the leftover page height. */}
         <div className="relative" style={{ zIndex: 1 }}>
-          <div className="flex items-center justify-between border-b-2 border-amber-700 pb-2 mb-2">
-            <div className="flex flex-col gap-1 shrink-0">
-              <div className="bg-amber-100 text-amber-950 px-2 py-0.5 rounded font-black text-[8px] border border-amber-300 text-center">
-                MSME REGISTERED
-              </div>
-              <div className="bg-red-100 text-red-950 px-2 py-0.5 rounded font-black text-[8px] border border-red-300 text-center">
-                FSAI MEMBER
-              </div>
-            </div>
+          {/* The header artwork already carries the MSME/FSAI marks, the business-areas list and
+              the company logo, so no chips or duplicate text sit beside it. It spans the full
+              content width exactly like the footer image below, which is what makes the two ends
+              of the page align. Ref/Date/GSTIN move to their own full-width strip underneath. */}
+          <div className="border-b-2 pb-2 mb-2" style={{ borderColor: BRAND_RED }}>
+            <img
+              src={branding.header || '/assets/header_logo.png'}
+              onError={e => { e.target.onerror = null; e.target.src = '/assets/header.jpg'; }}
+              alt="Company Header"
+              className="w-full h-auto object-contain"
+            />
+          </div>
 
-            <div className="text-center px-2">
-              <img
-                src={branding.header || '/assets/header_logo.png'}
-                onError={e => { e.target.onerror = null; e.target.src = '/assets/header.jpg'; }}
-                alt="Company Header"
-                className="h-11 w-auto max-w-full object-contain mx-auto"
-              />
-            </div>
-
-            <div className="text-right text-[8.5px] font-bold text-slate-700 space-y-0.5 shrink-0">
-              <div><span className="text-amber-950 font-black">Ref No:</span> {docNo}</div>
-              <div><span className="text-amber-950 font-black">Date:</span> {formatDate(docDate)}</div>
-              {seller.gstin && (
-                <div><span className="text-amber-950 font-black">GSTIN:</span> {seller.gstin}</div>
-              )}
-            </div>
+          <div className="flex items-start justify-between text-[8.5px] font-bold text-slate-700 mb-2">
+            <div><span className="font-black" style={{ color: BRAND_INK }}>Ref No:</span> {docNo}</div>
+            <div className="text-center"><span className="font-black" style={{ color: BRAND_INK }}>Date:</span> {formatDate(docDate)}</div>
+            {seller.gstin && (
+              <div className="text-right"><span className="font-black" style={{ color: BRAND_INK }}>GSTIN:</span> {seller.gstin}</div>
+            )}
           </div>
 
           {/* Document title band */}
           <div className="text-center mb-2">
-            <div className="inline-block border-2 border-amber-800 px-6 py-0.5 bg-amber-50">
-              <h1 className="text-[13px] font-black tracking-[0.2em] text-amber-950">
+            <div className="inline-block px-7 py-1" style={{ backgroundColor: BRAND_RED }}>
+              <h1 className="text-[13px] font-black tracking-[0.2em] text-white">
                 {DOC_TITLES[docType] || 'QUOTATION'}
               </h1>
             </div>
@@ -206,7 +328,8 @@ const QuotationPdfTemplate = React.forwardRef(({
           {/* ---------- PARTIES ---------- */}
           <div className="flex gap-2 mb-2 text-[9px]">
             <div className="flex-1 border border-slate-400" style={{ minWidth: 0 }}>
-              <div className="bg-amber-50 px-1.5 py-0.5 font-black uppercase text-[8px] tracking-wide border-b border-slate-400 text-amber-950">
+              <div className="px-1.5 py-0.5 font-black uppercase text-[8px] tracking-wide border-b border-slate-400"
+                style={{ backgroundColor: BRAND_HEAD_BG, color: BRAND_INK }}>
                 Bill To
               </div>
               {/* A long email or unspaced address must wrap rather than widen the column. */}
@@ -229,7 +352,8 @@ const QuotationPdfTemplate = React.forwardRef(({
             </div>
 
             <div style={{ width: '250px' }} className="border border-slate-400 shrink-0">
-              <div className="bg-amber-50 px-1.5 py-0.5 font-black uppercase text-[8px] tracking-wide border-b border-slate-400 text-amber-950">
+              <div className="px-1.5 py-0.5 font-black uppercase text-[8px] tracking-wide border-b border-slate-400"
+                style={{ backgroundColor: BRAND_HEAD_BG, color: BRAND_INK }}>
                 Details
               </div>
               <table className="w-full">
@@ -257,7 +381,7 @@ const QuotationPdfTemplate = React.forwardRef(({
               name overrides them and stretches the table wider than the page. */}
           <table className="w-full text-[8.5px] border-collapse" style={{ tableLayout: 'fixed' }}>
             <thead>
-              <tr className="bg-amber-50 text-amber-950">
+              <tr style={{ backgroundColor: BRAND_INK, color: '#ffffff' }}>
                 <th className={`${cell} text-center`} style={{ width: '26px' }}>#</th>
                 {showPhotos && <th className={`${cell} text-center`} style={{ width: '52px' }}>Photo</th>}
                 <th className={`${cell} text-left`}>Description of Goods / Services</th>
@@ -265,7 +389,7 @@ const QuotationPdfTemplate = React.forwardRef(({
                 <th className={`${cell} text-right`} style={{ width: '40px' }}>Qty</th>
                 <th className={`${cell} text-center`} style={{ width: '34px' }}>Unit</th>
                 <th className={`${cell} text-right`} style={{ width: '62px' }}>Rate</th>
-                <th className={`${cell} text-right`} style={{ width: '54px' }}>Disc.</th>
+                {showDiscount && <th className={`${cell} text-right`} style={{ width: '54px' }}>Disc.</th>}
                 <th className={`${cell} text-right`} style={{ width: '66px' }}>Taxable</th>
                 <th className={`${cell} text-center`} style={{ width: '34px' }}>GST</th>
                 <th className={`${cell} text-right`} style={{ width: '72px' }}>Amount</th>
@@ -304,7 +428,11 @@ const QuotationPdfTemplate = React.forwardRef(({
                   <td className={`${cell} text-right`}>{Number(l.Qty) || 0}</td>
                   <td className={`${cell} text-center`}>{l.Unit || 'Nos'}</td>
                   <td className={`${cell} text-right`}>{formatMoney(l.Rate, false)}</td>
-                  <td className={`${cell} text-right`}>{Number(l.Discount_Amt) > 0 ? formatMoney(l.Discount_Amt, false) : '-'}</td>
+                  {showDiscount && (
+                    <td className={`${cell} text-right`}>
+                      {Number(l.Discount_Amt) > 0 ? formatMoney(l.Discount_Amt, false) : '-'}
+                    </td>
+                  )}
                   <td className={`${cell} text-right`}>{formatMoney(l.Taxable_Value, false)}</td>
                   <td className={`${cell} text-center`}>{Number(l.GST_Rate) || 0}%</td>
                   <td className={`${cell} text-right font-bold`}>{formatMoney(l.Line_Total, false)}</td>
@@ -327,7 +455,8 @@ const QuotationPdfTemplate = React.forwardRef(({
 
               {(bank.account_no || rawUpi) && (
                 <div className="border border-slate-400">
-                  <div className="bg-amber-50 px-1.5 py-0.5 font-black uppercase text-[8px] border-b border-slate-400 text-amber-950">
+                  <div className="px-1.5 py-0.5 font-black uppercase text-[8px] border-b border-slate-400"
+                    style={{ backgroundColor: BRAND_HEAD_BG, color: BRAND_INK }}>
                     Bank Details
                   </div>
                   <div className="flex">
@@ -367,9 +496,9 @@ const QuotationPdfTemplate = React.forwardRef(({
                       <Total k="SGST" v={formatMoney(doc.Total_SGST)} />
                     </>
                   )}
-                  <tr className="bg-amber-50">
-                    <td className="px-1.5 py-1 font-black border-t-2 border-amber-700 text-amber-950">GRAND TOTAL</td>
-                    <td className="px-1.5 py-1 text-right font-black text-[11px] border-t-2 border-amber-700 text-amber-950">
+                  <tr style={{ backgroundColor: BRAND_RED, color: '#ffffff' }}>
+                    <td className="px-1.5 py-1 font-black">GRAND TOTAL</td>
+                    <td className="px-1.5 py-1 text-right font-black text-[11px]">
                       {formatMoney(doc.Grand_Total)}
                     </td>
                   </tr>
@@ -386,7 +515,7 @@ const QuotationPdfTemplate = React.forwardRef(({
 
           {tncItems.length > 0 && (
             <div className="mt-2">
-              <div className="text-[8px] font-black uppercase tracking-wide text-amber-950 mb-0.5">Terms &amp; Conditions</div>
+              <div className="text-[8px] font-black uppercase tracking-wide mb-0.5" style={{ color: BRAND_RED_DARK }}>Terms &amp; Conditions</div>
               <ol className="text-[7.5px] text-slate-700 leading-snug" style={{ paddingLeft: '14px', listStyleType: 'decimal' }}>
                 {tncItems.map(t => <li key={t.id}>{t.text}</li>)}
               </ol>
@@ -434,12 +563,14 @@ const QuotationPdfTemplate = React.forwardRef(({
             </div>
           </div>
 
-          <div className="border-t border-slate-300 pt-1.5 mt-2">
+          {/* Full content width, matching the header image above so both ends of the page share
+              the same left and right alignment. */}
+          <div className="pt-1.5 mt-2">
             <img
               src={branding.footer || '/assets/Footer - Expert (2025).PNG'}
               onError={e => { e.target.onerror = null; e.target.src = '/assets/footer.png'; }}
               alt="Footer"
-              className="w-auto h-auto max-w-full max-h-24 object-contain mx-auto"
+              className="w-full h-auto object-contain"
             />
           </div>
         </div>

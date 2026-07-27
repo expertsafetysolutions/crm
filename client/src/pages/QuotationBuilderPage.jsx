@@ -3,7 +3,7 @@ import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   ArrowLeft, Plus, Trash2, Save, Send, FileText, Download, CheckCircle2,
   AlertTriangle, History, Loader2, Copy, Building2, Search, Eye, X, Printer, MoreHorizontal,
-  Image as ImageIcon, Mail, MessageCircle
+  Image as ImageIcon, Mail, MessageCircle, Paperclip
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useDocSettings } from '../context/DocSettingsContext';
@@ -14,7 +14,7 @@ import {
   formatMoney, formatDate, statusMeta, emptyLineItem,
   isEditable, isDispatchable, canRevise
 } from '../utils/quotationUtils';
-import { stateOptions } from '../utils/gstinUtils';
+import { stateOptions, extractStateCode, detectStateCode, getStateName } from '../utils/gstinUtils';
 
 /**
  * Quotation builder — a dedicated route (not an AdminDashboard tab) because it's a stateful
@@ -57,6 +57,8 @@ export default function QuotationBuilderPage() {
   // The A4 sheet is 794px wide; scale it down to fit narrow screens rather than letting the
   // modal scroll horizontally.
   const [previewScale, setPreviewScale] = useState(1);
+  // Catalogue ids (from Quotation_Settings.email_attachments) to attach to the dispatch email.
+  const [selectedAttachmentIds, setSelectedAttachmentIds] = useState([]);
 
   // Draft form state (only meaningful before the quotation is issued)
   const [form, setForm] = useState({
@@ -109,6 +111,7 @@ export default function QuotationBuilderPage() {
               ? f.selectedTncIds
               : (s.tnc_checklist || []).filter(t => t.default_checked).map(t => t.id)
           }));
+          setSelectedAttachmentIds((s.email_attachments || []).filter(a => a.default_selected).map(a => a.id));
         }
       } catch (e) {
         if (!cancelled) setError('Could not load quotation settings or master data.');
@@ -199,6 +202,19 @@ export default function QuotationBuilderPage() {
   const selectedCustomer = customers.find(c => c.Customer_ID === form.customerId);
   const readOnly = quotation ? !isEditable(quotation.Status) : false;
 
+  /**
+   * Place of supply, resolved without troubling staff. Priority: the GSTIN's own state digits,
+   * then the state saved on the customer, then the state named in their address. Empty means every
+   * automatic source failed and the manual picker has to be shown.
+   */
+  const resolvedStateCode = useMemo(() => {
+    if (!selectedCustomer) return '';
+    const gstin = selectedCustomer.GSTIN || selectedCustomer.Gst_No;
+    return extractStateCode(gstin)
+      || String(selectedCustomer.State_Code || '')
+      || detectStateCode(selectedCustomer.Address || selectedCustomer.Billing_Address);
+  }, [selectedCustomer]);
+
   // ---- live server-side pricing (debounced) ----
   const priceNow = useCallback(async () => {
     const valid = form.lineItems.filter(l => l.Item_Name && Number(l.Qty) > 0);
@@ -211,12 +227,13 @@ export default function QuotationBuilderPage() {
           customerId: form.customerId,
           lineItems: valid,
           documentDiscountPct: Number(form.documentDiscountPct) || 0,
-          destinationStateCode: form.destinationStateCode
+          // The auto-resolved state wins; the manual picker only fills the gap when it is blank.
+          destinationStateCode: resolvedStateCode || form.destinationStateCode
         })
       });
       if (res.ok) setTotals(await res.json());
     } catch (e) { /* keep last good totals */ }
-  }, [form.customerId, form.lineItems, form.documentDiscountPct, form.destinationStateCode, authHeaders]);
+  }, [form.customerId, form.lineItems, form.documentDiscountPct, form.destinationStateCode, resolvedStateCode, authHeaders]);
 
   useEffect(() => {
     if (readOnly) return;
@@ -282,7 +299,7 @@ export default function QuotationBuilderPage() {
     taskId: form.taskId || undefined,
     lineItems: form.lineItems.filter(l => l.Item_Name && Number(l.Qty) > 0),
     documentDiscountPct: Number(form.documentDiscountPct) || 0,
-    destinationStateCode: form.destinationStateCode,
+    destinationStateCode: resolvedStateCode || form.destinationStateCode,
     subject: form.subject,
     notes: form.notes,
     paymentTermsId: form.paymentTermsId,
@@ -338,14 +355,71 @@ export default function QuotationBuilderPage() {
   };
 
   /**
+   * Renders the on-screen PDF template to base64 for emailing.
+   *
+   * Reuses the same hidden element the Download PDF button captures, so the customer receives a
+   * byte-identical document. Returns null on failure — a PDF that won't render must not stop the
+   * quotation email itself from going out.
+   */
+  const buildQuotationPdfAttachment = async () => {
+    if (!pdfRef.current) throw new Error('The quotation preview has not finished rendering yet.');
+
+    // The off-screen template pulls its branding images in asynchronously, and PageFrame measures
+    // and rescales itself in a layout effect. Capturing before both settle yields a blank or
+    // half-drawn canvas, so wait for the images to decode and let the frame reach a stable size.
+    const node = pdfRef.current;
+    await Promise.all(
+      Array.from(node.querySelectorAll('img')).map(img => (
+        img.complete && img.naturalWidth > 0
+          ? Promise.resolve()
+          : new Promise(resolve => { img.onload = img.onerror = resolve; })
+      ))
+    );
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+
+    const { generatePdfFromElement } = await import('../utils/pdfGenerator');
+    const pdf = await generatePdfFromElement(node, { orientation: 'portrait' });
+    const base64 = pdf.output('base64');
+    if (!base64) throw new Error('The generated PDF was empty.');
+
+    return {
+      fileName: `${safeFileName('Quotation', quotation.Quote_No_Display, quotation.Customer_Name_Snapshot)}.pdf`,
+      mimeType: 'application/pdf',
+      base64
+    };
+  };
+
+  /**
    * Dispatches the quotation. `channel` sends over Email or WhatsApp alone; omitting it uses the
    * dispatch_mode configured in Quotation Settings.
+   *
+   * Catalogue attachments are sent as ids only — the server pulls the bytes from Media_Store — while
+   * the quotation PDF has to travel inline because it is rendered here in the browser.
    */
   const handleDispatch = async (channel) => {
+    const emailInvolved = !channel || channel === 'Email' || channel === 'Both'
+      || ['Email', 'Both'].includes(settings?.dispatch_mode);
+
+    const body = channel ? { channel } : {};
+    if (emailInvolved) {
+      if (selectedAttachmentIds.length) body.catalogIds = selectedAttachmentIds;
+      if (settings?.attach_quotation_pdf !== false) {
+        setBusyAction(channel ? `dispatch:${channel}` : 'dispatch');
+        try {
+          body.inlineAttachments = [await buildQuotationPdfAttachment()];
+        } catch (e) {
+          // The PDF is the primary deliverable, so a failed render aborts the send rather than
+          // quietly emailing a link-only message the customer can't act on.
+          setBusyAction('');
+          return flash(`Could not attach the quotation PDF, so nothing was sent: ${e.message}`, true);
+        }
+      }
+    }
+
     const data = await runAction(
       channel ? `dispatch:${channel}` : 'dispatch',
       `/api/quotations/${quotation.Quotation_ID}/dispatch`,
-      channel ? { channel } : {}
+      body
     );
     if (!data) return;
     setQuotation(data.quotation);
@@ -458,31 +532,33 @@ export default function QuotationBuilderPage() {
     : customers.slice(0, 40);
 
   return (
-    <div className="min-h-screen bg-slate-50 pb-24">
-      {/* Header */}
-      <div className="bg-white border-b border-slate-200 sticky top-0 z-30">
-        <div className="max-w-6xl mx-auto px-4 py-3 flex items-center gap-3">
-          <button onClick={() => navigate(-1)} className="p-2 hover:bg-slate-100 rounded-lg">
-            <ArrowLeft className="w-4 h-4" />
+    <div className="qt-theme min-h-screen bg-slate-50 pb-24">
+      {/* Solid-red app bar, mirroring the mobile accounting apps this module is modelled on.
+          Status chips keep their own semantic colours but switch to a translucent-white shell so
+          they stay legible against the red. */}
+      <div className="qt-appbar sticky top-0 z-30 shadow-sm">
+        <div className="max-w-6xl mx-auto px-3 py-3 flex items-center gap-2">
+          <button onClick={() => navigate(-1)} className="qt-appbar-btn" aria-label="Back">
+            <ArrowLeft className="w-5 h-5" />
           </button>
           <div className="flex-1 min-w-0">
-            <h1 className="font-bold text-slate-900 truncate">
-              {quotation ? quotation.Quote_No_Display : 'New Quotation'}
+            <h1 className="font-bold text-[17px] truncate">
+              {quotation ? quotation.Quote_No_Display : 'Create Quotation'}
             </h1>
             {quotation && (
               <div className="flex items-center gap-2 mt-0.5">
-                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${meta.cls}`}>{meta.label}</span>
-                <span className="text-[11px] text-slate-500">{formatDate(quotation.Created_At)}</span>
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-white/20 text-white">{meta.label}</span>
+                <span className="text-[11px] text-white/80">{formatDate(quotation.Created_At)}</span>
                 {quotation.Revision_No > 0 && (
-                  <span className="text-[10px] font-bold text-slate-500">Rev {quotation.Revision_No}</span>
+                  <span className="text-[10px] font-bold text-white/80">Rev {quotation.Revision_No}</span>
                 )}
               </div>
             )}
           </div>
           {history.length > 1 && (
             <button onClick={() => setShowHistory(v => !v)}
-              className="px-3 py-1.5 text-xs font-bold rounded-lg border border-slate-200 hover:bg-slate-50 flex items-center gap-1.5">
-              <History className="w-3.5 h-3.5" /> {history.length} versions
+              className="qt-appbar-btn flex items-center gap-1.5 text-xs font-bold px-2.5">
+              <History className="w-4 h-4" /> {history.length}
             </button>
           )}
         </div>
@@ -535,29 +611,36 @@ export default function QuotationBuilderPage() {
         )}
 
         {/* Customer + document meta */}
-        <div className="bg-white border border-slate-200 rounded-xl p-4">
-          <div className="grid md:grid-cols-2 gap-4">
+        <div className="qt-card">
+          <div className="grid md:grid-cols-2 gap-5">
             <div>
-              <label className="text-xs font-bold text-slate-600 uppercase">Customer</label>
               {readOnly ? (
-                <div className="mt-1 font-semibold text-slate-800">{quotation.Customer_Name_Snapshot}</div>
+                <>
+                  <div className="qt-section-label">Customer</div>
+                  <div className="mt-1 font-semibold text-slate-800">{quotation.Customer_Name_Snapshot}</div>
+                </>
               ) : (
                 <>
-                  <div className="relative mt-1">
-                    <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <div className="qt-field qt-has-icon mt-1">
+                    <Search className="qt-icon w-4 h-4" />
                     <input value={customerSearch} onChange={e => setCustomerSearch(e.target.value)}
-                      placeholder="Search customers…"
-                      className="w-full pl-9 pr-3 py-2 border border-slate-200 rounded-lg text-sm" />
+                      placeholder=" " className="qt-input" />
+                    <label>Search customers</label>
                   </div>
-                  <select value={form.customerId} onChange={e => setForm(f => ({ ...f, customerId: e.target.value }))}
-                    className="w-full mt-2 px-3 py-2 border border-slate-200 rounded-lg text-sm" size={customerSearch ? 6 : 1}>
-                    <option value="">— Select customer —</option>
-                    {filteredCustomers.map(c => (
-                      <option key={c.Customer_ID} value={c.Customer_ID}>
-                        {c.Company_Name}{c.GSTIN ? ` (${c.GSTIN})` : ' (No GSTIN)'}
-                      </option>
-                    ))}
-                  </select>
+                  {/* size>1 turns this into a list box, which the floating label would overlap —
+                      so the label only floats in the collapsed single-row state. */}
+                  <div className={`qt-field mt-3 ${customerSearch ? '' : 'qt-filled'}`}>
+                    <select value={form.customerId} onChange={e => setForm(f => ({ ...f, customerId: e.target.value }))}
+                      className="qt-select" size={customerSearch ? 6 : 1}>
+                      <option value="">— Select customer —</option>
+                      {filteredCustomers.map(c => (
+                        <option key={c.Customer_ID} value={c.Customer_ID}>
+                          {c.Company_Name}{c.GSTIN ? ` (${c.GSTIN})` : ' (No GSTIN)'}
+                        </option>
+                      ))}
+                    </select>
+                    {!customerSearch && <label>Customer</label>}
+                  </div>
                 </>
               )}
 
@@ -588,60 +671,74 @@ export default function QuotationBuilderPage() {
                       ? <span className="font-semibold text-emerald-700">GSTIN {selectedCustomer.GSTIN}</span>
                       : <span className="text-amber-700 font-semibold">No GSTIN on file — tap to add (treated as B2C)</span>}
                   </div>
+                  {resolvedStateCode && (
+                    <div className="text-slate-500">
+                      Place of supply: <span className="font-semibold text-slate-700">
+                        {resolvedStateCode} — {getStateName(resolvedStateCode)}
+                      </span>
+                    </div>
+                  )}
                 </div>
               )}
 
-              {/* B2C customers have no GSTIN, so place of supply must be chosen explicitly —
-                  without it the tax split can't be determined. */}
-              {selectedCustomer && !selectedCustomer.GSTIN && !selectedCustomer.State_Code && !readOnly && (
-                <div className="mt-2">
-                  <label className="block text-xs font-bold text-slate-600 uppercase mb-1">Place of supply</label>
+              {/* Place of supply is only ever asked for when it genuinely cannot be derived: a
+                  GSTIN encodes it in its first two digits, and a saved State_Code or an address
+                  naming the state resolves it too. Staff only see this control when every
+                  automatic source has failed, since a wrong value flips CGST/SGST vs IGST. */}
+              {selectedCustomer && !readOnly && !resolvedStateCode && (
+                <div className="qt-field mt-3">
                   <select
                     value={form.destinationStateCode}
                     onChange={e => setForm(f => ({ ...f, destinationStateCode: e.target.value }))}
-                    className="w-full px-3 py-3 border border-slate-300 rounded-xl text-base bg-white"
+                    className="qt-select"
                   >
                     <option value="">— Select state —</option>
                     {stateOptions().map(s => <option key={s.code} value={s.code}>{s.code} — {s.name}</option>)}
                   </select>
+                  <label>Place of supply</label>
+                  <div className="text-[11px] text-amber-700 mt-1">
+                    Could not determine the state from this customer's GSTIN or address — please select it.
+                  </div>
                 </div>
               )}
             </div>
 
-            <div className="space-y-3">
-              <div>
-                <label className="text-xs font-bold text-slate-600 uppercase">Subject</label>
-                <input value={form.subject} disabled={readOnly}
-                  onChange={e => setForm(f => ({ ...f, subject: e.target.value }))}
-                  className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-lg text-sm disabled:bg-slate-50" />
+            <div className="space-y-4">
+              <SubjectCombo
+                value={form.subject}
+                disabled={readOnly}
+                options={settings?.subject_options || []}
+                onChange={v => setForm(f => ({ ...f, subject: v }))}
+              />
+              <div className="qt-field">
+                <select value={form.paymentTermsId} disabled={readOnly}
+                  onChange={e => setForm(f => ({ ...f, paymentTermsId: e.target.value }))}
+                  className="qt-select">
+                  <option value="">— Select —</option>
+                  {(settings?.payment_terms || []).map(t => (
+                    <option key={t.id} value={t.id}>{t.label}</option>
+                  ))}
+                </select>
+                <label>Payment terms</label>
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="text-xs font-bold text-slate-600 uppercase">Payment terms</label>
-                  <select value={form.paymentTermsId} disabled={readOnly}
-                    onChange={e => setForm(f => ({ ...f, paymentTermsId: e.target.value }))}
-                    className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-lg text-sm disabled:bg-slate-50">
-                    <option value="">— Select —</option>
-                    {(settings?.payment_terms || []).map(t => (
-                      <option key={t.id} value={t.id}>{t.label}</option>
-                    ))}
-                  </select>
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="text-xs font-bold text-slate-600 uppercase">Follow-up</label>
-                    <input type="number" min="1" value={form.followUpIntervalDays} disabled={readOnly}
+                  <div className="qt-field">
+                    <input type="number" min="1" value={form.followUpIntervalDays} disabled={readOnly} placeholder=" "
                       onChange={e => setForm(f => ({ ...f, followUpIntervalDays: e.target.value }))}
-                      className="w-full mt-1 px-2 py-2 border border-slate-200 rounded-lg text-sm disabled:bg-slate-50" />
-                    <div className="text-[10px] text-slate-400 mt-0.5">days</div>
+                      className="qt-input" />
+                    <label>Follow-up</label>
                   </div>
-                  <div>
-                    <label className="text-xs font-bold text-slate-600 uppercase">Expiry</label>
-                    <input type="number" min="1" value={form.autoExpiryDays} disabled={readOnly}
+                  <div className="text-[11px] text-slate-400 mt-1 ml-1">days</div>
+                </div>
+                <div>
+                  <div className="qt-field">
+                    <input type="number" min="1" value={form.autoExpiryDays} disabled={readOnly} placeholder=" "
                       onChange={e => setForm(f => ({ ...f, autoExpiryDays: e.target.value }))}
-                      className="w-full mt-1 px-2 py-2 border border-slate-200 rounded-lg text-sm disabled:bg-slate-50" />
-                    <div className="text-[10px] text-slate-400 mt-0.5">days</div>
+                      className="qt-input" />
+                    <label>Expiry</label>
                   </div>
+                  <div className="text-[11px] text-slate-400 mt-1 ml-1">days</div>
                 </div>
               </div>
             </div>
@@ -651,10 +748,10 @@ export default function QuotationBuilderPage() {
         {/* Line items */}
         <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
           <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between">
-            <span className="font-bold text-sm text-slate-700">Line Items</span>
+            <span className="qt-section-label">Items</span>
             {!readOnly && (
-              <button onClick={addLine} className="px-3 py-1.5 bg-slate-900 text-white text-xs font-bold rounded-lg flex items-center gap-1.5 hover:bg-slate-800">
-                <Plus className="w-3.5 h-3.5" /> Add item
+              <button onClick={addLine} className="qt-btn qt-btn-outline text-xs py-2 px-3.5">
+                <Plus className="w-3.5 h-3.5" /> ADD ITEM
               </button>
             )}
           </div>
@@ -677,7 +774,7 @@ export default function QuotationBuilderPage() {
                         <div className="font-semibold text-sm">{line.Item_Name}</div>
                       ) : (
                         <select value={line.Item_ID} onChange={e => pickItem(idx, e.target.value)}
-                          className="w-full px-3 py-2.5 border border-slate-300 rounded-xl text-base bg-white">
+                          className="qt-select">
                           <option value="">— Select item —</option>
                           {items.map(i => <option key={i.Item_ID} value={i.Item_ID}>{i.Item_Name}</option>)}
                         </select>
@@ -746,7 +843,7 @@ export default function QuotationBuilderPage() {
                           <div className="font-medium">{line.Item_Name}</div>
                         ) : (
                           <select value={line.Item_ID} onChange={e => pickItem(idx, e.target.value)}
-                            className="w-full px-2 py-1.5 border border-slate-200 rounded-lg text-sm">
+                            className="qt-cell">
                             <option value="">— Select item —</option>
                             {items.map(i => <option key={i.Item_ID} value={i.Item_ID}>{i.Item_Name}</option>)}
                           </select>
@@ -760,22 +857,22 @@ export default function QuotationBuilderPage() {
                       <td className="px-2 py-2">
                         <input type="number" min="0" step="any" value={line.Qty} disabled={readOnly}
                           onChange={e => updateLine(idx, { Qty: e.target.value })}
-                          className="w-full px-2 py-1.5 border border-slate-200 rounded-lg text-sm text-right disabled:bg-slate-50" />
+                          className="qt-cell text-right" />
                       </td>
                       <td className="px-2 py-2">
                         <input type="number" min="0" step="any" value={line.Rate} disabled={readOnly}
                           onChange={e => updateLine(idx, { Rate: e.target.value })}
-                          className="w-full px-2 py-1.5 border border-slate-200 rounded-lg text-sm text-right disabled:bg-slate-50" />
+                          className="qt-cell text-right" />
                       </td>
                       <td className="px-2 py-2">
                         <input type="number" min="0" max="100" step="any" value={line.Discount_Pct} disabled={readOnly}
                           onChange={e => updateLine(idx, { Discount_Pct: e.target.value })}
-                          className="w-full px-2 py-1.5 border border-slate-200 rounded-lg text-sm text-right disabled:bg-slate-50" />
+                          className="qt-cell text-right" />
                       </td>
                       <td className="px-2 py-2">
                         <input type="number" min="0" step="any" value={line.GST_Rate} disabled={readOnly}
                           onChange={e => updateLine(idx, { GST_Rate: e.target.value })}
-                          className="w-full px-2 py-1.5 border border-slate-200 rounded-lg text-sm text-right disabled:bg-slate-50" />
+                          className="qt-cell text-right" />
                       </td>
                       <td className="px-2 py-2 text-right font-semibold">
                         {computed ? formatMoney(computed.Line_Total) : '—'}
@@ -799,11 +896,11 @@ export default function QuotationBuilderPage() {
             <div className="flex flex-col md:flex-row gap-4 justify-between">
               <div className="text-xs space-y-2 md:max-w-xs w-full">
                 {!readOnly && (
-                  <div>
-                    <label className="font-bold text-slate-600 uppercase">Additional discount %</label>
-                    <input type="number" min="0" max="100" step="any" value={form.documentDiscountPct}
+                  <div className="qt-field">
+                    <input type="number" min="0" max="100" step="any" value={form.documentDiscountPct} placeholder=" "
                       onChange={e => setForm(f => ({ ...f, documentDiscountPct: e.target.value }))}
-                      className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-lg text-sm" />
+                      className="qt-input" />
+                    <label>Additional discount %</label>
                   </div>
                 )}
                 {displayTotals?.approvalRequired && (
@@ -829,7 +926,9 @@ export default function QuotationBuilderPage() {
                         <Row label="SGST" value={formatMoney(displayTotals.Total_SGST)} />
                       </>
                     )}
-                    <div className="flex justify-between pt-2 mt-1 border-t-2 border-slate-300 font-extrabold text-base">
+                    {/* Echoes the PDF's red grand-total band so the figure the user confirms on
+                        screen is the one they recognise on the document. */}
+                    <div className="flex justify-between pt-2 mt-1 border-t-2 border-slate-300 font-extrabold text-base text-rose-600">
                       <span>Grand Total</span><span>{formatMoney(displayTotals.Grand_Total)}</span>
                     </div>
                   </>
@@ -843,12 +942,12 @@ export default function QuotationBuilderPage() {
 
         {/* T&C + notes */}
         {!readOnly && (
-          <div className="bg-white border border-slate-200 rounded-xl p-4">
-            <div className="text-xs font-bold uppercase text-slate-600 mb-2">Terms &amp; Conditions</div>
-            <div className="space-y-1.5">
+          <div className="qt-card">
+            <div className="qt-section-label mb-2.5">Terms &amp; Conditions</div>
+            <div className="space-y-1">
               {(settings?.tnc_checklist || []).map(t => (
-                <label key={t.id} className="flex items-start gap-2 text-sm cursor-pointer">
-                  <input type="checkbox" className="mt-1"
+                <label key={t.id} className="flex items-start gap-2.5 text-sm cursor-pointer px-2 py-1.5 -mx-2 rounded-lg hover:bg-slate-50">
+                  <input type="checkbox" className="mt-0.5 w-4 h-4 shrink-0"
                     checked={form.selectedTncIds.includes(t.id)}
                     onChange={e => setForm(f => ({
                       ...f,
@@ -860,11 +959,49 @@ export default function QuotationBuilderPage() {
                 </label>
               ))}
             </div>
-            <div className="mt-3">
-              <label className="text-xs font-bold uppercase text-slate-600">Notes</label>
+            <div className="qt-field mt-4">
               <textarea value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))}
-                rows={2} className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-lg text-sm" />
+                rows={2} placeholder=" " className="qt-textarea" />
+              <label>Notes</label>
             </div>
+          </div>
+        )}
+
+        {/* Catalogues to attach when this quotation is emailed. Hidden entirely when an Admin has
+            not uploaded any, so the card never appears as an empty box. */}
+        {(settings?.email_attachments || []).length > 0 && (
+          <div className="qt-card">
+            <div className="flex items-center gap-2 mb-1">
+              <Paperclip className="w-4 h-4 text-slate-400" />
+              <h3 className="qt-section-label">Email Attachments</h3>
+            </div>
+            <p className="text-xs text-slate-500 mb-3">
+              Ticked files are attached when this quotation is sent by email.
+            </p>
+            <div className="grid md:grid-cols-2 gap-1.5">
+              {(settings.email_attachments || []).map(a => (
+                <label key={a.id}
+                  className="flex items-center gap-2 text-sm px-2.5 py-2 rounded-lg border border-slate-200 hover:bg-slate-50 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    className="w-4 h-4 accent-slate-900 shrink-0"
+                    checked={selectedAttachmentIds.includes(a.id)}
+                    onChange={e => setSelectedAttachmentIds(ids =>
+                      e.target.checked ? [...ids, a.id] : ids.filter(x => x !== a.id)
+                    )}
+                  />
+                  <span className="flex-1 min-w-0 truncate text-slate-700">{a.label || a.file_name}</span>
+                  <a href={`/api/media/${a.media_id}`} target="_blank" rel="noreferrer"
+                    onClick={e => e.stopPropagation()}
+                    className="text-[11px] text-slate-400 hover:text-slate-700 underline shrink-0">view</a>
+                </label>
+              ))}
+            </div>
+            {settings?.attach_quotation_pdf !== false && (
+              <p className="text-[11px] text-slate-400 mt-2.5 flex items-center gap-1.5">
+                <FileText className="w-3 h-3" /> The quotation PDF is attached automatically.
+              </p>
+            )}
           </div>
         )}
       </div>
@@ -878,17 +1015,17 @@ export default function QuotationBuilderPage() {
         <div className="max-w-6xl mx-auto px-3 py-2.5 flex items-center gap-2">
           {!readOnly && (
             <button onClick={handleSave} disabled={saving}
-              className="flex-1 md:flex-none px-4 py-3 md:py-2 bg-slate-900 text-white text-sm font-bold rounded-xl flex items-center justify-center gap-2 active:scale-[0.98] disabled:opacity-50 transition">
+              className="qt-btn qt-btn-primary flex-1 md:flex-none">
               {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-              {quotation ? 'Save' : 'Create quotation'}
+              {quotation ? 'SAVE' : 'CREATE QUOTATION'}
             </button>
           )}
 
           {quotation && isDispatchable(quotation.Status) && (
             <button onClick={() => handleDispatch()} disabled={busyAction === 'dispatch'}
-              className="flex-1 md:flex-none px-4 py-3 md:py-2 bg-blue-600 text-white text-sm font-bold rounded-xl flex items-center justify-center gap-2 active:scale-[0.98] disabled:opacity-50 transition">
+              className="qt-btn qt-btn-outline flex-1 md:flex-none">
               {busyAction === 'dispatch' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-              Send
+              SEND
             </button>
           )}
 
@@ -1017,10 +1154,9 @@ export default function QuotationBuilderPage() {
               </div>
             </div>
             <div className="flex gap-2 mt-4">
-              <button onClick={() => setCustEdit(null)} className="flex-1 px-4 py-2 border border-slate-200 rounded-lg text-sm font-bold">Cancel</button>
-              <button onClick={saveCustomer} disabled={savingCust}
-                className="flex-1 px-4 py-2 bg-slate-900 text-white rounded-lg text-sm font-bold flex items-center justify-center gap-2 disabled:opacity-50">
-                {savingCust && <Loader2 className="w-4 h-4 animate-spin" />} Save
+              <button onClick={() => setCustEdit(null)} className="qt-btn qt-btn-ghost flex-1">CANCEL</button>
+              <button onClick={saveCustomer} disabled={savingCust} className="qt-btn qt-btn-primary flex-1">
+                {savingCust && <Loader2 className="w-4 h-4 animate-spin" />} SAVE
               </button>
             </div>
           </div>
@@ -1095,6 +1231,65 @@ function Row({ label, value }) {
 }
 
 /**
+ * Subject field: a free-text input with a type-to-filter dropdown of saved suggestions.
+ *
+ * Deliberately NOT a <select> — an unusual subject must still be typeable without an Admin first
+ * editing Quotation Settings, so the typed value is always authoritative and the list only offers
+ * shortcuts. Options come from settings.subject_options.
+ *
+ * Blur closes the list on a timeout rather than immediately: a mousedown on an option fires blur
+ * before click, so closing synchronously would unmount the option before its click registers.
+ */
+function SubjectCombo({ value, onChange, options, disabled }) {
+  const [open, setOpen] = useState(false);
+  const closeTimer = useRef(null);
+
+  const query = String(value || '').toLowerCase().trim();
+  const list = (options || []).map(o => (typeof o === 'string' ? o : o.text)).filter(Boolean);
+  // An exact match means the user has already picked; show the whole list again rather than a
+  // single redundant row.
+  const filtered = query && !list.some(t => t.toLowerCase() === query)
+    ? list.filter(t => t.toLowerCase().includes(query))
+    : list;
+
+  useEffect(() => () => clearTimeout(closeTimer.current), []);
+
+  return (
+    <div className="relative">
+      <div className="qt-field">
+        <input
+          value={value ?? ''}
+          disabled={disabled}
+          placeholder=" "
+          autoComplete="off"
+          onChange={e => { onChange(e.target.value); setOpen(true); }}
+          onFocus={() => setOpen(true)}
+          onBlur={() => { closeTimer.current = setTimeout(() => setOpen(false), 120); }}
+          className="qt-input"
+        />
+        <label>Subject</label>
+      </div>
+
+      {open && !disabled && filtered.length > 0 && (
+        <div className="absolute z-20 left-0 right-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-lg max-h-56 overflow-y-auto">
+          {filtered.map(text => (
+            <button
+              key={text}
+              type="button"
+              onMouseDown={e => e.preventDefault()}
+              onClick={() => { onChange(text); setOpen(false); }}
+              className="w-full text-left px-3 py-2.5 text-sm hover:bg-slate-50 active:bg-slate-100"
+            >
+              {text}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
  * 40px product thumbnail for a line-item row. Falls back to a neutral placeholder when the item
  * has no photo, so the column keeps a constant width and rows don't jump as items are picked.
  */
@@ -1122,7 +1317,7 @@ function LinePhoto({ src, name }) {
 function ActionBtn({ onClick, icon: Icon, label, busy, disabled, title }) {
   return (
     <button onClick={onClick} disabled={busy || disabled} title={title}
-      className="px-4 py-2 border border-slate-200 text-sm font-bold rounded-lg flex items-center gap-2 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed">
+      className="qt-btn qt-btn-ghost py-2 disabled:cursor-not-allowed">
       {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Icon className="w-4 h-4" />} {label}
     </button>
   );
@@ -1149,8 +1344,7 @@ function SheetBtn({ icon: Icon, label, onClick, tone }) {
  */
 function MobileNumField({ label, value, onChange, disabled }) {
   return (
-    <div>
-      <label className="block text-[10px] font-bold uppercase text-slate-400 mb-0.5">{label}</label>
+    <div className="qt-field">
       <input
         type="number"
         inputMode="decimal"
@@ -1158,20 +1352,22 @@ function MobileNumField({ label, value, onChange, disabled }) {
         step="any"
         value={value}
         disabled={disabled}
+        placeholder=" "
         onChange={e => onChange(e.target.value)}
-        className="w-full px-3 py-2.5 border border-slate-300 rounded-xl text-base text-right disabled:bg-slate-100"
+        className="qt-input text-right"
       />
+      <label>{label}</label>
     </div>
   );
 }
 
 function CustField({ label, value, onChange, mono }) {
   return (
-    <div>
-      <label className="text-xs font-bold text-slate-600 uppercase">{label}</label>
-      {/* text-base (16px) keeps iOS Safari from zooming the viewport on focus */}
-      <input value={value ?? ''} onChange={e => onChange(e.target.value)}
-        className={`w-full mt-1 px-3 py-2.5 border border-slate-300 rounded-xl text-base ${mono ? 'font-mono' : ''}`} />
+    <div className="qt-field">
+      {/* placeholder=" " is what drives the floating label — see .qt-field in index.css */}
+      <input value={value ?? ''} onChange={e => onChange(e.target.value)} placeholder=" "
+        className={`qt-input ${mono ? 'font-mono' : ''}`} />
+      <label>{label}</label>
     </div>
   );
 }

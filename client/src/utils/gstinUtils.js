@@ -112,3 +112,56 @@ export function stateOptions() {
     .map(([code, name]) => ({ code, name }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
+
+// Spellings and short forms that appear in real addresses but don't match GST_STATE_CODES exactly.
+const STATE_ALIASES = {
+  '24': ['gujarat'],
+  '27': ['maharashtra'],
+  '29': ['karnataka', 'bangalore', 'bengaluru'],
+  '33': ['tamil nadu', 'tamilnadu', 'chennai'],
+  '07': ['delhi', 'new delhi'],
+  '09': ['uttar pradesh', 'up'],
+  '08': ['rajasthan'],
+  '19': ['west bengal', 'kolkata'],
+  '36': ['telangana', 'hyderabad'],
+  '32': ['kerala'],
+  '23': ['madhya pradesh'],
+  '03': ['punjab'],
+  '06': ['haryana', 'gurgaon', 'gurugram'],
+  '30': ['goa'],
+  '21': ['odisha', 'orissa'],
+  '10': ['bihar'],
+  '22': ['chhattisgarh', 'chhatisgarh'],
+  '20': ['jharkhand'],
+  '05': ['uttarakhand', 'uttaranchal'],
+  '02': ['himachal pradesh'],
+  '18': ['assam'],
+  '37': ['andhra pradesh']
+};
+
+/**
+ * Best-effort place-of-supply detection from a free-text address.
+ *
+ * Used so staff never have to pick a state that is already written in the customer's address.
+ * Matches the longest alias first, because "Andhra Pradesh" must not be matched by a shorter
+ * substring of another state's name. Returns '' when nothing matches, in which case the caller
+ * must still ask — a wrong guess here would silently produce the wrong CGST/SGST vs IGST split.
+ */
+export function detectStateCode(address) {
+  const text = String(address || '').toLowerCase();
+  if (!text) return '';
+
+  const candidates = [];
+  Object.entries(GST_STATE_CODES).forEach(([code, name]) => {
+    candidates.push([code, name.toLowerCase()]);
+  });
+  Object.entries(STATE_ALIASES).forEach(([code, names]) => {
+    names.forEach(n => candidates.push([code, n]));
+  });
+
+  const hit = candidates
+    .filter(([, needle]) => text.includes(needle))
+    .sort((a, b) => b[1].length - a[1].length)[0];
+
+  return hit ? hit[0] : '';
+}

@@ -161,23 +161,31 @@ export default function QuotationSettingsPage() {
   if (!settings) return <div className="min-h-screen flex items-center justify-center text-slate-500">Could not load settings.</div>;
 
   return (
-    <div className="min-h-screen bg-slate-50 pb-24">
-      <div className="bg-white border-b border-slate-200 sticky top-0 z-20">
-        <div className="max-w-4xl mx-auto px-4 py-3 flex items-center gap-3">
-          <button onClick={() => navigate('/')} className="p-2 hover:bg-slate-100 rounded-lg"><ArrowLeft className="w-4 h-4" /></button>
-          <h1 className="font-bold flex-1">Quotation & Invoice Settings</h1>
-          <button onClick={save} disabled={saving || !isAdmin}
-            className="px-4 py-2 bg-slate-900 text-white text-sm font-bold rounded-lg flex items-center gap-2 disabled:opacity-50">
-            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />} Save
-          </button>
-        </div>
-        <div className="max-w-4xl mx-auto px-4 flex gap-1 overflow-x-auto">
-          {TABS.map(t => (
-            <button key={t.id} onClick={() => setTab(t.id)}
-              className={`px-3 py-2 text-xs font-bold whitespace-nowrap border-b-2 flex items-center gap-1.5 ${tab === t.id ? 'border-slate-900 text-slate-900' : 'border-transparent text-slate-500 hover:text-slate-700'}`}>
-              <t.icon className="w-3.5 h-3.5" />{t.label}
+    <div className="qt-theme min-h-screen bg-slate-50 pb-24">
+      <div className="sticky top-0 z-20 shadow-sm">
+        <div className="qt-appbar">
+          <div className="max-w-4xl mx-auto px-3 py-3 flex items-center gap-2">
+            <button onClick={() => navigate('/')} className="qt-appbar-btn" aria-label="Back">
+              <ArrowLeft className="w-5 h-5" />
             </button>
-          ))}
+            <h1 className="font-bold text-[17px] flex-1 truncate">Quotation &amp; Invoice Settings</h1>
+            <button onClick={save} disabled={saving || !isAdmin}
+              className="qt-btn bg-white/15 text-white hover:bg-white/25 py-2 px-3.5 text-xs">
+              {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />} SAVE
+            </button>
+          </div>
+        </div>
+        {/* Tabs sit on white below the red bar so the active underline reads as brand accent
+            rather than disappearing into the bar itself. */}
+        <div className="bg-white border-b border-slate-200">
+          <div className="max-w-4xl mx-auto px-4 flex gap-1 overflow-x-auto">
+            {TABS.map(t => (
+              <button key={t.id} onClick={() => setTab(t.id)}
+                className={`px-3 py-2.5 text-xs font-bold whitespace-nowrap border-b-2 flex items-center gap-1.5 transition ${tab === t.id ? 'border-rose-600 text-rose-600' : 'border-transparent text-slate-500 hover:text-slate-700'}`}>
+                <t.icon className="w-3.5 h-3.5" />{t.label}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -224,10 +232,39 @@ export default function QuotationSettingsPage() {
 
             <Card title="PDF Overlays">
               <div className="space-y-2">
-                {[['show_signature', 'Show signatory name & line'], ['show_stamp', 'Show company stamp'], ['show_watermark', 'Show watermark'], ['show_upi_qr', 'Show UPI payment QR']].map(([k, label]) => (
+                {[['show_signature', 'Show signatory name & line'], ['show_stamp', 'Show company stamp'], ['show_watermark', 'Show centre logo watermark'], ['show_upi_qr', 'Show UPI payment QR']].map(([k, label]) => (
                   <Toggle key={k} label={label} checked={settings.signature_stamp_overlay[k] !== false}
                     onChange={v => set(`signature_stamp_overlay.${k}`, v)} />
                 ))}
+              </div>
+            </Card>
+
+            <Card title="Security Watermark"
+              hint="Repeats this text in small diagonal lettering across the whole page, so a screenshot of any part of a quotation, PI or invoice still carries your name and cannot be reused by another vendor. This is separate from the centre logo watermark above.">
+              <Toggle label="Show the repeating security watermark"
+                checked={settings.security_watermark?.enabled !== false}
+                onChange={v => set('security_watermark.enabled', v)} />
+              <div className="mt-4">
+                <Field label="Watermark text" value={settings.security_watermark?.text}
+                  onChange={v => set('security_watermark.text', v)} />
+                <div className="text-xs text-slate-500 mt-1 mb-4">
+                  Leave blank to use the company name from Seller Profile.
+                </div>
+              </div>
+              <Grid>
+                <Field label="Text size (px)" type="number" value={settings.security_watermark?.font_size_px}
+                  onChange={v => set('security_watermark.font_size_px', Number(v) || 0)} />
+                <Field label="Angle (degrees)" type="number" value={settings.security_watermark?.angle_deg}
+                  onChange={v => set('security_watermark.angle_deg', Number(v) || 0)} />
+                <Field label="Line spacing (px)" type="number" value={settings.security_watermark?.gap_y_px}
+                  onChange={v => set('security_watermark.gap_y_px', Number(v) || 0)} />
+                <Field label="Opacity (0.02 – 0.20)" type="number" value={settings.security_watermark?.opacity}
+                  onChange={v => set('security_watermark.opacity', Number(v) || 0)} />
+              </Grid>
+              <div className="text-xs text-slate-500 mt-3">
+                The text repeats continuously along each diagonal line, so there are no blank gaps.
+                Smaller line spacing means more lines per page. Keep opacity low so the document
+                stays readable when printed.
               </div>
             </Card>
           </>
@@ -243,10 +280,22 @@ export default function QuotationSettingsPage() {
                 render={(row, update) => (
                   <div className="flex gap-2 flex-1">
                     <input value={row.label} onChange={e => update({ label: e.target.value })} placeholder="e.g. 30 Days Credit"
-                      className="flex-1 px-2 py-1.5 border border-slate-200 rounded-lg text-sm" />
+                      className="qt-cell flex-1" />
                     <input type="number" value={row.days} onChange={e => update({ days: Number(e.target.value) })} placeholder="days"
-                      className="w-24 px-2 py-1.5 border border-slate-200 rounded-lg text-sm" />
+                      className="qt-cell w-24" />
                   </div>
+                )} />
+            </Card>
+
+            <Card title="Subject Options"
+              hint="Offered in a type-to-filter dropdown on the quotation Subject field. Staff can still type any other subject, so this list is a shortcut rather than a restriction.">
+              <ListEditor
+                rows={settings.subject_options}
+                onChange={rows => set('subject_options', rows)}
+                newRow={() => ({ id: `SUB_${Date.now()}`, text: '' })}
+                render={(row, update) => (
+                  <input value={row.text} onChange={e => update({ text: e.target.value })}
+                    placeholder="Subject text" className="qt-cell flex-1" />
                 )} />
             </Card>
 
@@ -259,7 +308,7 @@ export default function QuotationSettingsPage() {
                   <div className="flex gap-2 flex-1 items-start">
                     <input type="checkbox" checked={!!row.default_checked} onChange={e => update({ default_checked: e.target.checked })} className="mt-2" />
                     <textarea value={row.text} onChange={e => update({ text: e.target.value })} rows={2} placeholder="Term text"
-                      className="flex-1 px-2 py-1.5 border border-slate-200 rounded-lg text-sm" />
+                      className="qt-cell flex-1" />
                   </div>
                 )} />
             </Card>
@@ -272,7 +321,7 @@ export default function QuotationSettingsPage() {
                       onChange={e => set('customer_actions', settings.customer_actions.map((x, j) => j === i ? { ...x, enabled: e.target.checked } : x))} />
                     <input value={a.label}
                       onChange={e => set('customer_actions', settings.customer_actions.map((x, j) => j === i ? { ...x, label: e.target.value } : x))}
-                      className="flex-1 px-2 py-1.5 border border-slate-200 rounded-lg text-sm" />
+                      className="qt-cell flex-1" />
                     <code className="text-[10px] text-slate-400 w-40 truncate">{a.action_key}</code>
                   </div>
                 ))}
@@ -287,7 +336,7 @@ export default function QuotationSettingsPage() {
               <div className="flex gap-2">
                 {['Email', 'WhatsApp', 'Both'].map(m => (
                   <button key={m} onClick={() => set('dispatch_mode', m)}
-                    className={`px-4 py-2 rounded-lg text-sm font-bold border ${settings.dispatch_mode === m ? 'bg-slate-900 text-white border-slate-900' : 'border-slate-200 hover:bg-slate-50'}`}>
+                    className={`qt-btn py-2.5 ${settings.dispatch_mode === m ? 'qt-btn-primary' : 'qt-btn-ghost'}`}>
                     {m}
                   </button>
                 ))}
@@ -305,7 +354,7 @@ export default function QuotationSettingsPage() {
                 <Field label="Password env var" value={settings.smtp_config.pass_ref} onChange={v => set('smtp_config.pass_ref', v)} />
               </Grid>
               <div className="flex items-center gap-2 mt-3">
-                <button onClick={testEmail} className="px-3 py-1.5 border border-slate-200 rounded-lg text-xs font-bold hover:bg-slate-50">Send test email</button>
+                <button onClick={testEmail} className="qt-btn qt-btn-ghost text-xs py-2">Send test email</button>
                 <StatusPill ok={settings._channel_status?.email_configured} okText="Configured" badText="Not configured" />
               </div>
             </Card>
@@ -320,7 +369,7 @@ export default function QuotationSettingsPage() {
                 <Field label="Access token env var" value={settings.whatsapp_config.access_token_ref} onChange={v => set('whatsapp_config.access_token_ref', v)} />
               </Grid>
               <div className="flex items-center gap-2 mt-3">
-                <button onClick={loadWaTemplates} className="px-3 py-1.5 border border-slate-200 rounded-lg text-xs font-bold hover:bg-slate-50">Fetch templates from Meta</button>
+                <button onClick={loadWaTemplates} className="qt-btn qt-btn-ghost text-xs py-2">Fetch templates from Meta</button>
                 <StatusPill ok={settings._channel_status?.whatsapp_configured} okText="Configured" badText="Not configured" />
               </div>
               {waTemplates && (
@@ -333,6 +382,20 @@ export default function QuotationSettingsPage() {
                   ))}
                 </div>
               )}
+            </Card>
+
+            <Card title="Email Attachments"
+              hint="Catalogues and brochures uploaded once here can be ticked on any quotation before it is emailed.">
+              <Toggle label="Attach the quotation PDF to dispatch emails"
+                checked={settings.attach_quotation_pdf !== false}
+                onChange={v => set('attach_quotation_pdf', v)} />
+              <AttachmentLibrary
+                items={settings.email_attachments || []}
+                onChange={v => set('email_attachments', v)}
+                token={token}
+                disabled={!isAdmin}
+                flash={flash}
+              />
             </Card>
           </>
         )}
@@ -381,13 +444,13 @@ export default function QuotationSettingsPage() {
                     <Grid>
                       <Field label="Meta template name" value={tpl.whatsapp_template_name || ''}
                         onChange={v => set(`draft_templates.${t.key}.whatsapp_template_name`, v)} />
-                      <div>
-                        <label className="text-xs font-bold text-slate-600 uppercase">Meta approval status</label>
+                      <div className="qt-field">
                         <select value={tpl.whatsapp_template_status || 'not_submitted'}
                           onChange={e => set(`draft_templates.${t.key}.whatsapp_template_status`, e.target.value)}
-                          className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-lg text-sm">
+                          className="qt-select">
                           {['not_submitted', 'pending', 'approved', 'rejected'].map(s => <option key={s} value={s}>{s}</option>)}
                         </select>
+                        <label>Meta approval status</label>
                       </div>
                     </Grid>
                   </div>
@@ -424,13 +487,13 @@ export default function QuotationSettingsPage() {
                   onChange={v => set('defaults.auto_expiry_days', Number(v))} />
                 <Field label="Default GST rate (%)" type="number" value={settings.defaults.default_gst_rate}
                   onChange={v => set('defaults.default_gst_rate', Number(v))} />
-                <div>
-                  <label className="text-xs font-bold text-slate-600 uppercase">Numbering resets</label>
+                <div className="qt-field">
                   <select value={settings.defaults.number_reset} onChange={e => set('defaults.number_reset', e.target.value)}
-                    className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-lg text-sm">
+                    className="qt-select">
                     <option value="financial">Financial year (April–March)</option>
                     <option value="calendar">Calendar year (January–December)</option>
                   </select>
+                  <label>Numbering resets</label>
                 </div>
                 <Field label="Quotation prefix" value={settings.defaults.quote_no_prefix} onChange={v => set('defaults.quote_no_prefix', v)} />
                 <Field label="PI prefix" value={settings.defaults.pi_no_prefix} onChange={v => set('defaults.pi_no_prefix', v)} />
@@ -442,7 +505,7 @@ export default function QuotationSettingsPage() {
               <input value={(settings.payment_reminder_offsets || []).join(', ')}
                 onChange={e => set('payment_reminder_offsets', e.target.value.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !Number.isNaN(n)))}
                 placeholder="-3, 0, 7"
-                className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm" />
+                className="qt-input" />
             </Card>
           </>
         )}
@@ -453,16 +516,17 @@ export default function QuotationSettingsPage() {
 
 function Card({ title, hint, children }) {
   return (
-    <div className="bg-white border border-slate-200 rounded-xl p-4">
-      <div className="font-bold text-sm text-slate-800">{title}</div>
-      {hint && <div className="text-xs text-slate-500 mt-0.5 mb-3">{hint}</div>}
-      <div className={hint ? '' : 'mt-3'}>{children}</div>
+    <div className="qt-card">
+      <div className="qt-section-label">{title}</div>
+      {hint && <div className="text-xs text-slate-500 mt-1 mb-4">{hint}</div>}
+      <div className={hint ? '' : 'mt-4'}>{children}</div>
     </div>
   );
 }
 
 function Grid({ children }) {
-  return <div className="grid sm:grid-cols-2 gap-3">{children}</div>;
+  /* gap-y is larger than gap-x: floating labels sit above the control and need vertical room. */
+  return <div className="grid sm:grid-cols-2 gap-x-3 gap-y-4">{children}</div>;
 }
 
 /**
@@ -496,14 +560,17 @@ function TemplateField({ label, value, onChange, textarea, rows = 5 }) {
 
   return (
     <div>
-      <label className="text-xs font-bold text-slate-600 uppercase">{label}</label>
-      <Input
-        ref={ref}
-        {...(textarea ? { rows } : { type: 'text' })}
-        value={value ?? ''}
-        onChange={e => onChange(e.target.value)}
-        className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-lg text-sm font-mono"
-      />
+      <div className="qt-field">
+        <Input
+          ref={ref}
+          {...(textarea ? { rows } : { type: 'text' })}
+          value={value ?? ''}
+          placeholder=" "
+          onChange={e => onChange(e.target.value)}
+          className={`${textarea ? 'qt-textarea' : 'qt-input'} font-mono text-sm`}
+        />
+        <label>{label}</label>
+      </div>
       <div className="mt-1.5 flex flex-wrap gap-1">
         <span className="text-[10px] font-bold uppercase text-slate-400 self-center mr-1">Insert:</span>
         {TEMPLATE_VARIABLES.map(g => (
@@ -545,6 +612,141 @@ function TemplateField({ label, value, onChange, textarea, rows = 5 }) {
   );
 }
 
+/** Human-readable size for the attachment list. */
+function formatBytes(bytes) {
+  const n = Number(bytes) || 0;
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * Reusable-attachment manager: uploads each file to Media_Store and keeps only the reference in
+ * settings, so the settings document stays small however many catalogues are added.
+ *
+ * The 8MB ceiling mirrors POST /api/media/upload — enforced here too so an oversized pick fails
+ * instantly with a clear message rather than after a long base64 upload.
+ */
+const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
+
+function AttachmentLibrary({ items, onChange, token, disabled, flash }) {
+  const [uploading, setUploading] = useState(false);
+  const fileRef = React.useRef(null);
+
+  const handleFiles = async (fileList) => {
+    const files = Array.from(fileList || []);
+    if (!files.length) return;
+    setUploading(true);
+
+    const added = [];
+    for (const file of files) {
+      if (file.size > MAX_ATTACHMENT_BYTES) {
+        flash(`"${file.name}" is ${formatBytes(file.size)} — the limit is 8 MB.`, 'err');
+        continue;
+      }
+      try {
+        const base64 = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result || '').split(',')[1] || '');
+          reader.onerror = () => reject(new Error('Could not read the file'));
+          reader.readAsDataURL(file);
+        });
+
+        const res = await fetch('/api/media/upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({
+            base64,
+            fileName: file.name,
+            mimeType: file.type || 'application/pdf',
+            purpose: 'Email Attachment'
+          })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Upload failed');
+
+        added.push({
+          id: `ATT_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+          label: file.name.replace(/\.[^.]+$/, ''),
+          media_id: data.mediaId,
+          file_name: file.name,
+          mime_type: file.type || 'application/pdf',
+          size_bytes: file.size,
+          default_selected: false
+        });
+      } catch (e) {
+        flash(`"${file.name}" — ${e.message}`, 'err');
+      }
+    }
+
+    if (added.length) {
+      onChange([...(items || []), ...added]);
+      flash(`${added.length} file(s) uploaded. Remember to Save.`);
+    }
+    setUploading(false);
+    if (fileRef.current) fileRef.current.value = '';
+  };
+
+  const update = (id, patch) => onChange((items || []).map(a => (a.id === id ? { ...a, ...patch } : a)));
+  const remove = (id) => onChange((items || []).filter(a => a.id !== id));
+
+  return (
+    <div className="mt-3">
+      <input ref={fileRef} type="file" multiple accept="application/pdf,image/*" className="hidden"
+        onChange={e => handleFiles(e.target.files)} />
+
+      <div className="border border-slate-200 rounded-lg divide-y">
+        {(items || []).length === 0 && (
+          <div className="px-3 py-6 text-center text-xs text-slate-400">
+            No attachments yet. Upload a catalogue or brochure to offer it on quotations.
+          </div>
+        )}
+        {(items || []).map(a => (
+          <div key={a.id} className="px-3 py-2.5 flex items-center gap-3">
+            <FileText className="w-4 h-4 text-slate-400 shrink-0" />
+            <div className="flex-1 min-w-0">
+              <input
+                type="text"
+                value={a.label || ''}
+                disabled={disabled}
+                onChange={e => update(a.id, { label: e.target.value })}
+                className="w-full px-2 py-1 border border-slate-200 rounded-md text-sm"
+                placeholder="Display name"
+              />
+              <div className="text-[11px] text-slate-400 mt-0.5 truncate">
+                {a.file_name} · {formatBytes(a.size_bytes)}
+                {a.media_id && (
+                  <> · <a href={`/api/media/${a.media_id}`} target="_blank" rel="noreferrer"
+                    className="text-slate-500 underline">preview</a></>
+                )}
+              </div>
+            </div>
+            <label className="flex items-center gap-1.5 text-[11px] font-bold text-slate-600 shrink-0">
+              <input type="checkbox" checked={!!a.default_selected} disabled={disabled}
+                onChange={e => update(a.id, { default_selected: e.target.checked })}
+                className="w-3.5 h-3.5 accent-slate-900" />
+              Default
+            </label>
+            <button onClick={() => remove(a.id)} disabled={disabled}
+              className="p-1.5 text-slate-400 hover:text-rose-600 disabled:opacity-40 shrink-0">
+              <Trash2 className="w-4 h-4" />
+            </button>
+          </div>
+        ))}
+      </div>
+
+      <button onClick={() => fileRef.current?.click()} disabled={disabled || uploading}
+        className="qt-btn qt-btn-outline text-xs py-2 mt-2.5">
+        {uploading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
+        {uploading ? 'UPLOADING…' : 'ADD FILE'}
+      </button>
+      <p className="text-[11px] text-slate-400 mt-1.5">
+        PDF or image, up to 8 MB each. "Default" pre-ticks the file on every new quotation.
+      </p>
+    </div>
+  );
+}
+
 /**
  * UPI ID field that tolerates a pasted scanner deep-link.
  *
@@ -559,14 +761,16 @@ function UpiField({ value, onChange }) {
 
   return (
     <div>
-      <label className="text-xs font-bold text-slate-600 uppercase">UPI ID</label>
-      <input
-        type="text"
-        value={raw}
-        placeholder="yourname@bank"
-        onChange={e => onChange(e.target.value)}
-        className="w-full mt-1 px-3 py-2.5 border border-slate-300 rounded-xl text-base"
-      />
+      <div className="qt-field">
+        <input
+          type="text"
+          value={raw}
+          placeholder=" "
+          onChange={e => onChange(e.target.value)}
+          className="qt-input"
+        />
+        <label>UPI ID</label>
+      </div>
       {isDeepLink && (
         <div className="mt-1.5 px-2.5 py-2 bg-amber-50 border border-amber-200 rounded-lg">
           <div className="text-[11px] text-amber-900 font-semibold">
@@ -589,21 +793,22 @@ function UpiField({ value, onChange }) {
 
 function Field({ label, value, onChange, type = 'text', textarea, rows = 3 }) {
   return (
-    <div>
-      <label className="text-xs font-bold text-slate-600 uppercase">{label}</label>
-      {/* text-base (16px) prevents iOS Safari zooming the viewport on focus */}
+    <div className="qt-field">
+      {/* placeholder=" " is what drives the floating label — see .qt-field in index.css */}
       {textarea ? (
-        <textarea value={value ?? ''} rows={rows} onChange={e => onChange(e.target.value)}
-          className="w-full mt-1 px-3 py-2.5 border border-slate-300 rounded-xl text-base font-mono" />
+        <textarea value={value ?? ''} rows={rows} placeholder=" " onChange={e => onChange(e.target.value)}
+          className="qt-textarea font-mono" />
       ) : (
         <input
           type={type}
           inputMode={type === 'number' ? 'decimal' : undefined}
           value={value ?? ''}
+          placeholder=" "
           onChange={e => onChange(e.target.value)}
-          className="w-full mt-1 px-3 py-2.5 border border-slate-300 rounded-xl text-base"
+          className="qt-input"
         />
       )}
+      <label>{label}</label>
     </div>
   );
 }
@@ -633,8 +838,8 @@ function ListEditor({ rows, onChange, newRow, render }) {
         </div>
       ))}
       <button onClick={() => onChange([...list, newRow()])}
-        className="px-3 py-1.5 border border-dashed border-slate-300 rounded-lg text-xs font-bold text-slate-600 hover:bg-slate-50 flex items-center gap-1.5">
-        <Plus className="w-3.5 h-3.5" /> Add
+        className="qt-btn qt-btn-text text-xs py-2">
+        <Plus className="w-3.5 h-3.5" /> ADD
       </button>
     </div>
   );

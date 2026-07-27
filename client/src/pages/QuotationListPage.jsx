@@ -43,34 +43,38 @@ export default function QuotationListPage() {
   const statuses = useMemo(() => [...new Set(rows.map(r => r.Status))].filter(Boolean), [rows]);
 
   return (
-    <div className="min-h-screen bg-slate-50">
-      <div className="bg-white border-b border-slate-200 sticky top-0 z-20">
-        <div className="max-w-6xl mx-auto px-4 py-3">
-          <div className="flex items-center gap-3">
-            <button onClick={() => navigate('/')} className="p-2 hover:bg-slate-100 rounded-lg">
-              <ArrowLeft className="w-4 h-4" />
+    <div className="qt-theme min-h-screen bg-slate-50">
+      <div className="sticky top-0 z-20 shadow-sm">
+        <div className="qt-appbar">
+          <div className="max-w-6xl mx-auto px-3 py-3 flex items-center gap-2">
+            <button onClick={() => navigate('/')} className="qt-appbar-btn" aria-label="Back">
+              <ArrowLeft className="w-5 h-5" />
             </button>
-            <h1 className="font-bold text-slate-900 flex-1">Quotations</h1>
+            <h1 className="font-bold text-[17px] flex-1">Quotations</h1>
             <button onClick={() => navigate('/quotations/new')}
-              className="px-3 py-2 bg-slate-900 text-white text-sm font-bold rounded-lg flex items-center gap-1.5 hover:bg-slate-800">
-              <Plus className="w-4 h-4" /> New
+              className="qt-btn bg-white/15 text-white hover:bg-white/25 py-2 px-3.5 text-xs">
+              <Plus className="w-4 h-4" /> NEW
             </button>
           </div>
+        </div>
 
-          <div className="flex flex-wrap gap-2 mt-3">
+        {/* Filter bar on white, below the red app bar — keeps the controls legible and lets the
+            search field use the same outlined treatment as the rest of the module. */}
+        <div className="bg-white border-b border-slate-200">
+          <div className="max-w-6xl mx-auto px-4 py-3 flex flex-wrap gap-2 items-center">
             <div className="relative flex-1 min-w-[200px]">
-              <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+              <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
               <input value={search} onChange={e => setSearch(e.target.value)}
                 placeholder="Search by number, customer or subject…"
-                className="w-full pl-9 pr-3 py-2 border border-slate-200 rounded-lg text-sm" />
+                className="qt-input pl-10 py-2.5 text-sm" />
             </div>
             <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)}
-              className="px-3 py-2 border border-slate-200 rounded-lg text-sm">
+              className="qt-select w-auto py-2.5 text-sm">
               <option value="">All statuses</option>
               {statuses.map(s => <option key={s} value={s}>{statusMeta(s).label}</option>)}
             </select>
-            <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-600 px-2">
-              <input type="checkbox" checked={showSuperseded} onChange={e => setShowSuperseded(e.target.checked)} />
+            <label className="flex items-center gap-2 text-xs font-semibold text-slate-600 px-2 cursor-pointer">
+              <input type="checkbox" className="w-4 h-4" checked={showSuperseded} onChange={e => setShowSuperseded(e.target.checked)} />
               Show superseded
             </label>
           </div>

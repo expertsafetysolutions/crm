@@ -25,6 +25,19 @@ const DEFAULT_QUOTATION_SETTINGS = {
     { id: 'PT_NET30', label: '30 Days Credit', days: 30, description: '' }
   ],
 
+  // Suggestions for the quotation Subject line. The builder offers these in a type-to-filter
+  // combobox but still accepts free text, so an unusual subject never needs a settings change.
+  subject_options: [
+    { id: 'SUB_NEW_FE', text: 'New Fire Extinguisher' },
+    { id: 'SUB_REFILL', text: 'Fire Extinguisher Refilling' },
+    { id: 'SUB_AMC', text: 'Annual Maintenance Contract (AMC)' },
+    { id: 'SUB_HYDRANT', text: 'Fire Hydrant System' },
+    { id: 'SUB_SPRINKLER', text: 'Fire Sprinkler System' },
+    { id: 'SUB_ALARM', text: 'Fire Alarm System' },
+    { id: 'SUB_TRAINING', text: 'Fire Safety Training & Consultancy' },
+    { id: 'SUB_SAFETY', text: 'Safety Products Supply' }
+  ],
+
   tnc_checklist: [
     { id: 'TNC_VALIDITY', text: 'Quotation valid for 30 days from the date of issue.', default_checked: true },
     { id: 'TNC_GST', text: 'GST as applicable will be charged extra at prevailing rates.', default_checked: true },
@@ -66,12 +79,39 @@ const DEFAULT_QUOTATION_SETTINGS = {
     pass_ref: 'SMTP_PASS'
   },
 
+  // Reusable files (product catalogues, brochures, compliance certificates) an Admin uploads once
+  // and the builder then ticks per quotation. Each entry:
+  //   { id, label, media_id, file_name, mime_type, size_bytes, default_selected }
+  // Bytes live in Media_Store (POST /api/media/upload) — only the reference is kept here so the
+  // settings doc stays small.
+  email_attachments: [],
+
+  // Attach the generated quotation PDF itself to the dispatch email. The PDF is rendered in the
+  // browser (same template as the PDF button) and posted with the dispatch request.
+  attach_quotation_pdf: true,
+
   signature_stamp_overlay: {
     show_signature: true,
     show_stamp: true,
     show_watermark: true,
     show_upi_qr: true,
     size: 'medium'
+  },
+
+  // Anti-copy tiled watermark: the text is repeated in small diagonal lettering across the whole
+  // sheet, so any screenshot of any part of the document still carries the company name and the
+  // customer cannot pass the quotation off to another vendor. This is separate from the single
+  // centre logo watermark above (signature_stamp_overlay.show_watermark), which stays as-is.
+  security_watermark: {
+    enabled: true,
+    // Blank falls back to seller_profile.legal_name at render time.
+    text: 'Expert Safety Solutions',
+    angle_deg: -45,
+    font_size_px: 9,
+    opacity: 0.07,
+    // Spacing between diagonal lines in px on the 794x1123 A4 sheet. The text repeats
+    // continuously along each line, so only the line pitch is configurable.
+    gap_y_px: 46
   },
 
   approval_threshold: {

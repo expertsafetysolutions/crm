@@ -14,6 +14,225 @@
   }
 }
 
+/*
+ * Quotation module theme — Material-style outlined fields on a brand-red primary.
+ *
+ * Scoped to `.qt-theme` rather than applied globally: the Admin/Staff dashboards have their own
+ * established look, and restyling every input in the app from here would be an unrelated,
+ * far-reaching change. Wrap a page in .qt-theme to opt in.
+ *
+ * The floating-label trick uses `:placeholder-shown` so it works on plain inputs with no JS state:
+ * the label sits inside the empty field and rises to notch the border once there is a value or
+ * focus. Inputs therefore need `placeholder=" "` (a single space) for the selector to key off.
+ */
+.qt-theme {
+  --qt-primary: #E11D48;
+  --qt-primary-dark: #9F1239;
+  --qt-border: #CBD5E1;
+  --qt-label: #64748B;
+}
+
+/* Base outlined control. 16px font stops iOS Safari zooming the viewport on focus. */
+.qt-theme .qt-input,
+.qt-theme .qt-select,
+.qt-theme .qt-textarea {
+  width: 100%;
+  padding: 0.875rem 0.875rem;
+  font-size: 16px;
+  line-height: 1.25;
+  color: #0F172A;
+  background-color: #fff;
+  border: 1px solid var(--qt-border);
+  border-radius: 0.5rem;
+  outline: none;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.qt-theme .qt-input:hover:not(:disabled),
+.qt-theme .qt-select:hover:not(:disabled),
+.qt-theme .qt-textarea:hover:not(:disabled) {
+  border-color: #94A3B8;
+}
+.qt-theme .qt-input:focus,
+.qt-theme .qt-select:focus,
+.qt-theme .qt-textarea:focus {
+  border-color: var(--qt-primary);
+  box-shadow: inset 0 0 0 1px var(--qt-primary);
+}
+.qt-theme .qt-input:disabled,
+.qt-theme .qt-select:disabled,
+.qt-theme .qt-textarea:disabled {
+  background-color: #F8FAFC;
+  color: #64748B;
+}
+
+/* Floating-label wrapper: position:relative parent holding a control + its <label>. */
+.qt-field {
+  position: relative;
+}
+.qt-field > label {
+  position: absolute;
+  left: 0.75rem;
+  top: 0.9375rem;
+  padding: 0 0.25rem;
+  font-size: 16px;
+  color: var(--qt-label);
+  pointer-events: none;
+  transform-origin: left top;
+  transition: transform .15s ease, color .15s ease;
+  white-space: nowrap;
+  max-width: calc(100% - 1.5rem);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  /* Opaque only once raised, so the label notches the border instead of painting a white
+     rectangle over the field's own background while it sits inside the box. */
+  background-color: transparent;
+}
+/* Raised state: focused, or holding a value (placeholder no longer shown).
+   A <select> is always raised — it shows its selected option immediately, so a label sitting
+   inside the box would overlap that text. */
+.qt-field > .qt-input:focus + label,
+.qt-field > .qt-input:not(:placeholder-shown) + label,
+.qt-field > .qt-textarea:focus + label,
+.qt-field > .qt-textarea:not(:placeholder-shown) + label,
+.qt-field > .qt-select + label,
+.qt-field.qt-filled > label {
+  transform: translateY(-1.5rem) scale(0.75);
+  background-color: #fff;
+}
+/* A disabled control paints #F8FAFC, so its raised label must match or it shows a white notch. */
+.qt-field > .qt-input:disabled + label,
+.qt-field > .qt-select:disabled + label,
+.qt-field > .qt-textarea:disabled + label {
+  background-color: #F8FAFC;
+}
+.qt-field > .qt-input:focus + label,
+.qt-field > .qt-textarea:focus + label,
+.qt-field > .qt-select:focus + label {
+  color: var(--qt-primary);
+}
+
+/* Native select needs room for the chevron and its own arrow suppressed. */
+.qt-theme .qt-select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 2.25rem;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2364748B' stroke-width='2.5' stroke-linecap='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.75rem center;
+  background-size: 1.125rem;
+}
+
+/* Leading-icon variant: pads the control and centres the icon the caller renders. */
+.qt-field > .qt-icon {
+  position: absolute;
+  left: 0.875rem;
+  top: 50%;
+  transform: translateY(-50%);
+  color: #94A3B8;
+  pointer-events: none;
+}
+.qt-field.qt-has-icon > .qt-input,
+.qt-field.qt-has-icon > .qt-select {
+  padding-left: 2.75rem;
+}
+.qt-field.qt-has-icon > label {
+  left: 2.5rem;
+}
+
+/* Compact variant for data-grid cells, where a full-height Material control would make each row
+   too tall to scan. Same focus treatment, smaller box. */
+.qt-theme .qt-cell {
+  width: 100%;
+  padding: 0.375rem 0.5rem;
+  font-size: 0.875rem;
+  color: #0F172A;
+  background-color: #fff;
+  border: 1px solid var(--qt-border);
+  border-radius: 0.375rem;
+  outline: none;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.qt-theme .qt-cell:focus {
+  border-color: var(--qt-primary);
+  box-shadow: inset 0 0 0 1px var(--qt-primary);
+}
+.qt-theme .qt-cell:disabled { background-color: #F8FAFC; color: #64748B; }
+
+/* Buttons */
+.qt-theme .qt-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.8125rem 1.25rem;
+  font-size: 0.875rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  border-radius: 0.5rem;
+  transition: background-color .15s ease, box-shadow .15s ease, transform .1s ease;
+}
+.qt-theme .qt-btn:active:not(:disabled) { transform: scale(0.985); }
+.qt-theme .qt-btn:disabled { opacity: 0.5; }
+
+.qt-theme .qt-btn-primary {
+  background-color: var(--qt-primary);
+  color: #fff;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, .12), 0 2px 6px rgba(225, 29, 72, .18);
+}
+.qt-theme .qt-btn-primary:hover:not(:disabled) { background-color: var(--qt-primary-dark); }
+
+.qt-theme .qt-btn-outline {
+  background-color: #fff;
+  color: var(--qt-primary);
+  border: 1px solid var(--qt-primary);
+}
+.qt-theme .qt-btn-outline:hover:not(:disabled) { background-color: #FFF1F2; }
+
+.qt-theme .qt-btn-text {
+  background-color: transparent;
+  color: var(--qt-primary);
+  padding-left: 0.75rem;
+  padding-right: 0.75rem;
+}
+.qt-theme .qt-btn-text:hover:not(:disabled) { background-color: #FFF1F2; }
+
+.qt-theme .qt-btn-ghost {
+  background-color: #fff;
+  color: #334155;
+  border: 1px solid var(--qt-border);
+}
+.qt-theme .qt-btn-ghost:hover:not(:disabled) { background-color: #F8FAFC; }
+
+/* Section card — flat white block separated by a tinted gap, as in the reference screens. */
+.qt-theme .qt-card {
+  background-color: #fff;
+  border: 1px solid #E2E8F0;
+  border-radius: 0.75rem;
+  padding: 1rem;
+}
+.qt-theme .qt-section-label {
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #64748B;
+}
+
+/* App bar */
+.qt-theme .qt-appbar {
+  background-color: var(--qt-primary);
+  color: #fff;
+}
+.qt-theme .qt-appbar-btn {
+  padding: 0.5rem;
+  border-radius: 9999px;
+  transition: background-color .15s ease;
+}
+.qt-theme .qt-appbar-btn:hover { background-color: rgba(255, 255, 255, .16); }
+
+.qt-theme input[type="checkbox"],
+.qt-theme input[type="radio"] { accent-color: var(--qt-primary); }
+
 /* fadeIn animation used across the app */
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(4px); }

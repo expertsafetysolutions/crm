@@ -2632,6 +2632,10 @@ router.get('/items', requirePermission('inventory','view'), async (req, res) => 
 // returning a URL served by the public GET /api/media/:id. This replaces the Google Apps Script /
 // Drive round-trip for product photos: no external deployment to keep in sync, and it works on
 // Vercel where the filesystem is read-only so uploads can't be written to /assets.
+//
+// PDFs are accepted too (quotation email catalogues) — same storage, same public URL. Drive was
+// ruled out for these: the dispatch server has no Google credentials, so it could never fetch the
+// bytes back to attach them to an outgoing email.
 router.post('/media/upload', requirePermission('inventory','add'), async (req, res) => {
   try {
     const { base64, fileName, mimeType, purpose } = req.body;
@@ -2639,8 +2643,8 @@ router.post('/media/upload', requirePermission('inventory','add'), async (req, r
     if (!clean) return res.status(400).json({ error: 'No image data supplied' });
 
     const mime = String(mimeType || 'image/jpeg');
-    if (!mime.startsWith('image/')) {
-      return res.status(400).json({ error: 'Only image uploads are supported' });
+    if (!mime.startsWith('image/') && mime !== 'application/pdf') {
+      return res.status(400).json({ error: 'Only image and PDF uploads are supported' });
     }
 
     // base64 inflates by ~4/3; 8MB decoded stays clear of the 16MB BSON document ceiling and of
@@ -3055,8 +3059,18 @@ router.post('/quotations/:id/dispatch', requirePermission('quotation','edit'), a
       return res.status(400).json({ error: 'This customer has no mobile number on file.' });
     }
 
+    // Either a legacy ready-made nodemailer array, or the builder's picker payload
+    // ({ catalogIds, inline }) which dispatchService resolves against Media_Store.
     const dispatchService = require('../services/dispatchService');
-    const attachments = Array.isArray(req.body.attachments) ? req.body.attachments : undefined;
+    let attachments;
+    if (Array.isArray(req.body.attachments)) {
+      attachments = req.body.attachments;
+    } else if (req.body.catalogIds || req.body.inlineAttachments) {
+      attachments = {
+        catalogIds: req.body.catalogIds,
+        inline: req.body.inlineAttachments
+      };
+    }
     const results = await dispatchService.sendQuotation(quotation, attachments, channel);
     const updated = await quotationEngine.markDispatched(req.params.id, results, req.user);
 

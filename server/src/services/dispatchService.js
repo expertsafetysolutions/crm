@@ -167,14 +167,72 @@ async function dispatchTemplated({ doc, templateKey, recipientEmail, recipientPh
   return results;
 }
 
+/**
+ * Turns the builder's attachment picks into nodemailer attachment objects.
+ *
+ * Two sources are merged:
+ *  - `catalogIds` — ids from settings.email_attachments; the bytes are pulled out of Media_Store.
+ *  - `inline` — files the browser produced for this send (the quotation PDF), already base64.
+ *
+ * A catalogue whose media row has been deleted is skipped rather than failing the whole dispatch —
+ * losing one brochure must never block the quotation itself from going out.
+ */
+async function resolveAttachments({ catalogIds, inline, settings }) {
+  const out = [];
+
+  (Array.isArray(inline) ? inline : []).forEach(a => {
+    const content = String(a?.base64 || '').replace(/^data:[^;]+;base64,/, '');
+    if (!content) return;
+    out.push({
+      filename: a.fileName || 'attachment.pdf',
+      content,
+      encoding: 'base64',
+      contentType: a.mimeType || 'application/pdf'
+    });
+  });
+
+  const ids = Array.isArray(catalogIds) ? catalogIds.filter(Boolean) : [];
+  if (ids.length) {
+    const library = settings.email_attachments || [];
+    for (const id of ids) {
+      const entry = library.find(e => e.id === id || e.media_id === id);
+      if (!entry?.media_id) continue;
+      const media = await sheetsService.getMediaById(entry.media_id);
+      if (!media?.Data) continue;
+      out.push({
+        filename: entry.file_name || media.File_Name || 'catalogue.pdf',
+        content: media.Data,
+        encoding: 'base64',
+        contentType: entry.mime_type || media.Mime_Type || 'application/pdf'
+      });
+    }
+  }
+
+  return out;
+}
+
+/**
+ * `attachments` may be a ready-made nodemailer array (legacy callers) or a
+ * { catalogIds, inline } picker payload from the builder.
+ */
 async function sendQuotation(quotation, attachments, channel) {
   const settings = await getSettings();
+
+  let resolved = attachments;
+  if (attachments && !Array.isArray(attachments)) {
+    resolved = await resolveAttachments({
+      catalogIds: attachments.catalogIds,
+      inline: attachments.inline,
+      settings
+    });
+  }
+
   return dispatchTemplated({
     doc: quotation,
     templateKey: 'quotation_email',
     recipientEmail: quotation.Customer_Email_Snapshot,
     recipientPhone: quotation.Customer_Contact_Snapshot,
-    attachments,
+    attachments: resolved && resolved.length ? resolved : undefined,
     settings,
     channel
   });
@@ -209,6 +267,7 @@ module.exports = {
   quotePortalLink,
   portalBaseUrl,
   dispatchTemplated,
+  resolveAttachments,
   sendQuotation,
   sendFollowUpReminder,
   sendPaymentDueReminder

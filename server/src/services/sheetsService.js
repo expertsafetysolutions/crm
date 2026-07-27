@@ -231,8 +231,11 @@ class MongoService {
     const query = (idColumn === 'id' && typeof idValue === 'string' && mongoose.Types.ObjectId.isValid(idValue.trim()))
       ? { $or: [{ [idColumn]: idValue }, { _id: idValue.trim() }] }
       : { [idColumn]: idValue };
-    await Model.deleteOne(query);
-    return true;
+    // Report whether a row was actually removed. This used to return a hardcoded `true`, which
+    // made every caller's `if (!deleted) return 404` unreachable — deleting a non-existent id
+    // answered 200 "success". deleteMediaById already used deletedCount this way; match it.
+    const result = await Model.deleteOne(query);
+    return result.deletedCount > 0;
   }
 
   // Backwards compatible specific methods

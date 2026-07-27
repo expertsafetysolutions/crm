@@ -282,7 +282,11 @@ export default function InventoryPage() {
   });
 
   const submitMovement = async () => {
-    const endpoint = moveForm.type === 'Inward' ? '/api/inventory/inward' : '/api/inventory/usage';
+    // Adjustment accepts a signed qty: negative writes stock down, positive writes it up.
+    // Inward/Usage always take a positive magnitude; their direction is fixed by the type.
+    const endpoint = moveForm.type === 'Inward' ? '/api/inventory/inward'
+      : moveForm.type === 'Adjustment' ? '/api/inventory/adjustment'
+      : '/api/inventory/usage';
     const res = await fetch(endpoint, {
       method: 'POST', headers,
       body: JSON.stringify({
@@ -702,7 +706,7 @@ export default function InventoryPage() {
       {moveForm && (
         <Modal title="Record stock movement" onClose={() => setMoveForm(null)} onSave={submitMovement}>
           <div className="flex gap-2 mb-3">
-            {['Inward', 'Usage'].map(t => (
+            {['Inward', 'Usage', 'Adjustment'].map(t => (
               <button key={t} onClick={() => setMoveForm(s => ({ ...s, type: t }))}
                 className={`flex-1 px-3 py-2 rounded-lg text-sm font-bold border ${moveForm.type === t ? 'bg-slate-900 text-white border-slate-900' : 'border-slate-200'}`}>{t}</button>
             ))}
@@ -717,11 +721,32 @@ export default function InventoryPage() {
               {items.map(i => <option key={i.Item_ID} value={i.Item_ID}>{i.Item_Name}</option>)}
             </select>
           </div>
+          {moveForm.type === 'Adjustment' && (
+            <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-[11px] text-amber-800">
+              Enter the <b>difference</b>, not the counted total. Use a negative number when the physical
+              count is lower than the system figure (e.g. <b>-3</b> for three missing).
+              {moveForm.itemId && (() => {
+                const bal = balances.find(b => b.Item_ID === moveForm.itemId);
+                const diff = Number(moveForm.qty);
+                if (!bal) return null;
+                return (
+                  <div className="mt-1 font-semibold">
+                    System: {bal.Current_Qty} {bal.Unit}
+                    {Number.isFinite(diff) && diff !== 0 && ` → after adjustment: ${(Number(bal.Current_Qty) || 0) + diff} ${bal.Unit}`}
+                  </div>
+                );
+              })()}
+            </div>
+          )}
           <div className="grid grid-cols-2 gap-3">
-            <F label="Quantity" type="number" value={moveForm.qty} onChange={v => setMoveForm(s => ({ ...s, qty: v }))} />
+            <F label={moveForm.type === 'Adjustment' ? 'Difference (+/-)' : 'Quantity'} type="number"
+              value={moveForm.qty} onChange={v => setMoveForm(s => ({ ...s, qty: v }))} />
             <F label="Date" type="date" value={moveForm.date} onChange={v => setMoveForm(s => ({ ...s, date: v }))} />
           </div>
-          {moveForm.type === 'Inward' ? (
+          {moveForm.type === 'Adjustment' ? (
+            <F label="Reason" value={moveForm.notes}
+              onChange={v => setMoveForm(s => ({ ...s, notes: v }))} />
+          ) : moveForm.type === 'Inward' ? (
             <div className="grid grid-cols-2 gap-3">
               <F label="Supplier" value={moveForm.supplierName} onChange={v => setMoveForm(s => ({ ...s, supplierName: v }))} />
               <F label="Supplier invoice no." value={moveForm.supplierInvoiceNo} onChange={v => setMoveForm(s => ({ ...s, supplierInvoiceNo: v }))} />
@@ -739,7 +764,10 @@ export default function InventoryPage() {
               <F label="Site" value={moveForm.site} onChange={v => setMoveForm(s => ({ ...s, site: v }))} />
             </div>
           )}
-          <F label="Notes" value={moveForm.notes} onChange={v => setMoveForm(s => ({ ...s, notes: v }))} />
+          {/* Adjustment collects its own "Reason" above, so it doesn't repeat the Notes field. */}
+          {moveForm.type !== 'Adjustment' && (
+            <F label="Notes" value={moveForm.notes} onChange={v => setMoveForm(s => ({ ...s, notes: v }))} />
+          )}
         </Modal>
       )}
     </div>

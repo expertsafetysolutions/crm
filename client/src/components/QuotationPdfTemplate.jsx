@@ -338,11 +338,12 @@ const QuotationPdfTemplate = React.forwardRef(({
           </div>
 
           {/* Document title band.
-              Colour and metrics are inline rather than Tailwind classes: html2canvas resolves an
-              inherited `color` inconsistently on a transformed ancestor, which rendered this
-              band as an empty red box in the emailed PDF while the identically-styled table header
-              and grand-total rows (both inline-coloured) came out correctly. Letter-spacing is set
-              with a trailing-space compensation so the centred text doesn't drift right. */}
+              Colour and metrics are set inline, matching the table header and grand-total rows.
+              Those two render correctly in the exported PDF while this band — the one element here
+              that relied on Tailwind utility classes — came out as an empty red box, so the
+              styling is pinned inline to take the class layer out of the equation entirely.
+              Letter-spacing adds a trailing gap after the last glyph, which pushes centred text
+              right; textIndent of the same size cancels it. */}
           <div className="text-center mb-2">
             <div className="inline-block" style={{ backgroundColor: BRAND_RED, padding: '4px 28px' }}>
               <h1
@@ -591,12 +592,18 @@ const QuotationPdfTemplate = React.forwardRef(({
                   />
                 </div>
               )}
-              <div className="border-t border-slate-900 pt-0.5 font-black text-[9px] uppercase w-full">
-                {seller.authorized_signatory || 'NILESHKUMAR MANJIBHAI PADAYA'}
-              </div>
-              <div className="text-[7px] text-slate-600 font-bold leading-tight">
-                Authorized Signatory — {seller.legal_name || 'Expert Safety Solutions'}
-              </div>
+              {/* Honours the "Show signatory name & line" toggle in Quotation Settings, which the
+                  settings screen has always offered but this template previously ignored. */}
+              {overlay.show_signature !== false && (
+                <>
+                  <div className="border-t border-slate-900 pt-0.5 font-black text-[9px] uppercase w-full">
+                    {seller.authorized_signatory || 'NILESHKUMAR MANJIBHAI PADAYA'}
+                  </div>
+                  <div className="text-[7px] text-slate-600 font-bold leading-tight">
+                    Authorized Signatory — {seller.legal_name || 'Expert Safety Solutions'}
+                  </div>
+                </>
+              )}
             </div>
           </div>
 

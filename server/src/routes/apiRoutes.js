@@ -1859,8 +1859,14 @@ router.patch('/tasks/:id/reject-removal', async (req, res) => {
 });
 
 // Delete / Remove Task (Admin confirmation)
+// Admin-only, matching every other destructive route and the UI, which offers permanent deletion
+// only through the Admin actions (direct delete and approve-removal). Staff are expected to go via
+// PATCH /tasks/:id/request-removal instead.
 router.delete('/tasks/:id', async (req, res) => {
   try {
+    if (req.user.role !== 'Admin') {
+      return res.status(403).json({ error: 'Admin access required to delete a task' });
+    }
     const taskId = req.params.id;
     const deleted = await sheetsService.deleteRow('Task_Master', 'Task_ID', taskId);
     if (!deleted) return res.status(404).json({ error: 'Task not found' });

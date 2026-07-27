@@ -39,17 +39,22 @@ async function ensureInventoryRow(itemId, unit) {
 }
 
 /**
- * Core ledger write. `qty` is signed by transaction type internally: inward/positive adjustments
- * add, usage/sale deductions subtract. Callers always pass a positive magnitude.
+ * Core ledger write. Direction is decided by transaction type: inward adds, usage/sale deductions
+ * subtract, and callers pass a positive magnitude for those.
+ *
+ * ADJUSTMENT is the exception — it honours the SIGN of `qty`, because a stock-count correction has
+ * to be able to go either way. Forcing it through Math.abs() (as every type once was) made a
+ * negative adjustment silently ADD stock, so shortfalls could never be corrected.
  */
 async function recordTransaction({ itemId, type, qty, unit, supplierName, supplierInvoiceNo, clientId, site, linkedInvoiceId, notes, recordedBy, date }) {
   if (!itemId) throw new Error('itemId is required');
-  const magnitude = Math.abs(Number(qty) || 0);
+  const raw = Number(qty) || 0;
+  const magnitude = Math.abs(raw);
   if (magnitude === 0) throw new Error('Quantity must be non-zero');
 
   const inventoryRow = await ensureInventoryRow(itemId, unit);
   const isOutward = type === TYPES.USAGE || type === TYPES.SALE_DEDUCTION;
-  const signedQty = isOutward ? -magnitude : magnitude;
+  const signedQty = type === TYPES.ADJUSTMENT ? raw : (isOutward ? -magnitude : magnitude);
   const balanceAfter = (Number(inventoryRow.Current_Qty) || 0) + signedQty;
 
   const transaction = {

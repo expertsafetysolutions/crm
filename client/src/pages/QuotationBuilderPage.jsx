@@ -3,7 +3,7 @@ import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   ArrowLeft, Plus, Trash2, Save, Send, FileText, Download, CheckCircle2,
   AlertTriangle, History, Loader2, Copy, Building2, Search, Eye, X, Printer, MoreHorizontal,
-  Image as ImageIcon, Mail, MessageCircle, Paperclip
+  Image as ImageIcon, Mail, MessageCircle, Paperclip, Trophy
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useDocSettings } from '../context/DocSettingsContext';
@@ -15,6 +15,10 @@ import {
   isEditable, isDispatchable, canRevise
 } from '../utils/quotationUtils';
 import { stateOptions, extractStateCode, detectStateCode, getStateName } from '../utils/gstinUtils';
+
+// Must match ORDER_LOST_REASONS in server/src/routes/apiRoutes.js — the server rejects anything
+// outside this list when an enquiry is closed as Lost.
+const ORDER_LOST_REASONS = ['Price High', 'Competitor', 'Delay', 'Requirement Cancelled', 'Other'];
 
 /**
  * Quotation builder — a dedicated route (not an AdminDashboard tab) because it's a stateful
@@ -59,6 +63,8 @@ export default function QuotationBuilderPage() {
   const [previewScale, setPreviewScale] = useState(1);
   // Catalogue ids (from Quotation_Settings.email_attachments) to attach to the dispatch email.
   const [selectedAttachmentIds, setSelectedAttachmentIds] = useState([]);
+  // Won/Lost close dialog: null when shut, else { outcome, reason, remarks }.
+  const [closeForm, setCloseForm] = useState(null);
 
   // Draft form state (only meaningful before the quotation is issued)
   const [form, setForm] = useState({
@@ -439,6 +445,36 @@ export default function QuotationBuilderPage() {
     }
   };
 
+  /**
+   * Closes the quotation's follow-up task as Won or Lost.
+   *
+   * A Lost outcome must carry a reason — it is what feeds the Order Lost report — and the server
+   * additionally rejects the quotation, so no further follow-ups fire against a dead enquiry.
+   */
+  const handleCloseOutcome = async () => {
+    const taskId = quotation.Follow_Up_Task_ID || quotation.Task_ID;
+    if (!taskId) return flash('This quotation has no linked task to close.', true);
+
+    const data = await runAction(
+      'close-outcome',
+      `/api/tasks/${taskId}/close-quotation-task`,
+      {
+        outcome: closeForm.outcome,
+        reasonForOrderLost: closeForm.outcome === 'Lost' ? closeForm.reason : undefined,
+        remarks: closeForm.remarks
+      }
+    );
+    if (!data) return;
+
+    setCloseForm(null);
+    flash(closeForm.outcome === 'Won'
+      ? 'Marked as Won and the follow-up task is closed.'
+      : `Marked as Lost (${closeForm.reason}). The follow-up task is closed.`);
+
+    const refreshed = await fetch(`/api/quotations/${quotation.Quotation_ID}`, { headers: authHeaders });
+    if (refreshed.ok) setQuotation(await refreshed.json());
+  };
+
   const handleRevise = async () => {
     const reason = window.prompt('What is changing in this revision?');
     if (reason === null) return;
@@ -534,6 +570,16 @@ export default function QuotationBuilderPage() {
   const filteredCustomers = customerSearch
     ? customers.filter(c => `${c.Company_Name} ${c.Auth_Person || ''}`.toLowerCase().includes(customerSearch.toLowerCase())).slice(0, 40)
     : customers.slice(0, 40);
+
+  // Won/Lost only applies once the customer has actually seen the quotation and the outcome is
+  // still open: a draft has nothing to win, and an already converted/rejected thread is settled.
+  // The server additionally restricts this to Admin and Sales.
+  const canCloseOutcome = Boolean(
+    quotation
+    && (quotation.Follow_Up_Task_ID || quotation.Task_ID)
+    && ['Sent', 'Revised', 'RevisionRequested', 'RequirementChangeRequested', 'Accepted', 'Expired']
+      .includes(quotation.Status)
+  );
 
   return (
     <div className="qt-theme min-h-screen bg-slate-50 pb-24">
@@ -1063,6 +1109,14 @@ export default function QuotationBuilderPage() {
                 />
                 {quotation.Portal_Guid && <ActionBtn onClick={copyPortalLink} icon={Copy} label="Customer link" />}
                 {canRevise(quotation.Status) && <ActionBtn onClick={handleRevise} icon={FileText} label="New revision" busy={busyAction === 'revise'} />}
+                {canCloseOutcome && (
+                  <ActionBtn
+                    onClick={() => setCloseForm({ outcome: 'Won', reason: ORDER_LOST_REASONS[0], remarks: '' })}
+                    icon={Trophy}
+                    label="Won / Lost"
+                    title="Record whether this enquiry converted into an order"
+                  />
+                )}
                 {quotation.Status === 'Accepted' && (
                   <>
                     <button onClick={() => handleConvert('PI')} disabled={busyAction === 'convert'}
@@ -1110,6 +1164,10 @@ export default function QuotationBuilderPage() {
             {canRevise(quotation.Status) && (
               <SheetBtn icon={FileText} label="Create new revision" onClick={() => { setShowActions(false); handleRevise(); }} />
             )}
+            {canCloseOutcome && (
+              <SheetBtn icon={Trophy} label="Mark Won / Lost"
+                onClick={() => { setShowActions(false); setCloseForm({ outcome: 'Won', reason: ORDER_LOST_REASONS[0], remarks: '' }); }} />
+            )}
             {quotation.Status === 'Accepted' && (
               <>
                 <SheetBtn icon={FileText} label="Convert to Proforma Invoice" tone="indigo"
@@ -1122,6 +1180,68 @@ export default function QuotationBuilderPage() {
               className="w-full mt-2 px-4 py-3 border border-slate-200 rounded-xl text-sm font-bold">
               Cancel
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Won / Lost outcome */}
+      {closeForm && (
+        <div className="fixed inset-0 bg-slate-900/50 z-50 flex items-end md:items-center justify-center md:p-4" onClick={() => setCloseForm(null)}>
+          <div
+            className="bg-white rounded-t-2xl md:rounded-2xl p-4 md:p-5 w-full max-w-md"
+            style={{ paddingBottom: 'calc(env(safe-area-inset-bottom) + 16px)' }}
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="w-10 h-1 bg-slate-300 rounded-full mx-auto mb-2 md:hidden" />
+            <div className="flex items-center justify-between mb-1">
+              <div className="font-bold text-slate-900">Close enquiry</div>
+              <button onClick={() => setCloseForm(null)} className="p-1.5 hover:bg-slate-100 rounded-lg"><X className="w-4 h-4" /></button>
+            </div>
+            <p className="text-xs text-slate-500 mb-3">
+              Did {quotation.Quote_No_Display} turn into an order? This closes the follow-up task.
+            </p>
+
+            <div className="grid grid-cols-2 gap-2">
+              {['Won', 'Lost'].map(o => (
+                <button key={o} onClick={() => setCloseForm(s => ({ ...s, outcome: o }))}
+                  className={`qt-btn py-3 ${closeForm.outcome === o
+                    ? (o === 'Won' ? 'bg-emerald-600 text-white' : 'bg-rose-600 text-white')
+                    : 'qt-btn-ghost'}`}>
+                  {o === 'Won' ? 'ORDER WON' : 'ORDER LOST'}
+                </button>
+              ))}
+            </div>
+
+            {closeForm.outcome === 'Lost' && (
+              <div className="qt-field mt-4">
+                <select value={closeForm.reason} onChange={e => setCloseForm(s => ({ ...s, reason: e.target.value }))}
+                  className="qt-select">
+                  {ORDER_LOST_REASONS.map(r => <option key={r} value={r}>{r}</option>)}
+                </select>
+                <label>Reason for losing</label>
+              </div>
+            )}
+
+            <div className="qt-field mt-4">
+              <textarea value={closeForm.remarks} rows={2} placeholder=" "
+                onChange={e => setCloseForm(s => ({ ...s, remarks: e.target.value }))}
+                className="qt-textarea" />
+              <label>Remarks (optional)</label>
+            </div>
+
+            {closeForm.outcome === 'Lost' && (
+              <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mt-3">
+                The quotation will also be marked Rejected, so no further reminders are sent.
+              </p>
+            )}
+
+            <div className="flex gap-2 mt-4">
+              <button onClick={() => setCloseForm(null)} className="qt-btn qt-btn-ghost flex-1">CANCEL</button>
+              <button onClick={handleCloseOutcome} disabled={busyAction === 'close-outcome'}
+                className="qt-btn qt-btn-primary flex-1">
+                {busyAction === 'close-outcome' && <Loader2 className="w-4 h-4 animate-spin" />} CONFIRM
+              </button>
+            </div>
           </div>
         </div>
       )}

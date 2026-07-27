@@ -379,7 +379,11 @@ export default function QuotationBuilderPage() {
 
     const { generatePdfFromElement } = await import('../utils/pdfGenerator');
     const pdf = await generatePdfFromElement(node, { orientation: 'portrait' });
-    const base64 = pdf.output('base64');
+
+    // 'datauristring' — NOT 'base64'. jsPDF's output() has no "base64" case: an unrecognised type
+    // falls through its switch and returns null, which is what surfaced as "the generated PDF was
+    // empty" no matter how well the page had actually rendered.
+    const base64 = String(pdf.output('datauristring') || '').split('base64,').pop() || '';
     if (!base64) throw new Error('The generated PDF was empty.');
 
     return {

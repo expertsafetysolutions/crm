@@ -27,6 +27,18 @@ import { formatMoney, formatDate, amountInWords, buildUpiUri, isUpiDeepLink, ext
 const A4_PORTRAIT_WIDTH = 794;   // 210mm @ 96dpi
 const A4_PORTRAIT_HEIGHT = 1123; // 297mm @ 96dpi
 
+// 96dpi ÷ 25.4mm — used to express the page margin and border weight in real millimetres.
+const PX_PER_MM = 96 / 25.4;
+
+// White margin between the sheet edge and the printed border, equal on all four sides. Applied on
+// the fixed-size outer sheet (not the scaled inner block) so it stays constant even when a long
+// document is scaled down to fit, and so the border can never be clipped by the page edge.
+const PAGE_MARGIN_PX = Math.round(8 * PX_PER_MM);   // 8mm
+const PAGE_BORDER_PX = Math.round(1 * PX_PER_MM);   // 1mm single solid rule
+
+const CONTENT_WIDTH = A4_PORTRAIT_WIDTH - PAGE_MARGIN_PX * 2;
+const CONTENT_HEIGHT = A4_PORTRAIT_HEIGHT - PAGE_MARGIN_PX * 2;
+
 // Sampled from assets/header_logo.png — the EXPERT wordmark's red and its black keyline.
 const BRAND_RED = '#E01B24';      // page border, title band, grand total
 const BRAND_RED_DARK = '#A3111A'; // small red text, where pure red would vibrate
@@ -164,10 +176,11 @@ const PageFrame = React.forwardRef(({ children }, ref) => {
     if (!el) return;
 
     const measure = () => {
-      // scrollHeight is read while unscaled, so compare against the natural height.
+      // scrollHeight is read while unscaled, so compare against the natural height. The target is
+      // the CONTENT box (sheet minus the two page margins), not the full sheet.
       const natural = el.scrollHeight;
-      const next = natural > A4_PORTRAIT_HEIGHT
-        ? Math.max(0.55, A4_PORTRAIT_HEIGHT / natural)
+      const next = natural > CONTENT_HEIGHT
+        ? Math.max(0.55, CONTENT_HEIGHT / natural)
         : 1;
       setScale(prev => (Math.abs(prev - next) > 0.002 ? next : prev));
     };
@@ -188,6 +201,9 @@ const PageFrame = React.forwardRef(({ children }, ref) => {
         height: `${A4_PORTRAIT_HEIGHT}px`,
         overflow: 'hidden',
         backgroundColor: '#ffffff',
+        // The page margin lives here, on the unscaled sheet, so all four sides stay equal and the
+        // border below can never be clipped by the sheet edge.
+        padding: `${PAGE_MARGIN_PX}px`,
         boxSizing: 'border-box',
         isolation: 'isolate'
       }}
@@ -196,8 +212,8 @@ const PageFrame = React.forwardRef(({ children }, ref) => {
       <div
         ref={innerRef}
         style={{
-          width: `${A4_PORTRAIT_WIDTH}px`,
-          minHeight: `${A4_PORTRAIT_HEIGHT}px`,
+          width: `${CONTENT_WIDTH}px`,
+          minHeight: `${CONTENT_HEIGHT}px`,
           boxSizing: 'border-box',
           transform: scale < 1 ? `scale(${scale})` : undefined,
           transformOrigin: 'top left'
@@ -260,14 +276,17 @@ const QuotationPdfTemplate = React.forwardRef(({
 
   return (
     <PageFrame ref={ref}>
-      {/* Double border in the logo's red.
+      {/* Single 1mm solid rule in the logo's red, inset from the sheet edge by PageFrame's margin.
           The frame is the flex column that owns the page: content grows from the top, the
           signature/footer block is pinned to the bottom by a flexible spacer between them.
           It must NOT repeat the parent's minHeight — nesting two min-heights of a full page
           inside a border-box parent overflows the sheet and pushes the footer off the page. */}
       <div
-        className="flex flex-col border-4 border-double p-4 flex-1 bg-white relative"
-        style={{ boxSizing: 'border-box', borderColor: BRAND_RED }}
+        className="flex flex-col p-4 flex-1 bg-white relative"
+        style={{
+          boxSizing: 'border-box',
+          border: `${PAGE_BORDER_PX}px solid ${BRAND_RED}`
+        }}
       >
         {overlay.show_watermark !== false && (
           <img
@@ -283,11 +302,13 @@ const QuotationPdfTemplate = React.forwardRef(({
           />
         )}
 
+        {/* Sized to the CONTENT box, not the full sheet: this sits inside the bordered frame, so
+            passing the sheet dimensions would compute a diagonal larger than the box it fills. */}
         {security.enabled !== false && (
           <SecurityWatermark
             config={{ ...security, text: security.text || seller.legal_name || 'Expert Safety Solutions' }}
-            width={A4_PORTRAIT_WIDTH}
-            height={A4_PORTRAIT_HEIGHT}
+            width={CONTENT_WIDTH}
+            height={CONTENT_HEIGHT}
           />
         )}
 
@@ -316,10 +337,26 @@ const QuotationPdfTemplate = React.forwardRef(({
             )}
           </div>
 
-          {/* Document title band */}
+          {/* Document title band.
+              Colour and metrics are inline rather than Tailwind classes: html2canvas resolves an
+              inherited `color` inconsistently on a transformed ancestor, which rendered this
+              band as an empty red box in the emailed PDF while the identically-styled table header
+              and grand-total rows (both inline-coloured) came out correctly. Letter-spacing is set
+              with a trailing-space compensation so the centred text doesn't drift right. */}
           <div className="text-center mb-2">
-            <div className="inline-block px-7 py-1" style={{ backgroundColor: BRAND_RED }}>
-              <h1 className="text-[13px] font-black tracking-[0.2em] text-white">
+            <div className="inline-block" style={{ backgroundColor: BRAND_RED, padding: '4px 28px' }}>
+              <h1
+                style={{
+                  color: '#ffffff',
+                  fontSize: '13px',
+                  lineHeight: 1.25,
+                  fontWeight: 900,
+                  letterSpacing: '0.2em',
+                  textIndent: '0.2em',
+                  margin: 0,
+                  whiteSpace: 'nowrap'
+                }}
+              >
                 {DOC_TITLES[docType] || 'QUOTATION'}
               </h1>
             </div>

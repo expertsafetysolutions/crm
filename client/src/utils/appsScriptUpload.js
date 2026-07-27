@@ -80,7 +80,13 @@ export function normalizeDriveImageUrl(url, fileId) {
 
 export async function uploadPdfToAppsScript({ pdf, fileName, documentType, ...metadata }) {
   try {
-    const pdfBase64 = pdf.output('base64');
+    // 'datauristring' — NOT 'base64'. jsPDF's output() has no "base64" case; an unrecognised type
+    // falls through its switch and returns null, so this used to POST a null body to Drive.
+    const pdfBase64 = String(pdf.output('datauristring') || '').split('base64,').pop() || '';
+    if (!pdfBase64) {
+      console.warn(`[appsScriptUpload] "${fileName}" produced no PDF data; skipping upload.`);
+      return;
+    }
     const res = await fetch(APPS_SCRIPT_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },

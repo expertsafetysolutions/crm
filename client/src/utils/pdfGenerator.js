@@ -22,12 +22,38 @@ export async function renderElementToCanvas(element, options = {}) {
   if (!element) throw new Error('No element supplied to render');
   const { default: html2canvas } = await import('html2canvas');
 
+  // Capture exactly the element's own box.
+  //
+  // html2canvas defaults its capture window to the browser viewport and positions the element
+  // within it. For a source parked off-screen (the PDF template sits at left:-10000px) that meant
+  // the sheet could be laid out against a window far wider than itself: the 794px page was drawn
+  // into a ~1400px canvas, leaving dead space to the right of the content, and when the off-screen
+  // offset fell outside the assumed window the capture came back zero-width — the "generated PDF
+  // was empty" failure. Pinning width/height/window* to the element's measured size makes the
+  // canvas exactly the sheet, so the content is centred and the capture can never be clipped.
+  const rect = element.getBoundingClientRect();
+  const width = Math.ceil(options.width || rect.width || element.offsetWidth);
+  const height = Math.ceil(options.height || rect.height || element.offsetHeight);
+
+  if (!width || !height) {
+    throw new Error('The document layout has no size yet — try again in a moment.');
+  }
+
   return html2canvas(element, {
     scale: options.scale || 2,
     useCORS: true,
     allowTaint: false,
     backgroundColor: options.backgroundColor || '#ffffff',
-    windowWidth: options.windowWidth || 1400,
+    width,
+    height,
+    windowWidth: width,
+    windowHeight: height,
+    // Neutralise the element's own page offset; without this the off-screen -10000px left position
+    // is treated as a scroll offset and the drawn content lands outside the canvas.
+    x: 0,
+    y: 0,
+    scrollX: 0,
+    scrollY: 0,
     onclone: async (clonedDoc) => {
       // Images that haven't finished decoding render blank in the captured canvas, so each one is
       // re-kicked and awaited before capture.
@@ -62,6 +88,12 @@ export async function generatePdfFromElement(element, options = {}) {
   const { w: pdfWidth, h: pdfHeight } = PAGE_SIZES[format][orientation];
 
   const canvas = await renderElementToCanvas(element, options);
+  // A zero-dimension canvas yields a data URI that jsPDF silently accepts, producing a blank page.
+  // Fail loudly here instead, so the caller can report a real reason rather than emailing an empty
+  // attachment.
+  if (!canvas.width || !canvas.height) {
+    throw new Error('The document could not be rendered (empty capture).');
+  }
   const imgData = canvas.toDataURL('image/jpeg', options.quality || 0.98);
 
   const { jsPDF } = await import('jspdf');

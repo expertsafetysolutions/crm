@@ -5578,8 +5578,11 @@ export default function AdminDashboard() {
 
       {/* EDIT CUSTOMER MODAL */}
       {showEditCustomerModal && editingCustomer && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
-          <div className="bg-white border border-slate-200 rounded-3xl max-w-lg w-full p-5 sm:p-6 shadow-2xl space-y-5 my-4">
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4">
+          {/* Scrolling lives on the card, not the overlay: this form is taller than a laptop
+              viewport, and flex centering on a scrollable overlay pushes the top of a too-tall
+              child into negative space, which cannot be scrolled back to. */}
+          <div className="bg-white border border-slate-200 rounded-3xl max-w-lg w-full p-5 sm:p-6 shadow-2xl space-y-5 max-h-[90vh] overflow-y-auto">
             {/* Header */}
             <div className="flex items-center justify-between border-b border-slate-200 pb-3">
               <div>

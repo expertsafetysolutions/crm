@@ -66,8 +66,14 @@ async function getSchedule() {
  *
  * `force` is what the manual "Run now" button and any ad-hoc invocation pass — it bypasses the
  * hour check but nothing else, so a human can always trigger a run without waiting for the clock.
+ *
+ * `ignoreHour` is the daily-cron mode. Vercel's Hobby plan permits only ONE cron run per day, so
+ * there is no hourly tick to match the admin's chosen hour against. On that single daily tick every
+ * job that is switched on runs, and the chosen hour is treated as "enabled" rather than "run at
+ * exactly this time". A job explicitly set to null is still skipped, so the on/off control keeps
+ * working — only the timing preference is lost, and it is lost visibly via the reason below.
  */
-async function isDueNow(job, { force = false, now = new Date() } = {}) {
+async function isDueNow(job, { force = false, ignoreHour = false, now = new Date() } = {}) {
   if (force) return { due: true, reason: 'forced', hour: istHour(now) };
 
   const schedule = await getSchedule();
@@ -77,6 +83,11 @@ async function isDueNow(job, { force = false, now = new Date() } = {}) {
   if (scheduledHour === null) {
     return { due: false, reason: 'disabled', scheduledHour: null, currentHour };
   }
+
+  if (ignoreHour) {
+    return { due: true, reason: 'daily-tick', scheduledHour, currentHour };
+  }
+
   return {
     due: scheduledHour === currentHour,
     reason: scheduledHour === currentHour ? 'scheduled' : 'not-this-hour',
@@ -95,8 +106,12 @@ async function isDueNow(job, { force = false, now = new Date() } = {}) {
  *
  * Deliberately NOT applied to forced runs: pressing Run now twice is an explicit human decision.
  */
-async function claimHourlySlot(job, now = new Date()) {
-  const key = `REMINDER_RUN::${job}::${istToday(now)}::${String(istHour(now)).padStart(2, '0')}`;
+async function claimHourlySlot(job, { now = new Date(), daily = false } = {}) {
+  // On the daily plan the slot must be keyed on the DATE alone. Keying it on the hour would let a
+  // Vercel retry that lands in the following hour re-send every reminder for the day.
+  const key = daily
+    ? `REMINDER_RUN::${job}::${istToday(now)}`
+    : `REMINDER_RUN::${job}::${istToday(now)}::${String(istHour(now)).padStart(2, '0')}`;
   const seq = await sheetsService.getNextSequence(key);
   return { claimed: seq === 1, attempt: seq, key };
 }

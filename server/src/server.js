@@ -559,16 +559,22 @@ const REMINDER_JOBS = {
  * Never throws: one failing job must not abort the others in the same tick, so the error is
  * captured into the per-job result instead.
  */
-async function runReminderJob(job, { force = false } = {}) {
-  const verdict = await reminderScheduler.isDueNow(job, { force });
+async function runReminderJob(job, { force = false, ignoreHour = false } = {}) {
+  const verdict = await reminderScheduler.isDueNow(job, { force, ignoreHour });
   if (!verdict.due) return { job, ran: false, ...verdict };
 
   // Vercel retries a cron invocation on a non-2xx, and the Run-now button sits alongside it, so an
   // unguarded hour could dispatch the same reminders twice. Forced runs skip the guard on purpose.
   if (!force) {
-    const slot = await reminderScheduler.claimHourlySlot(job);
+    const slot = await reminderScheduler.claimHourlySlot(job, { daily: ignoreHour });
     if (!slot.claimed) {
-      return { job, ran: false, reason: 'already-ran-this-hour', attempt: slot.attempt, ...verdict };
+      return {
+        job,
+        ran: false,
+        reason: ignoreHour ? 'already-ran-today' : 'already-ran-this-hour',
+        attempt: slot.attempt,
+        ...verdict
+      };
     }
   }
 
@@ -591,12 +597,31 @@ async function runReminderJob(job, { force = false } = {}) {
 app.get('/api/cron/reminder-dispatch', async (req, res) => {
   if (!isAuthorizedCron(req)) return res.status(401).json({ error: 'Unauthorized' });
   try {
+    /*
+     * ?daily=1 is what vercel.json sends, and it exists because of a plan limit rather than a
+     * design choice.
+     *
+     * This dispatcher was built around an HOURLY cron: it wakes every hour and runs whichever jobs
+     * the admin scheduled for that IST hour. Vercel's Hobby plan allows one cron run per DAY, and
+     * an hourly expression is rejected outright at deploy time — which silently blocked every
+     * deployment until it was found.
+     *
+     * So on the single daily tick (04:30 UTC = 10:00 IST) every ENABLED job runs, and the admin's
+     * chosen hour degrades to an on/off switch. A job set to null is still skipped.
+     *
+     * To restore true per-hour scheduling: move the account to a plan that permits hourly crons,
+     * set the schedule in vercel.json back to "0 * * * *", and drop this query parameter. No code
+     * here needs changing — the hourly path is untouched.
+     */
+    const ignoreHour = req.query.daily === '1' || req.query.ignoreHour === '1';
+
     const results = [];
     for (const job of Object.keys(REMINDER_JOBS)) {
-      results.push(await runReminderJob(job));
+      results.push(await runReminderJob(job, { ignoreHour }));
     }
     res.json({
       success: true,
+      mode: ignoreHour ? 'daily' : 'hourly',
       istHour: reminderScheduler.istHour(),
       schedule: await reminderScheduler.getSchedule(),
       results

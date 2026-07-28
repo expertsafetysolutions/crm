@@ -18,8 +18,8 @@
   ],
   "crons": [
     {
-      "path": "/api/cron/reminder-dispatch",
-      "schedule": "0 * * * *"
+      "path": "/api/cron/reminder-dispatch?daily=1",
+      "schedule": "30 4 * * *"
     }
   ]
 }

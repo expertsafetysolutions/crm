@@ -4224,147 +4224,6 @@ export default function AdminDashboard() {
             </div>
           )}
 
-          {/* NEW STAFF PROFILE MODAL */}
-          {showNewStaffModal && (
-            <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-2 sm:p-4 overflow-y-auto">
-              <div className="bg-white border border-slate-200 rounded-3xl max-w-lg w-full p-4 sm:p-6 shadow-2xl space-y-5 max-h-[90vh] overflow-y-auto">
-                <div className="flex items-center justify-between border-b border-slate-200 pb-3">
-                  <div className="flex items-center gap-2">
-                    <UserPlus className="w-5 h-5 text-emerald-600" />
-                    <h3 className="text-base font-bold text-slate-900">Add New Staff Member Profile</h3>
-                  </div>
-                  <button
-                    onClick={() => setShowNewStaffModal(false)}
-                    className="text-slate-400 hover:text-slate-600 font-bold text-sm"
-                  >
-                    ✕
-                  </button>
-                </div>
-
-                <form onSubmit={handleCreateStaffSubmit} className="space-y-4">
-                  <div>
-                    <label className="block text-xs font-bold text-slate-700 mb-1">Full Name *</label>
-                    <input
-                      type="text"
-                      required
-                      placeholder="e.g. Amit Verma"
-                      value={newStaffForm.name}
-                      onChange={e => setNewStaffForm({ ...newStaffForm, name: e.target.value })}
-                      className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                    />
-                  </div>
-
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-xs font-bold text-slate-700 mb-1">Login Email *</label>
-                      <input
-                        type="email"
-                        required
-                        placeholder="amit.v@expertsafety.in"
-                        value={newStaffForm.email}
-                        onChange={e => setNewStaffForm({ ...newStaffForm, email: e.target.value })}
-                        className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-bold text-slate-700 mb-1">Login Password *</label>
-                      <input
-                        type="text"
-                        required
-                        placeholder="Default: staff123"
-                        value={newStaffForm.password}
-                        onChange={e => setNewStaffForm({ ...newStaffForm, password: e.target.value })}
-                        className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-xs font-bold text-slate-700 mb-1">Mobile Phone</label>
-                      <input
-                        type="text"
-                        placeholder="+91 98000 11223"
-                        value={newStaffForm.mobile}
-                        onChange={e => setNewStaffForm({ ...newStaffForm, mobile: e.target.value })}
-                        className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-bold text-slate-700 mb-1">Daily Salary Rate (₹)</label>
-                      <input
-                        type="number"
-                        required
-                        value={newStaffForm.dailySalaryRate}
-                        onChange={e => setNewStaffForm({ ...newStaffForm, dailySalaryRate: Number(e.target.value) })}
-                        className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-xs font-bold text-slate-700 mb-1">Role</label>
-                      <select
-                        value={newStaffForm.role}
-                        onChange={e => setNewStaffForm({ ...newStaffForm, role: e.target.value })}
-                        className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                      >
-                        <option value="Staff">Staff</option>
-                        <option value="Supervisor">Supervisor</option>
-                        <option value="Admin">Admin</option>
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block text-xs font-bold text-slate-700 mb-1">Department</label>
-                      <select
-                        value={newStaffForm.department}
-                        onChange={e => setNewStaffForm({ ...newStaffForm, department: e.target.value })}
-                        className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                      >
-                        <option value="Field Operations">Field Operations</option>
-                        <option value="Sales">Sales</option>
-                        <option value="Production">Production</option>
-                        <option value="Service">Service</option>
-                        <option value="Certification">Certification</option>
-                      </select>
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-bold text-slate-700 mb-1">Initial Access Point Permission Scope *</label>
-                    <select
-                      value={newStaffForm.permissions}
-                      onChange={e => setNewStaffForm({ ...newStaffForm, permissions: e.target.value })}
-                      className="w-full px-3 py-2 border border-indigo-200 bg-indigo-50/40 rounded-xl text-xs font-bold text-indigo-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    >
-                      <option value="ASSIGNED_ONLY">Assigned Work Only (Sees own tasks & shifts)</option>
-                      <option value="ALL_CUSTOMERS">All Customer Directory & CRM Access</option>
-                      <option value="ALL_TASKS">All Company Work Orders & Pipeline</option>
-                      <option value="FULL_ACCESS">Full Access (Supervisor / All Scope)</option>
-                    </select>
-                  </div>
-
-                  <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-200">
-                    <button
-                      type="button"
-                      onClick={() => setShowNewStaffModal(false)}
-                      className="px-4 py-2 rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-50 text-xs font-bold transition"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="submit"
-                      disabled={creatingStaff}
-                      className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-sm transition"
-                    >
-                      {creatingStaff ? 'Creating...' : '+ Create Staff Profile'}
-                    </button>
-                  </div>
-                </form>
-              </div>
-            </div>
-          )}
         </div>
       )}
 
@@ -8158,6 +8017,148 @@ export default function AdminDashboard() {
                   className="px-5 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold shadow-sm"
                 >
                   Create Order
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* NEW STAFF PROFILE MODAL */}
+      {showNewStaffModal && (
+        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-2 sm:p-4 overflow-y-auto">
+          <div className="bg-white border border-slate-200 rounded-3xl max-w-lg w-full p-4 sm:p-6 shadow-2xl space-y-5 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+              <div className="flex items-center gap-2">
+                <UserPlus className="w-5 h-5 text-emerald-600" />
+                <h3 className="text-base font-bold text-slate-900">Add New Staff Member Profile</h3>
+              </div>
+              <button
+                onClick={() => setShowNewStaffModal(false)}
+                className="text-slate-400 hover:text-slate-600 font-bold text-sm"
+              >
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateStaffSubmit} className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Full Name *</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. Amit Verma"
+                  value={newStaffForm.name}
+                  onChange={e => setNewStaffForm({ ...newStaffForm, name: e.target.value })}
+                  className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Login Email *</label>
+                  <input
+                    type="email"
+                    required
+                    placeholder="amit.v@expertsafety.in"
+                    value={newStaffForm.email}
+                    onChange={e => setNewStaffForm({ ...newStaffForm, email: e.target.value })}
+                    className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Login Password *</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="Default: staff123"
+                    value={newStaffForm.password}
+                    onChange={e => setNewStaffForm({ ...newStaffForm, password: e.target.value })}
+                    className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Mobile Phone</label>
+                  <input
+                    type="text"
+                    placeholder="+91 98000 11223"
+                    value={newStaffForm.mobile}
+                    onChange={e => setNewStaffForm({ ...newStaffForm, mobile: e.target.value })}
+                    className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Daily Salary Rate (₹)</label>
+                  <input
+                    type="number"
+                    required
+                    value={newStaffForm.dailySalaryRate}
+                    onChange={e => setNewStaffForm({ ...newStaffForm, dailySalaryRate: Number(e.target.value) })}
+                    className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Role</label>
+                  <select
+                    value={newStaffForm.role}
+                    onChange={e => setNewStaffForm({ ...newStaffForm, role: e.target.value })}
+                    className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  >
+                    <option value="Staff">Staff</option>
+                    <option value="Supervisor">Supervisor</option>
+                    <option value="Admin">Admin</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Department</label>
+                  <select
+                    value={newStaffForm.department}
+                    onChange={e => setNewStaffForm({ ...newStaffForm, department: e.target.value })}
+                    className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  >
+                    <option value="Field Operations">Field Operations</option>
+                    <option value="Sales">Sales</option>
+                    <option value="Production">Production</option>
+                    <option value="Service">Service</option>
+                    <option value="Certification">Certification</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Initial Access Point Permission Scope *</label>
+                <select
+                  value={newStaffForm.permissions}
+                  onChange={e => setNewStaffForm({ ...newStaffForm, permissions: e.target.value })}
+                  className="w-full px-3 py-2 border border-indigo-200 bg-indigo-50/40 rounded-xl text-xs font-bold text-indigo-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                >
+                  <option value="ASSIGNED_ONLY">Assigned Work Only (Sees own tasks & shifts)</option>
+                  <option value="ALL_CUSTOMERS">All Customer Directory & CRM Access</option>
+                  <option value="ALL_TASKS">All Company Work Orders & Pipeline</option>
+                  <option value="FULL_ACCESS">Full Access (Supervisor / All Scope)</option>
+                </select>
+              </div>
+
+              <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-200">
+                <button
+                  type="button"
+                  onClick={() => setShowNewStaffModal(false)}
+                  className="px-4 py-2 rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-50 text-xs font-bold transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={creatingStaff}
+                  className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-sm transition"
+                >
+                  {creatingStaff ? 'Creating...' : '+ Create Staff Profile'}
                 </button>
               </div>
             </form>

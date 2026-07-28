@@ -345,6 +345,13 @@ export default function AdminDashboard() {
   const [searchQuery, setSearchQuery] = useState('');
   const [showSuggestions, setShowSuggestions] = useState(false);
   const searchContainerRef = useRef(null);
+  const searchInputRef = useRef(null);
+
+  // The header block (welcome card, KPI tiles, staff report, tabs, action buttons) is collapsed by
+  // default on every load so a fresh page shows the pinned search bar and the actual work straight
+  // away. It is opened only by the Menu toggle — deliberately not persisted, and deliberately not
+  // driven by scroll position, so a refresh always lands in the same predictable state.
+  const [headerOpen, setHeaderOpen] = useState(false);
 
   useEffect(() => {
     const handleOutsideClick = (e) => {
@@ -355,6 +362,15 @@ export default function AdminDashboard() {
     document.addEventListener('mousedown', handleOutsideClick);
     return () => document.removeEventListener('mousedown', handleOutsideClick);
   }, []);
+
+  // Scrolls a section into view clearing the navbar + the sticky search bar, which together cover
+  // the top of the viewport — a bare scrollIntoView() lands the target underneath them.
+  const scrollToSection = (id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const offset = window.innerWidth >= 640 ? 140 : 128;
+    window.scrollTo({ top: el.getBoundingClientRect().top + window.scrollY - offset, behavior: 'smooth' });
+  };
 
   const [analytics, setAnalytics] = useState(null);
   const [tasks, setTasks] = useState([]);
@@ -1545,17 +1561,17 @@ export default function AdminDashboard() {
       setLastNotificationTab(activeTab || 'OVERVIEW');
       if (n.targetType === 'LEAVE') {
         setActiveTab('ATTENDANCE');
-        setTimeout(() => document.getElementById('section-leave-queue')?.scrollIntoView({ behavior: 'smooth' }), 150);
+        setTimeout(() => scrollToSection('section-leave-queue'), 150);
       } else if (n.targetType === 'TASK') {
         setActiveTab('PIPELINE');
         if (n.targetId) setSearchQuery(n.targetId);
-        setTimeout(() => document.getElementById('section-pipeline-list')?.scrollIntoView({ behavior: 'smooth' }), 150);
+        setTimeout(() => scrollToSection('section-pipeline-list'), 150);
       } else if (n.targetType === 'STAFF') {
         setActiveTab('STAFF');
-        setTimeout(() => document.getElementById('section-staff-roster')?.scrollIntoView({ behavior: 'smooth' }), 150);
+        setTimeout(() => scrollToSection('section-staff-roster'), 150);
       } else if (n.targetType === 'ADVANCE') {
         setActiveTab('ATTENDANCE');
-        setTimeout(() => document.getElementById('section-attendance-logs')?.scrollIntoView({ behavior: 'smooth' }), 150);
+        setTimeout(() => scrollToSection('section-attendance-logs'), 150);
       }
     };
     window.addEventListener('NAVIGATE_TO_TARGET', handleNav);
@@ -2308,31 +2324,24 @@ export default function AdminDashboard() {
     if (type === 'customer') {
       setActiveTab('CUSTOMERS');
       setSearchQuery(item.Company_Name || '');
-      setTimeout(() => {
-        const el = document.getElementById('section-customers-list');
-        if (el) el.scrollIntoView({ behavior: 'smooth' });
-      }, 150);
+      setTimeout(() => scrollToSection('section-customers-list'), 150);
     } else if (type === 'staff') {
       setActiveTab('STAFF');
       setSearchQuery(item.Name || '');
-      setTimeout(() => {
-        const el = document.getElementById('section-staff-roster');
-        if (el) el.scrollIntoView({ behavior: 'smooth' });
-      }, 150);
+      setTimeout(() => scrollToSection('section-staff-roster'), 150);
     } else if (type === 'task') {
       setActiveTab('PIPELINE');
       setSearchQuery(item.Task_ID || '');
-      setTimeout(() => {
-        const el = document.getElementById('section-pipeline-list');
-        if (el) el.scrollIntoView({ behavior: 'smooth' });
-      }, 150);
+      setTimeout(() => scrollToSection('section-pipeline-list'), 150);
     }
   };
 
   return (
     <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-8 space-y-4 sm:space-y-8">
-      {/* GLOBAL SEARCH BAR at the very top */}
-      <div ref={searchContainerRef} className="relative z-30">
+      {/* GLOBAL SEARCH BAR — pinned below the app navbar. The 57/65px offsets track Navbar.jsx's
+          h-14 sm:h-16 plus its 1px bottom border; StaffDashboard's sticky header uses the same
+          values. z-30 keeps it under the z-40 navbar so it scrolls beneath, not over. */}
+      <div ref={searchContainerRef} className="sticky top-[57px] sm:top-[65px] z-30 bg-slate-50 pb-2">
         <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm flex flex-col sm:flex-row items-center justify-between gap-3">
           <div className="flex items-center gap-2 text-slate-700 font-bold text-xs shrink-0">
             <Search className="w-4 h-4 text-rose-600 animate-pulse" />
@@ -2341,6 +2350,7 @@ export default function AdminDashboard() {
           <div className="flex items-center gap-2 w-full sm:w-auto flex-1 max-w-3xl relative">
             <div className="relative flex-1">
               <input
+                ref={searchInputRef}
                 type="text"
                 placeholder="Search by Company Name, Staff Name, Task ID, Description, Mobile..."
                 value={searchQuery}
@@ -2389,6 +2399,23 @@ export default function AdminDashboard() {
               {(filterSelectedDates.length > 0 || filterSelectedUsers.length > 0 || filterStartDate || filterEndDate) && (
                 <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-rose-600 rounded-full border-2 border-white" />
               )}
+            </button>
+
+            {/* Opens the collapsed header block. Without this the block would be unreachable at
+                scrollY 0, since a fresh load starts collapsed and there is no scroll gesture. */}
+            <button
+              type="button"
+              onClick={() => setHeaderOpen(o => !o)}
+              className={`px-3 py-2.5 rounded-xl border transition shadow-sm shrink-0 flex items-center gap-1.5 font-bold text-xs ${
+                headerOpen
+                  ? 'bg-rose-600 border-rose-600 text-white hover:bg-rose-700'
+                  : 'bg-slate-50 border-slate-200 hover:bg-slate-100 text-slate-700'
+              }`}
+              title={headerOpen ? 'Hide menu, tabs & stats' : 'Show menu, tabs & stats'}
+              aria-expanded={headerOpen}
+            >
+              {headerOpen ? <ChevronUp className="w-4 h-4" /> : <LayoutDashboard className="w-4 h-4" />}
+              <span className="hidden sm:inline">{headerOpen ? 'Hide' : 'Menu'}</span>
             </button>
           </div>
         </div>
@@ -2501,6 +2528,14 @@ export default function AdminDashboard() {
         )}
       </div>
 
+      {/* COLLAPSIBLE HEADER BLOCK — stats banner, staff report, tabs and action buttons. Hidden on
+          load; the Menu button in the search bar is the only way in or out. max-h is generous
+          because the staff progress report expands inside it. */}
+      <div className={`admin-header-collapse overflow-hidden transition-all duration-300 ease-in-out ${
+        headerOpen ? 'max-h-[4000px] opacity-100' : 'max-h-0 opacity-0 !mt-0'
+      }`}>
+        <div className="space-y-4 sm:space-y-8">
+
       {/* ADMIN EXECUTIVE DASHBOARD TOP STATS BANNER (Clean Light & Professional Color Palette) */}
       <div className="bg-gradient-to-br from-white via-slate-50 to-indigo-50/40 rounded-3xl p-6 text-slate-900 shadow-xl border border-slate-200 relative overflow-hidden">
         <div className="absolute top-0 right-0 -mt-8 -mr-8 w-64 h-64 bg-rose-500/5 rounded-full blur-3xl pointer-events-none" />
@@ -2549,7 +2584,8 @@ export default function AdminDashboard() {
             <div 
               onClick={() => {
                 setActiveTab('PIPELINE');
-                setTimeout(() => document.getElementById('section-pipeline-list')?.scrollIntoView({ behavior: 'smooth' }), 100);
+                setHeaderOpen(false);
+                setTimeout(() => scrollToSection('section-pipeline-list'), 350);
               }}
               className="p-2.5 sm:p-4 rounded-xl sm:rounded-2xl bg-white hover:bg-indigo-50/50 border border-slate-200 hover:border-indigo-300 shadow-sm transition-all duration-200 cursor-pointer group"
             >
@@ -2568,7 +2604,8 @@ export default function AdminDashboard() {
             <div 
               onClick={() => {
                 setActiveTab('PIPELINE');
-                setTimeout(() => document.getElementById('section-pipeline-list')?.scrollIntoView({ behavior: 'smooth' }), 100);
+                setHeaderOpen(false);
+                setTimeout(() => scrollToSection('section-pipeline-list'), 350);
               }}
               className="p-2.5 sm:p-4 rounded-xl sm:rounded-2xl bg-white hover:bg-emerald-50/50 border border-slate-200 hover:border-emerald-300 shadow-sm transition-all duration-200 cursor-pointer group"
             >
@@ -2587,7 +2624,8 @@ export default function AdminDashboard() {
             <div 
               onClick={() => {
                 setActiveTab('STAFF');
-                setTimeout(() => document.getElementById('section-staff-roster')?.scrollIntoView({ behavior: 'smooth' }), 100);
+                setHeaderOpen(false);
+                setTimeout(() => scrollToSection('section-staff-roster'), 350);
               }}
               className="p-2.5 sm:p-4 rounded-xl sm:rounded-2xl bg-white hover:bg-amber-50/50 border border-slate-200 hover:border-amber-300 shadow-sm transition-all duration-200 cursor-pointer group"
             >
@@ -2604,7 +2642,8 @@ export default function AdminDashboard() {
             <div 
               onClick={() => {
                 setActiveTab('ATTENDANCE');
-                setTimeout(() => document.getElementById('section-attendance-logs')?.scrollIntoView({ behavior: 'smooth' }), 100);
+                setHeaderOpen(false);
+                setTimeout(() => scrollToSection('section-attendance-logs'), 350);
               }}
               className="p-2.5 sm:p-4 rounded-xl sm:rounded-2xl bg-white hover:bg-teal-50/60 border border-slate-200 hover:border-teal-400 shadow-sm transition-all duration-200 cursor-pointer group"
             >
@@ -2623,7 +2662,8 @@ export default function AdminDashboard() {
             <div 
               onClick={() => {
                 setActiveTab('CUSTOMERS');
-                setTimeout(() => document.getElementById('section-customers-list')?.scrollIntoView({ behavior: 'smooth' }), 100);
+                setHeaderOpen(false);
+                setTimeout(() => scrollToSection('section-customers-list'), 350);
               }}
               className="p-2.5 sm:p-4 rounded-xl sm:rounded-2xl bg-white hover:bg-sky-50/50 border border-slate-200 hover:border-sky-300 shadow-sm transition-all duration-200 cursor-pointer group"
             >
@@ -2640,7 +2680,8 @@ export default function AdminDashboard() {
             <div 
               onClick={() => {
                 setActiveTab('ATTENDANCE');
-                setTimeout(() => document.getElementById('section-leave-queue')?.scrollIntoView({ behavior: 'smooth' }), 100);
+                setHeaderOpen(false);
+                setTimeout(() => scrollToSection('section-leave-queue'), 350);
               }}
               className="p-2.5 sm:p-4 rounded-xl sm:rounded-2xl bg-white hover:bg-rose-50/50 border border-slate-200 hover:border-rose-300 shadow-sm transition-all duration-200 cursor-pointer group"
             >
@@ -2885,7 +2926,7 @@ export default function AdminDashboard() {
             return (
               <button
                 key={tab.id}
-                onClick={() => setActiveTab(tab.id)}
+                onClick={() => { setActiveTab(tab.id); setHeaderOpen(false); }}
                 className={`px-3 sm:px-3.5 py-2 sm:py-2.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition shadow-2xs ${
                   activeTab === tab.id
                     ? 'bg-rose-600 text-white shadow-rose-600/25 ring-2 ring-rose-600/20'
@@ -2959,21 +3000,21 @@ export default function AdminDashboard() {
             <span>Module Access</span>
           </button>
           <button
-            onClick={() => setShowNewCustomerModal(true)}
+            onClick={() => { setShowNewCustomerModal(true); setHeaderOpen(false); }}
             className="px-3.5 py-2 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5 transition shadow-sm shrink-0"
           >
             <PlusCircle className="w-4 h-4 text-indigo-600 shrink-0" />
             <span>New Customer</span>
           </button>
           <button
-            onClick={() => setShowNewStaffModal(true)}
+            onClick={() => { setShowNewStaffModal(true); setHeaderOpen(false); }}
             className="px-3.5 py-2 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5 transition shadow-sm shrink-0"
           >
             <UserPlus className="w-4 h-4 text-emerald-600 shrink-0" />
             <span>New Staff Profile</span>
           </button>
           <button
-            onClick={() => setShowStaffAccessModal(true)}
+            onClick={() => { setShowStaffAccessModal(true); setHeaderOpen(false); }}
             className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-rose-600 to-indigo-600 hover:opacity-95 text-white text-xs font-bold flex items-center justify-center gap-1.5 transition shadow-sm shrink-0"
           >
             <Shield className="w-4 h-4 text-rose-200 shrink-0" />
@@ -2988,6 +3029,7 @@ export default function AdminDashboard() {
                 setTaskForm(prev => ({ ...prev, assignedStaff: staffList[1]?.Staff_ID || staffList[0].Staff_ID }));
               }
               setShowNewTaskModal(true);
+              setHeaderOpen(false);
             }}
             className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition shrink-0"
           >
@@ -2996,6 +3038,10 @@ export default function AdminDashboard() {
           </button>
         </div>
       </div>
+
+        </div>
+      </div>
+      {/* END COLLAPSIBLE HEADER BLOCK */}
 
       {/* OVERVIEW & STATS FRONT PAGE WITH THE 5 MENU CARDS */}
       {activeTab === 'OVERVIEW' && (

@@ -282,6 +282,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .animate-fadeIn { animation: none; }
+  .admin-header-collapse { transition: none !important; }
 }
 
 /* Mobile action buttons: horizontal scroll with touch support */

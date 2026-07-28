@@ -26,6 +26,7 @@ const JobCardPage = lazy(() => import('./pages/JobCardPage'));
 const ChallanBuilderPage = lazy(() => import('./pages/ChallanBuilderPage'));
 const ChallanListPage = lazy(() => import('./pages/ChallanListPage'));
 const CustomerPriceListPage = lazy(() => import('./pages/CustomerPriceListPage'));
+const EquipmentCategoriesPage = lazy(() => import('./pages/EquipmentCategoriesPage'));
 
 // Keyed so switching report type (or new-vs-edit) remounts the page with fresh state, since
 // React Router otherwise reuses the same instance when only the URL params change.
@@ -154,6 +155,7 @@ export default function App() {
               {/* PI / Sales Invoice register — the read side of the conversion pipeline */}
               <Route path="/sales-documents" element={<SalesDocumentsPage />} />
               <Route path="/settings/permissions" element={<StaffPermissionsPage />} />
+              <Route path="/settings/equipment-categories" element={<EquipmentCategoriesPage />} />
               {/* Workshop job card. Keyed so moving between cards remounts with fresh state. */}
               <Route path="/job-card/task/:taskId" element={<JobCardRoute />} />
               <Route path="/job-card/:jobCardId" element={<JobCardRoute />} />

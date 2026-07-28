@@ -5,6 +5,7 @@ import { useAuth } from '../context/AuthContext';
 import QuotationPdfTemplate from '../components/QuotationPdfTemplate';
 import DeliveryPODModal from '../components/DeliveryPODModal';
 import { downloadPdfFromElement, safeFileName } from '../utils/pdfGenerator';
+import { enqueueOfflineAction } from '../utils/offlineQueue';
 
 /**
  * ChallanBuilderPage — reviews the generated draft and turns it into an issued delivery challan.
@@ -30,7 +31,7 @@ const CONFIDENCE_STYLE = {
 export default function ChallanBuilderPage() {
   const { challanId, jobCardId } = useParams();
   const navigate = useNavigate();
-  const { token, user, canSeeMoney } = useAuth();
+  const { token, user, canSeeMoney, updateQueueCount } = useAuth();
 
   const [challan, setChallan] = useState(null);
   const [items, setItems] = useState([]);
@@ -45,6 +46,16 @@ export default function ChallanBuilderPage() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  // Partial-delivery picker. Only used on the "new challan from job card" path; an existing challan
+  // has its lines already fixed.
+  const [pickerItems, setPickerItems] = useState([]);
+  const [picked, setPicked] = useState(() => new Set());
+  const [choosing, setChoosing] = useState(false);
+  // Mirrors of the two above, so load() can read the selection without depending on it.
+  const pickerItemsRef = useRef([]);
+  const pickedRef = useRef(new Set());
+  pickerItemsRef.current = pickerItems;
+  pickedRef.current = picked;
 
   const headers = useMemo(
     () => ({ 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }),
@@ -71,7 +82,19 @@ export default function ChallanBuilderPage() {
         if (!res.ok) throw new Error((await res.json()).error || 'Could not load challan');
         doc = await res.json();
       } else {
-        const res = await fetch(`/api/job-cards/${jobCardId}/generate-challan`, { method: 'POST', headers, body: '{}' });
+        // Read through refs so `load` does not have to depend on the picker state — it is invoked
+        // from an effect, and re-creating it on every tick of a checkbox would re-run that effect.
+        const chosen = pickedRef.current;
+        const available = pickerItemsRef.current;
+
+        // Selecting every cylinder posts {} rather than the full id list: generateChallanDraft
+        // derives Is_Partial from itemIds.length > 0, so sending them all would flag a complete
+        // delivery as partial. Empty body === "everything", exactly as before this picker existed.
+        const all = available.length > 0 && chosen.size === available.length;
+        const body = (chosen.size === 0 || all)
+          ? '{}'
+          : JSON.stringify({ itemIds: [...chosen] });
+        const res = await fetch(`/api/job-cards/${jobCardId}/generate-challan`, { method: 'POST', headers, body });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || 'Could not generate the challan draft');
         doc = data;
@@ -95,7 +118,35 @@ export default function ChallanBuilderPage() {
     }
   }, [challanId, jobCardId, headers]);
 
-  useEffect(() => { load(); }, [load]);
+  /**
+   * On the "new challan from job card" path, ask which cylinders are going back BEFORE generating
+   * anything — generateChallanDraft writes a draft row, so loading first and asking afterwards
+   * would leave an unwanted draft behind every time someone split a delivery.
+   *
+   * The question is only worth asking when there is a choice: a single-cylinder card, an existing
+   * challan, or a failed lookup all fall through to the normal load.
+   */
+  useEffect(() => {
+    if (challanId || !jobCardId || !token) { load(); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/job-cards/${jobCardId}`, { headers });
+        const data = res.ok ? await res.json() : null;
+        const ready = (data?.items || []).filter(i => i.Service_Status !== 'REJECTED');
+        if (cancelled) return;
+        if (ready.length < 2) { load(); return; }
+        setPickerItems(ready);
+        setPicked(new Set(ready.map(i => i.Job_Card_Item_ID)));
+        setChoosing(true);
+        setLoading(false);
+      } catch {
+        // The picker is a convenience, never a gate — fall back to generating the whole challan.
+        if (!cancelled) load();
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [challanId, jobCardId, token, headers, load]);
 
   const persist = async (patch) => {
     setBusy(true);
@@ -189,6 +240,28 @@ export default function ChallanBuilderPage() {
     }
   };
 
+  const notifyPod = async (channel) => {
+    setBusy(true);
+    setError('');
+    try {
+      const res = await fetch(`/api/challans/${challan.Challan_ID}/pod-notify`, {
+        method: 'POST', headers, body: JSON.stringify({ channel })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Could not send the confirmation');
+      // Partial success is normal here — email may land while an unapproved WhatsApp template is
+      // rejected — so report what each channel actually did rather than a blanket "sent".
+      const failed = (data.dispatchResults || []).filter(r => !r.ok);
+      setError(failed.length > 0
+        ? failed.map(f => `${f.channel}: ${f.error}`).join(' · ')
+        : `Confirmation sent by ${channel}.`);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const savePod = async (payload) => {
     setBusy(true);
     try {
@@ -206,7 +279,22 @@ export default function ChallanBuilderPage() {
       setChallan(data);
       setPod(null);
     } catch (e) {
-      setError(e.message);
+      // A delivery address is exactly where the signal dies, and the customer is standing there
+      // with a pen. Queue the signed proof and let it sync rather than asking them to sign twice.
+      // Only a genuine network failure qualifies — a 409 or a validation error came from a server
+      // that answered, and replaying it would fail identically.
+      if (!navigator.onLine || e instanceof TypeError) {
+        try {
+          await enqueueOfflineAction('CHALLAN_POD', { ...payload, challanId: challan.Challan_ID });
+          await updateQueueCount();
+          setPod(null);
+          setError('Saved on this device — it will sync when you are back online.');
+        } catch {
+          setError('Could not save proof of delivery, and it could not be stored offline either.');
+        }
+      } else {
+        setError(e.message);
+      }
     } finally {
       setBusy(false);
     }
@@ -276,6 +364,69 @@ export default function ChallanBuilderPage() {
       setBusy(false);
     }
   };
+
+  // Split-delivery choice, offered before the draft is built. Everything starts ticked, so the
+  // common case is one tap on Continue and the result is identical to the old behaviour.
+  if (choosing) {
+    const allPicked = picked.size === pickerItems.length;
+    return (
+      <div className="min-h-screen bg-slate-50 pb-28">
+        <header className="sticky top-0 z-30 bg-white/95 backdrop-blur-md border-b border-slate-200">
+          <div className="max-w-4xl mx-auto px-3 py-2 flex items-center gap-2">
+            <button onClick={() => navigate(-1)} className="w-10 h-10 rounded-xl border border-slate-200 flex items-center justify-center active:bg-slate-100 shrink-0" aria-label="Back">
+              <ArrowLeft className="w-4 h-4" />
+            </button>
+            <div className="min-w-0">
+              <p className="text-sm font-extrabold text-slate-900">What is going back?</p>
+              <p className="text-[11px] text-slate-500">Untick anything staying in the workshop</p>
+            </div>
+          </div>
+        </header>
+
+        <main className="max-w-4xl mx-auto px-3 py-3 space-y-2">
+          <button
+            onClick={() => setPicked(allPicked ? new Set() : new Set(pickerItems.map(i => i.Job_Card_Item_ID)))}
+            className="jc-btn-ghost w-full border border-slate-200 rounded-xl bg-white">
+            {allPicked ? 'Clear all' : 'Select all'}
+          </button>
+
+          {pickerItems.map(i => (
+            <label key={i.Job_Card_Item_ID}
+              className="flex items-center gap-2.5 min-h-[48px] px-3 rounded-xl bg-white border border-slate-200 active:bg-slate-50">
+              <input
+                type="checkbox"
+                checked={picked.has(i.Job_Card_Item_ID)}
+                onChange={() => setPicked(prev => {
+                  const next = new Set(prev);
+                  next.has(i.Job_Card_Item_ID) ? next.delete(i.Job_Card_Item_ID) : next.add(i.Job_Card_Item_ID);
+                  return next;
+                })}
+                className="w-4 h-4 shrink-0"
+              />
+              <span className="text-xs font-bold text-slate-700 min-w-0 truncate">
+                {i.Cylinder_No || i.EUID_No || `Sr ${i.Sr_No}`}
+                <span className="font-medium text-slate-400"> · {i.Equipment_Type} {i.Capacity}</span>
+              </span>
+            </label>
+          ))}
+        </main>
+
+        <div className="fixed bottom-0 inset-x-0 z-30 bg-white/95 backdrop-blur-md border-t border-slate-200"
+          style={{ paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}>
+          <div className="max-w-4xl mx-auto px-3 py-2">
+            <button
+              onClick={() => { setChoosing(false); load(); }}
+              disabled={picked.size === 0}
+              className="w-full min-h-[48px] rounded-xl bg-slate-900 text-white text-sm font-extrabold active:bg-slate-800 disabled:opacity-40">
+              {allPicked
+                ? `Continue with all ${pickerItems.length}`
+                : `Continue with ${picked.size} of ${pickerItems.length} — partial challan`}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (loading) {
     return (
@@ -495,6 +646,26 @@ export default function ChallanBuilderPage() {
           <button onClick={addManualLine} className="jc-btn-ghost w-full min-h-[48px]">
             <Plus className="w-4 h-4" /> Add another product
           </button>
+        )}
+
+        {/* Delivered — offer to tell the customer. Deliberately here rather than in the action bar:
+            it is a follow-up to the signature, not one of the primary document actions. */}
+        {challan.POD?.deliveredAt && (
+          <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3">
+            <p className="text-[11px] font-extrabold text-emerald-900">
+              Received by {challan.POD.receivedByName || 'the customer'}
+            </p>
+            <div className="flex gap-2 mt-2">
+              <button onClick={() => notifyPod('Email')} disabled={busy}
+                className="flex-1 min-h-[44px] rounded-xl border border-emerald-300 bg-white text-emerald-800 text-xs font-extrabold active:bg-emerald-100 disabled:opacity-40">
+                Email confirmation
+              </button>
+              <button onClick={() => notifyPod('WhatsApp')} disabled={busy}
+                className="flex-1 min-h-[44px] rounded-xl border border-emerald-300 bg-white text-emerald-800 text-xs font-extrabold active:bg-emerald-100 disabled:opacity-40">
+                WhatsApp
+              </button>
+            </div>
+          </div>
         )}
 
         {/* Only shown to someone who could act on it — a viewer without price access cannot see

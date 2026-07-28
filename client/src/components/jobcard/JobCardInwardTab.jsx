@@ -193,6 +193,14 @@ export default function JobCardInwardTab({
                 </p>
               )}
 
+              {/* Flagged, not enforced — the technician is holding the cylinder and may know
+                  something the register does not, so this prompts rather than ticks the box. */}
+              {row.HP_Test_Overdue && !row.HP_Testing_Required && (
+                <p className="text-[11px] font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1.5">
+                  HP test is {row.HP_Test_Overdue_Years} years old — due for testing
+                </p>
+              )}
+
               <AccessoryChecklistCells
                 columns={columns}
                 values={row.Inward_Checkpoints || {}}

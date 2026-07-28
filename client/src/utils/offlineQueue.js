@@ -22,6 +22,7 @@ async function initDB() {
  *
  * @param {string} type - 'ADVANCE_STAGE' | 'RESCHEDULE' | 'ACTIVITY_LOG'
  *                      | 'JOB_CARD_ITEM_UPSERT' | 'JOB_CARD_PARTS_ADD' | 'JOB_CARD_RECHECK'
+ *                      | 'CHALLAN_POD'
  * @param {object} payload - action parameters
  */
 export async function enqueueOfflineAction(type, payload) {

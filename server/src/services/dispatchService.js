@@ -353,6 +353,38 @@ function sendChallan(challan, { recipientEmail, attachments, channel, actor } = 
 }
 
 /**
+ * Proof-of-delivery confirmation, sent once the customer has signed at the gate.
+ *
+ * Ships disabled (email_enabled.pod_confirmation defaults to false): an existing install should not
+ * suddenly start messaging every customer the moment it updates. The office turns it on when they
+ * want it.
+ */
+function sendPodConfirmation(challan, { recipientEmail, channel, actor } = {}) {
+  const pod = challan.POD || {};
+  return sendSalesDocument(
+    { ...challan, Customer_Email_Snapshot: recipientEmail || challan.Customer_Email_Snapshot || '' },
+    'pod_confirmation',
+    undefined,
+    channel,
+    {
+      received_by: pod.receivedByName || 'the customer',
+      delivered_at: formatDeliveredAt(pod.deliveredAt || challan.Delivered_At)
+    },
+    actor
+  );
+}
+
+/** Delivery timestamps are shown in IST — the deployment clock is not necessarily Indian. */
+function formatDeliveredAt(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return new Intl.DateTimeFormat('en-IN', {
+    timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short'
+  }).format(d);
+}
+
+/**
  * Certificate dispatch.
  *
  * Certificates live in Document_Registry with both casings of every field and carry no email of
@@ -410,6 +442,7 @@ module.exports = {
   sendProformaInvoice,
   sendSalesInvoice,
   sendChallan,
+  sendPodConfirmation,
   sendCertificate,
   sendFollowUpReminder,
   sendPaymentDueReminder

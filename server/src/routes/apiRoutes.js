@@ -2187,6 +2187,17 @@ router.post('/sync/batch', async (req, res) => {
             req.user
           );
           syncResults.push({ id: item.id, status: 'SUCCESS', result: saved });
+        } else if (item.type === 'CHALLAN_POD') {
+          // Proof of delivery captured at a customer gate with no signal.
+          const existing = await sheetsService.getChallanById(item.payload.challanId);
+          if (existing?.POD?.deliveredAt) {
+            // Already recorded — a replay after a partial flush must not insert a second copy of
+            // the signature and photos into Media_Store. Reported as SUCCESS so the client drains it.
+            syncResults.push({ id: item.id, status: 'SUCCESS', result: existing });
+          } else {
+            const saved = await challanService.recordPOD(item.payload.challanId, item.payload, req.user);
+            syncResults.push({ id: item.id, status: 'SUCCESS', result: saved });
+          }
         } else {
           // Terminal else — REQUIRED. Without it an unrecognised type falls through the whole
           // chain, never enters syncResults, and the client therefore never removes it from
@@ -2201,7 +2212,15 @@ router.post('/sync/batch', async (req, res) => {
         }
       } catch (innerErr) {
         console.error('Batch sync item error:', innerErr);
-        syncResults.push({ id: item.id, status: 'ERROR', error: innerErr.message });
+        // A 409 is a business conflict, not a transient fault: standby units still out, a recheck
+        // unresolved. Retrying cannot change the answer, so it is reported terminal and the client
+        // drains it — otherwise it re-POSTs on every flush forever. Everything else stays queued.
+        syncResults.push({
+          id: item.id,
+          status: 'ERROR',
+          terminal: innerErr.statusCode === 409 || undefined,
+          error: innerErr.message
+        });
       }
     }
 
@@ -3913,6 +3932,34 @@ async function recordDispatchAttempt(collection, idField, idValue, existingLog, 
 
 // Emails an ISSUED challan to the customer. A draft is refused: the number is typed by hand at
 // issue time, so a draft has no number on it and would reach the customer as a blank reference.
+// Confirms the delivery to the customer once they have signed. Registered alongside /pod rather
+// than under it — distinct literal segments, so no route-order conflict with /challans/:id.
+router.post('/challans/:id/pod-notify', requirePermission('jobcard', 'edit'), async (req, res) => {
+  try {
+    const challan = await sheetsService.getChallanById(req.params.id);
+    if (!challan) return res.status(404).json({ error: 'Challan not found' });
+    if (!challan.POD?.deliveredAt) {
+      return res.status(400).json({ error: 'Record the proof of delivery before sending a confirmation' });
+    }
+
+    const recipientEmail = await resolveCustomerEmail(challan.Customer_Email_Snapshot, challan.Customer_ID);
+    const dispatchService = require('../services/dispatchService');
+    const results = await dispatchService.sendPodConfirmation(challan, {
+      recipientEmail,
+      // The delivery boy picks the channel at the gate — WhatsApp usually reaches the person who
+      // just signed faster than email does.
+      channel: req.body.channel,
+      actor: req.user
+    });
+
+    const updated = await recordDispatchAttempt('Delivery_Challan_Master', 'Challan_ID', req.params.id, challan.Dispatch_Log, results);
+    res.json({ document: updated, dispatchResults: results });
+  } catch (err) {
+    console.error('POST /challans/:id/pod-notify error:', err);
+    res.status(500).json({ error: err.message || 'Failed to send the delivery confirmation' });
+  }
+});
+
 router.post('/challans/:id/dispatch', requirePermission('jobcard', 'edit'), async (req, res) => {
   try {
     const challan = await sheetsService.getChallanById(req.params.id);

@@ -253,6 +253,18 @@ async function buildInwardCheckpoints(equipmentType, supplied) {
   return out;
 }
 
+// Statutory hydro-test interval for portable extinguishers. A constant rather than a magic 3 so the
+// rule is findable if the standard ever changes.
+const HP_DUE_YEARS = 3;
+
+/** Whole and fractional years between a stored date and today. Null when the date is unparseable. */
+function yearsSince(dateStr) {
+  const then = new Date(dateStr);
+  if (Number.isNaN(then.getTime())) return null;
+  const years = (Date.now() - then.getTime()) / (365.25 * 24 * 60 * 60 * 1000);
+  return years < 0 ? 0 : Math.round(years * 10) / 10;
+}
+
 async function buildItemRow(card, row, srNo, actor) {
   const equipmentType = String(row.Equipment_Type || row.equipmentType || 'ABC').trim().toUpperCase();
 
@@ -260,6 +272,7 @@ async function buildItemRow(card, row, srNo, actor) {
   // deliberate override and must not be replaced by register data.
   let lastHpDate = row.Last_HP_Test_Date || '';
   let lastHpSource = lastHpDate ? 'MANUAL' : 'UNKNOWN';
+  let known = null;
   if (!lastHpDate) {
     const resolved = await resolveLastHpTestDate(card.Customer_ID, {
       euidNo: row.EUID_No,
@@ -269,7 +282,14 @@ async function buildItemRow(card, row, srNo, actor) {
     });
     lastHpDate = resolved.date;
     lastHpSource = resolved.source;
+    known = resolved.equipment || null;
   }
+
+  // Hydro testing falls due every HP_DUE_YEARS. Flagged rather than enforced: the technician has the
+  // cylinder in their hands and may know something the register does not, so this colours the row
+  // instead of ticking HP_Testing_Required for them.
+  const overdueYears = lastHpDate ? yearsSince(lastHpDate) : null;
+  const hpOverdue = overdueYears !== null && overdueYears >= HP_DUE_YEARS;
 
   const nowMs = Date.now();
   return {
@@ -281,17 +301,23 @@ async function buildItemRow(card, row, srNo, actor) {
 
     Equipment_Type: equipmentType,
     Type_Description: row.Type_Description || '',
-    Capacity: normalizeCapacity(row.Capacity),
+    // Capacity and manufacturing year fall back to the customer's register when the technician has
+    // not typed them — the same cylinder was booked in before and the details have not changed.
+    // Through normalizeCapacity either way, or "6kg" from the register and "6 KG" typed here would
+    // split into two lines on the grouped challan.
+    Capacity: normalizeCapacity(row.Capacity || known?.capacity || ''),
     EUID_No: String(row.EUID_No || '').trim(),
     Client_ID_No: String(row.Client_ID_No || '').trim(),
     Serial_No: String(row.Serial_No || '').trim(),
     Cylinder_No: String(row.Cylinder_No || '').trim(),
-    Mfg_Year: String(row.Mfg_Year || '').trim(),
+    Mfg_Year: String(row.Mfg_Year || known?.mfgYear || known?.manufacturingYear || '').trim(),
 
     Refilling_Required: Boolean(row.Refilling_Required),
     HP_Testing_Required: Boolean(row.HP_Testing_Required),
     Last_HP_Test_Date: lastHpDate,
     Last_HP_Test_Source: lastHpSource,
+    HP_Test_Overdue: hpOverdue,
+    HP_Test_Overdue_Years: overdueYears,
 
     Inward_Checkpoints: await buildInwardCheckpoints(equipmentType, row.Inward_Checkpoints),
     Inward_Notes: row.Inward_Notes || '',

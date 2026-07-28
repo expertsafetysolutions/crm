@@ -3004,6 +3004,13 @@ export default function AdminDashboard() {
             <span>Module Access</span>
           </button>
           <button
+            onClick={() => navigate('/settings/equipment-categories')}
+            className="px-3.5 py-2 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5 transition shadow-sm shrink-0"
+          >
+            <Wrench className="w-4 h-4 text-amber-600 shrink-0" />
+            <span>Equipment Types</span>
+          </button>
+          <button
             onClick={() => { setShowNewCustomerModal(true); setHeaderOpen(false); }}
             className="px-3.5 py-2 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5 transition shadow-sm shrink-0"
           >

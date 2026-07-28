@@ -96,7 +96,8 @@ const DEFAULT_QUOTATION_SETTINGS = {
     pi_email: true,
     invoice_email: true,
     challan_email: false,
-    certificate_email: false
+    certificate_email: false,
+    pod_confirmation: false
   },
 
   // Reusable files (product catalogues, brochures, compliance certificates) an Admin uploads once
@@ -221,6 +222,14 @@ const DEFAULT_QUOTATION_SETTINGS = {
     challan_email: {
       subject: 'Delivery Challan {document_no} — Expert Safety Solutions',
       body: 'Dear {customer_name},\n\nPlease find attached delivery challan {document_no} dated {document_date} covering {item_count} line(s):\n\n{item_summary}\n\nKindly acknowledge receipt.\n\nRegards,\nExpert Safety Solutions',
+      whatsapp_template_name: '',
+      whatsapp_template_status: 'not_submitted'
+    },
+    // Sent from the delivery screen once the customer has signed — the "your goods arrived" note.
+    // {received_by} and {delivered_at} are unique to this template.
+    pod_confirmation: {
+      subject: 'Delivery confirmed — {document_no}',
+      body: 'Dear {customer_name},\n\nYour equipment against delivery challan {document_no} was delivered on {delivered_at} and received by {received_by}.\n\nThank you for your business.\n\nRegards,\nExpert Safety Solutions',
       whatsapp_template_name: '',
       whatsapp_template_status: 'not_submitted'
     },

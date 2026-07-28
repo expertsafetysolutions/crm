@@ -38,7 +38,7 @@
  * out the intended users — while gating on inventory would hand every technician the stock ledger.
  */
 
-const MODULES = ['quotation', 'inventory', 'jobcard', 'taskstage', 'finance'];
+const MODULES = ['quotation', 'inventory', 'jobcard', 'taskstage', 'finance', 'purchase'];
 const ACTIONS = ['view', 'add', 'edit', 'delete'];
 
 // Modules where only visibility is meaningful — the write actions are forced off so they can never
@@ -77,18 +77,18 @@ function allModulesFull() {
  * entire point of the module.
  */
 const ROLE_DEFAULTS = {
-  admin: { quotation: FULL, inventory: FULL, jobcard: FULL, taskstage: FULL, finance: VIEW_ONLY },
-  sales: { quotation: ADD_EDIT, inventory: VIEW_ONLY, jobcard: VIEW_ONLY, taskstage: VIEW_ONLY, finance: VIEW_ONLY },
-  supervisor: { quotation: VIEW_ONLY, inventory: ADD_EDIT, jobcard: FULL, taskstage: ADD_EDIT, finance: VIEW_ONLY },
-  production: { quotation: NONE, inventory: ADD_EDIT, jobcard: ADD_EDIT, taskstage: ADD_EDIT, finance: NONE },
-  certification: { quotation: VIEW_ONLY, inventory: NONE, jobcard: VIEW_ONLY, taskstage: VIEW_ONLY, finance: NONE },
-  staff: { quotation: NONE, inventory: NONE, jobcard: NONE, taskstage: NONE, finance: NONE },
+  admin: { quotation: FULL, inventory: FULL, jobcard: FULL, taskstage: FULL, finance: VIEW_ONLY, purchase: FULL },
+  sales: { quotation: ADD_EDIT, inventory: VIEW_ONLY, jobcard: VIEW_ONLY, taskstage: VIEW_ONLY, finance: VIEW_ONLY, purchase: NONE },
+  supervisor: { quotation: VIEW_ONLY, inventory: ADD_EDIT, jobcard: FULL, taskstage: ADD_EDIT, finance: VIEW_ONLY, purchase: ADD_EDIT },
+  production: { quotation: NONE, inventory: ADD_EDIT, jobcard: ADD_EDIT, taskstage: ADD_EDIT, finance: NONE, purchase: NONE },
+  certification: { quotation: VIEW_ONLY, inventory: NONE, jobcard: VIEW_ONLY, taskstage: VIEW_ONLY, finance: NONE, purchase: NONE },
+  staff: { quotation: NONE, inventory: NONE, jobcard: NONE, taskstage: NONE, finance: NONE, purchase: NONE },
 
   // Roles added alongside the finance module. `technician` and `delivery` are the two field roles
   // the price masking exists for; `accounts` is the office role that must keep seeing everything.
-  technician: { quotation: NONE, inventory: VIEW_ONLY, jobcard: ADD_EDIT, taskstage: ADD_EDIT, finance: NONE },
-  accounts: { quotation: VIEW_ONLY, inventory: VIEW_ONLY, jobcard: VIEW_ONLY, taskstage: NONE, finance: VIEW_ONLY },
-  delivery: { quotation: NONE, inventory: NONE, jobcard: VIEW_ONLY, taskstage: NONE, finance: NONE }
+  technician: { quotation: NONE, inventory: VIEW_ONLY, jobcard: ADD_EDIT, taskstage: ADD_EDIT, finance: NONE, purchase: NONE },
+  accounts: { quotation: VIEW_ONLY, inventory: VIEW_ONLY, jobcard: VIEW_ONLY, taskstage: NONE, finance: VIEW_ONLY, purchase: FULL },
+  delivery: { quotation: NONE, inventory: NONE, jobcard: VIEW_ONLY, taskstage: NONE, finance: NONE, purchase: NONE }
 };
 
 function isAdmin(user) {

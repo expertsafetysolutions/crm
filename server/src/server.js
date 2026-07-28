@@ -3,6 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const { authRouter } = require('./routes/authRoutes');
 const apiRouter = require('./routes/apiRoutes');
+const purchaseRouter = require('./routes/purchaseRoutes');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -710,6 +711,9 @@ app.get('/api/health', (req, res) => {
 
 // Routes
 app.use('/api/auth', authRouter);
+// Procurement lives in its own router to keep ~500 lines out of apiRoutes.js. Mounted first only
+// because every path it owns is new — nothing here can shadow an existing route either way.
+app.use('/api', purchaseRouter);
 app.use('/api', apiRouter);
 
 const attendanceService = require('./services/attendanceService');

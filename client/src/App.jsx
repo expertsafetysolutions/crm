@@ -27,6 +27,7 @@ const ChallanBuilderPage = lazy(() => import('./pages/ChallanBuilderPage'));
 const ChallanListPage = lazy(() => import('./pages/ChallanListPage'));
 const CustomerPriceListPage = lazy(() => import('./pages/CustomerPriceListPage'));
 const EquipmentCategoriesPage = lazy(() => import('./pages/EquipmentCategoriesPage'));
+const PurchasePage = lazy(() => import('./pages/PurchasePage'));
 
 // Keyed so switching report type (or new-vs-edit) remounts the page with fresh state, since
 // React Router otherwise reuses the same instance when only the URL params change.
@@ -89,7 +90,7 @@ export default function App() {
   // app navbar the same way the certificate and settings pages do.
   const isQuotationPage = location.pathname.startsWith('/quotations') || location.pathname.startsWith('/inventory')
     || location.pathname.startsWith('/sales-documents') || location.pathname.startsWith('/challans')
-    || location.pathname.startsWith('/price-list');
+    || location.pathname.startsWith('/price-list') || location.pathname.startsWith('/purchase');
   // The job card renders its own header and action bar so it hides the navbar too — but unlike the
   // pages above it KEEPS the offline banner, because it is the one screen designed to be filled in
   // a workshop with no signal and the pending-sync count is the technician's only proof their work
@@ -156,6 +157,7 @@ export default function App() {
               <Route path="/sales-documents" element={<SalesDocumentsPage />} />
               <Route path="/settings/permissions" element={<StaffPermissionsPage />} />
               <Route path="/settings/equipment-categories" element={<EquipmentCategoriesPage />} />
+              <Route path="/purchase" element={<PurchasePage />} />
               {/* Workshop job card. Keyed so moving between cards remounts with fresh state. */}
               <Route path="/job-card/task/:taskId" element={<JobCardRoute />} />
               <Route path="/job-card/:jobCardId" element={<JobCardRoute />} />

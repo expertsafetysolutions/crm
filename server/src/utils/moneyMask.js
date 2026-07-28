@@ -53,6 +53,13 @@ const MONEY_FIELDS = new Set([
   // Rate memory — the source label alone reveals what was quoted before
   'Rate_Source', 'Rate_Source_Label', 'Rate_Sources', 'Rate_Touched',
 
+  // Cost. Arguably more sensitive than selling price: knowing both is knowing the margin, and a
+  // store-keeper receiving goods has no reason to see either.
+  'Unit_Price', 'Unit_Cost', 'Landed_Unit_Cost', 'Landed_Total', 'Moving_Avg_Cost',
+  'Moving_Avg_After', 'Stock_Value', 'Allocated_Charges', 'Other_Charges', 'Total_Charges',
+  'Invoice_Total', 'Last_Purchase_Rate', 'Last_Landed_Cost', 'Quote_Total',
+  'Vendor_Invoice_Amount', 'Suggested_Rate',
+
   // camelCase mirrors
   'rate', 'amount', 'amountPaid', 'balanceDue', 'standardRate',
   'grossTotal', 'grandTotal', 'taxableValue', 'lineTotal', 'subtotal',
@@ -134,7 +141,13 @@ const MONEY_ROUTE_PATTERNS = [
   /^\/items(\/|$)/,
   /^\/inventory(\/|$)/,
   /^\/analytics\/order-lost$/,
-  /^\/sync\/all$/
+  /^\/sync\/all$/,
+  // Procurement. The receiving screen is used by store-keepers, who see quantities but not costs.
+  /^\/vendors(\/|$)/,
+  /^\/rfqs(\/|$)/,
+  /^\/purchase-orders(\/|$)/,
+  /^\/grns(\/|$)/,
+  /^\/purchase(\/|$)/
 ];
 
 function isMoneyRoute(path) {

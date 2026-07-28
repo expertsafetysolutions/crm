@@ -54,7 +54,7 @@ async function ensureInventoryRow(itemId, unit) {
  * to be able to go either way. Forcing it through Math.abs() (as every type once was) made a
  * negative adjustment silently ADD stock, so shortfalls could never be corrected.
  */
-async function recordTransaction({ itemId, type, qty, unit, supplierName, supplierInvoiceNo, clientId, site, linkedInvoiceId, notes, recordedBy, date }) {
+async function recordTransaction({ itemId, type, qty, unit, supplierName, supplierInvoiceNo, clientId, site, linkedInvoiceId, notes, recordedBy, date, unitCost, vendorId, poId, grnId }) {
   if (!itemId) throw new Error('itemId is required');
   const raw = Number(qty) || 0;
   const magnitude = Math.abs(raw);
@@ -65,6 +65,26 @@ async function recordTransaction({ itemId, type, qty, unit, supplierName, suppli
   const isOutward = type === TYPES.USAGE || type === TYPES.SALE_DEDUCTION || type === TYPES.STANDBY_OUT;
   const signedQty = type === TYPES.ADJUSTMENT ? raw : (isOutward ? -magnitude : magnitude);
   const balanceAfter = (Number(inventoryRow.Current_Qty) || 0) + signedQty;
+
+  /**
+   * Cost side. Only a RECEIPT carrying a unit cost moves the average — issues draw at whatever the
+   * average currently is and never recompute it, which is what standard weighted-average costing
+   * means and what keeps part-fitting behaving exactly as it always has.
+   *
+   * Stock value is written in the SAME updateRow as the quantity below, so the two can never
+   * disagree. Items bought before costing existed simply carry an average of 0 until first receipt.
+   */
+  const landedCostService = require('./landedCostService');
+  const prevAvg = Number(inventoryRow.Moving_Avg_Cost) || 0;
+  const hasCost = unitCost !== undefined && unitCost !== null && Number(unitCost) > 0;
+  const movingAvgCost = (!isOutward && hasCost)
+    ? landedCostService.nextMovingAverage({
+      oldQty: Number(inventoryRow.Current_Qty) || 0,
+      oldAvgCost: prevAvg,
+      receivedQty: magnitude,
+      landedUnitCost: Number(unitCost)
+    })
+    : prevAvg;
 
   const transaction = {
     Transaction_ID: `STK${Date.now().toString().slice(-6)}${Math.floor(Math.random() * 100).toString().padStart(2, '0')}`,
@@ -82,16 +102,29 @@ async function recordTransaction({ itemId, type, qty, unit, supplierName, suppli
     Balance_After: balanceAfter,
     Date: date || istToday(),
     Recorded_By: recordedBy || 'SYSTEM',
-    Created_At: new Date().toISOString()
+    Created_At: new Date().toISOString(),
+    // Procurement references. Optional throughout — every pre-existing caller omits them and gets
+    // empty strings, exactly as before.
+    Vendor_ID: vendorId || '',
+    PO_ID: poId || '',
+    GRN_ID: grnId || '',
+    Unit_Cost: hasCost ? Number(unitCost) : null,
+    Moving_Avg_After: movingAvgCost
   };
 
   await sheetsService.insertRow('Stock_Transactions', transaction);
   await sheetsService.updateRow('Inventory_Master', 'Item_ID', itemId, {
     Current_Qty: balanceAfter,
+    Moving_Avg_Cost: movingAvgCost,
+    Stock_Value: landedCostService.stockValue(balanceAfter, movingAvgCost),
     Last_Updated_At: new Date().toISOString()
   });
 
-  return { transaction, balanceAfter };
+  return {
+    transaction,
+    balanceAfter,
+    cost: { movingAvgCost, stockValue: landedCostService.stockValue(balanceAfter, movingAvgCost) }
+  };
 }
 
 async function recordInward(payload) {

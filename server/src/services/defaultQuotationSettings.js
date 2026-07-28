@@ -166,6 +166,9 @@ const DEFAULT_QUOTATION_SETTINGS = {
     quote_no_prefix: 'EXP/Q',
     pi_no_prefix: 'EXP/PI',
     invoice_no_prefix: 'EXP/INV',
+    // A purchase order goes to a vendor, so it draws from the same atomic counter as the outward
+    // documents — a repeated PO number lets the same delivery be claimed for payment twice.
+    po_no_prefix: 'EXP/PO',
     // 'financial' resets the running number each April (Indian FY); 'calendar' resets in January.
     number_reset: 'financial'
   },

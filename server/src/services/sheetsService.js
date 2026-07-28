@@ -43,7 +43,16 @@ const models = {
   Job_Card_Item: createModel('Job_Card_Item'),
   Delivery_Challan_Master: createModel('Delivery_Challan_Master'),
   Customer_Price_List: createModel('Customer_Price_List'),
-  Equipment_Category_Master: createModel('Equipment_Category_Master')
+  Equipment_Category_Master: createModel('Equipment_Category_Master'),
+
+  // Procurement. Purchase_Quote is its own collection rather than an array on the RFQ because each
+  // vendor answers independently — one reply must never overwrite another's, which is the same
+  // reasoning that keeps Job_Card_Item separate from its header.
+  Vendor_Master: createModel('Vendor_Master'),
+  Purchase_RFQ: createModel('Purchase_RFQ'),
+  Purchase_Quote: createModel('Purchase_Quote'),
+  Purchase_Order: createModel('Purchase_Order'),
+  Goods_Receipt: createModel('Goods_Receipt')
 };
 
 class MongoService {

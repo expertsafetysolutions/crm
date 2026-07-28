@@ -81,7 +81,8 @@ import {
   FileText,
   Package,
   ReceiptIndianRupee,
-  Wrench
+  Wrench,
+  ShoppingCart
 } from 'lucide-react';
 import { QRCodeCanvas } from 'qrcode.react';
 import GstinInput from '../components/GstinInput';
@@ -3009,6 +3010,13 @@ export default function AdminDashboard() {
           >
             <Wrench className="w-4 h-4 text-amber-600 shrink-0" />
             <span>Equipment Types</span>
+          </button>
+          <button
+            onClick={() => navigate('/purchase')}
+            className="px-3.5 py-2 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5 transition shadow-sm shrink-0"
+          >
+            <ShoppingCart className="w-4 h-4 text-teal-600 shrink-0" />
+            <span>Purchase</span>
           </button>
           <button
             onClick={() => { setShowNewCustomerModal(true); setHeaderOpen(false); }}

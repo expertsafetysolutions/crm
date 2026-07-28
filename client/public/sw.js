@@ -1,6 +1,9 @@
-// Bumped to v5: v4 caches may hold stale Vite dev-module URLs that now 504. The activate handler
-// deletes every cache whose name isn't current, so raising this evicts the poisoned entries.
-const CACHE_NAME = 'expert-safety-pwa-v5';
+// Bumped to v6: v5 served index.html stale-while-revalidate, so after a deploy the browser ran the
+// PREVIOUS shell — which points at the previous content-hashed bundles — and only picked up the new
+// build on a second reload. Installed PWAs often never got that second reload, so a deploy could
+// stay invisible on a phone indefinitely. Navigations are now network-first (see below); this bump
+// evicts the shells cached under the old strategy.
+const CACHE_NAME = 'expert-safety-pwa-v6';
 const MAX_CACHE_ENTRIES = 80;
 
 // Uploaded media lives in its own cache so large immutable images can't evict dynamic API
@@ -109,6 +112,35 @@ self.addEventListener('fetch', (event) => {
   }
 
   if (event.request.method !== 'GET') return;
+
+  // ---- APP SHELL: network-first ----
+  //
+  // index.html names the content-hashed bundles for one specific build, so serving it from cache
+  // pins the whole app to that build. Stale-while-revalidate meant a deploy needed two reloads to
+  // appear, and an installed PWA that is never fully reloaded could stay on an old version for
+  // days. The shell is small, so fetching it fresh costs little; the cache remains as the offline
+  // fallback, which is the case it actually exists for.
+  //
+  // Hashed assets below stay cache-first and are unaffected: their URL changes whenever their
+  // content does, so a cached copy can never be stale.
+  const isNavigation = event.request.mode === 'navigate'
+    || (event.request.headers.get('accept') || '').includes('text/html');
+
+  if (isNavigation) {
+    event.respondWith(
+      fetch(event.request)
+        .then((response) => {
+          if (response.ok) {
+            const resClone = response.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, resClone));
+          }
+          return response;
+        })
+        // Offline: fall back to this request, then to the shell, so a deep link still opens the app.
+        .catch(() => caches.match(event.request).then((hit) => hit || caches.match('/index.html')))
+    );
+    return;
+  }
 
   // Stale-While-Revalidate for app assets
   event.respondWith(

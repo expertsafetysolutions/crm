@@ -42,8 +42,61 @@
           return;
         }
 
+        // Offers a reload when a new build is live, rather than reloading on its own. Staff fill
+        // job cards and quotations in long-lived forms whose drafts live only in component state,
+        // so a surprise reload would silently destroy work in progress. The choice stays theirs.
+        function announceUpdate() {
+          if (document.getElementById('sw-update-bar')) return;
+          var bar = document.createElement('div');
+          bar.id = 'sw-update-bar';
+          bar.setAttribute('role', 'status');
+          bar.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:2147483647;'
+            + 'display:flex;align-items:center;gap:10px;padding:10px 14px;'
+            + 'padding-bottom:calc(10px + env(safe-area-inset-bottom, 0px));'
+            + 'background:#0f172a;color:#fff;font:600 13px system-ui,-apple-system,sans-serif;'
+            + 'box-shadow:0 -2px 12px rgba(0,0,0,.25)';
+          var msg = document.createElement('span');
+          msg.style.cssText = 'flex:1;min-width:0';
+          msg.textContent = 'A new version is available.';
+          var reload = document.createElement('button');
+          reload.type = 'button';
+          reload.textContent = 'Reload';
+          reload.style.cssText = 'min-height:40px;padding:0 16px;border:0;border-radius:10px;'
+            + 'background:#10b981;color:#fff;font:800 13px system-ui;cursor:pointer';
+          reload.onclick = function () { location.reload(); };
+          var later = document.createElement('button');
+          later.type = 'button';
+          later.textContent = 'Later';
+          later.style.cssText = 'min-height:40px;padding:0 12px;border:0;border-radius:10px;'
+            + 'background:transparent;color:#94a3b8;font:700 12px system-ui;cursor:pointer';
+          later.onclick = function () { bar.remove(); };
+          bar.appendChild(msg); bar.appendChild(later); bar.appendChild(reload);
+          document.body.appendChild(bar);
+        }
+
         window.addEventListener('load', function () {
-          navigator.serviceWorker.register('/sw.js');
+          navigator.serviceWorker.register('/sw.js').then(function (reg) {
+            // A worker already waiting means this tab opened while an update was pending.
+            if (reg.waiting && navigator.serviceWorker.controller) announceUpdate();
+
+            reg.addEventListener('updatefound', function () {
+              var incoming = reg.installing;
+              if (!incoming) return;
+              incoming.addEventListener('statechange', function () {
+                // An existing controller means this is an update, not the first install.
+                if (incoming.state === 'installed' && navigator.serviceWorker.controller) {
+                  announceUpdate();
+                }
+              });
+            });
+
+            // An installed PWA can stay open for days without ever re-requesting the worker, so
+            // deploys would go unnoticed. Re-checking when the app is brought to the foreground
+            // costs one conditional request and is what makes a same-day release actually arrive.
+            document.addEventListener('visibilitychange', function () {
+              if (document.visibilityState === 'visible') reg.update().catch(function () {});
+            });
+          }).catch(function () { /* the app works without a worker */ });
         });
       })();
     </script>

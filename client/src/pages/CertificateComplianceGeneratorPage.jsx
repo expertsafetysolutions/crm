@@ -126,25 +126,30 @@ const getDownloadFilename = (certNo, customerName, dateStr) => {
   return `${suffix} - ${safeCustomer} - ${formattedDate}`;
 };
 
-// Helper: Find latest sequence number for category
-const getLatestSequenceNumber = (certs, formatType) => {
+/**
+ * Local fallback for the next sequence number, used only when the server cannot be reached.
+ *
+ * This used to be the primary numbering source and it produced 34 duplicates across 100
+ * certificates. Two reasons, both still true of this function: it compares only the digits
+ * (`R311`, `T311` and `HPT311` all read as 311), and it scans the tab's in-memory list, which is
+ * fetched once on mount — so two staff working the same morning number against the same snapshot.
+ *
+ * It now runs only offline, where a provisional number is better than no number, and the server
+ * reassigns on save via `reassigned`. Never make this the online path again.
+ */
+const getLatestSequenceNumber = (certs, letters) => {
   let maxSeq = 310;
   if (!certs || !Array.isArray(certs)) return maxSeq;
-  const typeCerts = certs.filter(c => c.formatType === formatType || c.Format_Type === formatType);
-  typeCerts.forEach(c => {
-    const certNo = c.Certificate_No || c.certificateNo || '';
-    const parts = certNo.split('/');
-    if (parts.length > 0) {
-      const suffix = parts[parts.length - 1];
-      const baseSuffix = suffix.split('-')[0];
-      const numMatch = baseSuffix.match(/\d+/);
-      if (numMatch) {
-        const num = parseInt(numMatch[0], 10);
-        if (!isNaN(num) && num > maxSeq) {
-          maxSeq = num;
-        }
-      }
-    }
+  const want = String(letters || '').toUpperCase();
+  certs.forEach(c => {
+    const raw = String(c.Certificate_No || c.certificateNo || '').trim();
+    const cut = raw.lastIndexOf('/');
+    if (cut <= 0) return;
+    // Compare the letters too, so each prefix keeps its own numbering.
+    const m = raw.slice(cut + 1).match(/^([A-Za-z]*)(\d+)$/);
+    if (!m || m[1].toUpperCase() !== want) return;
+    const num = parseInt(m[2], 10);
+    if (!isNaN(num) && num > maxSeq) maxSeq = num;
   });
   return maxSeq;
 };
@@ -670,7 +675,7 @@ export default function CertificateComplianceGeneratorPage() {
     }
   };
 
-  const handleCertFormatChange = (newFormat) => {
+  const handleCertFormatChange = async (newFormat) => {
     if (newFormat === certForm.formatType) return;
     if ((certForm.itemsList || []).length > 0) {
       const proceed = window.confirm('Switching Certificate Type will clear the equipment items already added for this certificate. Continue?');
@@ -690,8 +695,9 @@ export default function CertificateComplianceGeneratorPage() {
     let defaultBodyIntro = [];
     let defaultCustomCertify = [];
     
-    const latestSeq = getLatestSequenceNumber(allCertificates, newFormat);
-    const nextSeq = latestSeq + 1;
+    // Placeholder only. The real number is allocated below once the format's prefix letter is
+    // known — numbering is per-prefix, so it cannot be computed before the branch picks the letter.
+    const nextSeq = '';
     let seqSuffix = 'R310';
 
     if (newFormat === 'HP Testing') {
@@ -755,13 +761,20 @@ export default function CertificateComplianceGeneratorPage() {
 
     // Merge system settings if they exist
     const systemSettings = docSettings?.certificate_types?.[newFormat] || {};
+    const settingsSequenceLetters = String(systemSettings.certSequence || '').match(/^[A-Za-z]+/)?.[0] || '';
 
     setCertForm(prev => {
       const nextTitle = systemSettings.title || title;
       const nextDetails = systemSettings.equipmentDetails || details;
       const nextPrefix = systemSettings.certPrefix || currentPrefix;
       const nextPeriod = systemSettings.certPeriod || currentPeriod;
-      const nextSequence = systemSettings.certSequence || seqSuffix;
+      // systemSettings.certSequence deliberately NOT honoured as the number. It stored a whole
+      // sequence ("HPT312"), so once saved it replayed that literal on every certificate of the
+      // type — 4 customers ended up sharing HPT312. Only its letters are meaningful; the number
+      // always comes from the counter.
+      const nextSequence = settingsSequenceLetters
+        ? `${settingsSequenceLetters}${nextSeq}`
+        : seqSuffix;
       const nextCertNo = `${nextPrefix}${nextPeriod}/${nextSequence}`;
       
       const nextValidityDuration = systemSettings.validityDuration || duration;
@@ -816,6 +829,18 @@ export default function CertificateComplianceGeneratorPage() {
         isSettingsLocked: nextIsLocked
       };
     });
+
+    // Allocate the real number for this format's prefix. Done after setCertForm because the letter
+    // is only known once the branch above has run; the state update above leaves the sequence with
+    // an empty number, which this fills in.
+    const letters = String(settingsSequenceLetters || seqSuffix).match(/^[A-Za-z]+/)?.[0] || 'R';
+    const allocated = await allocateCertNumber(letters);
+    setCertForm(prev => ({
+      ...prev,
+      certSequence: allocated.certSequence,
+      certificateNo: allocated.certificateNo,
+      numberProvisional: allocated.provisional
+    }));
   };
 
   // Admin-only: add a new custom Certificate Type from the inline form next to the type selector
@@ -877,14 +902,18 @@ export default function CertificateComplianceGeneratorPage() {
             const cust = custData.find(c => String(c.Customer_ID) === String(foundTask.Customer_ID) || c.Company_Name === foundTask.Customer_Name) || {};
             const issueDt = foundTask.Scheduled_Date || getLocalDateStr();
             const nextYrDt = new Date(new Date(issueDt).setFullYear(new Date(issueDt).getFullYear() + 1)).toISOString().split('T')[0];
-            const taskSeq = String(foundTask.Task_ID || foundTask.id || Math.floor(1000 + Math.random() * 9000)).replace(/\D/g, '');
-            const seqNo = `R${taskSeq || '310'}`;
+            // The number used to be derived from the Task ID, which is deterministic — two
+            // certificates raised for one work order always collided. It now comes from the same
+            // per-prefix counter every other path uses.
+            const allocated = await allocateCertNumber('R', certsData);
+            const seqNo = allocated.certSequence;
             setCertForm(prev => ({
               ...prev,
               certPrefix: 'Expert/',
               certPeriod: '26-27',
               certSequence: seqNo,
-              certificateNo: `Expert/26-27/${seqNo}`,
+              certificateNo: allocated.certificateNo,
+              numberProvisional: allocated.provisional,
               customerId: foundTask.Customer_ID || cust.Customer_ID || '',
               customerName: foundTask.Customer_Name || cust.Company_Name || 'Valued Client',
               address: foundTask.Customer_Address || cust.Address || 'Gujarat, India',
@@ -924,16 +953,18 @@ export default function CertificateComplianceGeneratorPage() {
             if (pre.lineCount === 0) {
               setLoadError(`This challan has no ${challanFormatType} items to certify.`);
             } else {
-              const latestSeq = getLatestSequenceNumber(certsData, pre.formatType);
-              const nextSeq = latestSeq + 1;
-              const letter = /hp\s*test/i.test(pre.formatType) ? 'H' : 'R';
+              // 'T', not 'H': the format-change handler mints T for HP Testing, and this path used
+              // to mint H for the same type — a third spelling of one prefix, each numbering apart.
+              const letter = /hp\s*test/i.test(pre.formatType) ? 'T' : 'R';
+              const allocated = await allocateCertNumber(letter, certsData);
               setCertForm(prev => ({
                 ...prev,
                 formatType: pre.formatType,
                 certPrefix: 'Expert/',
                 certPeriod: '26-27',
-                certSequence: `${letter}${nextSeq}`,
-                certificateNo: `Expert/26-27/${letter}${nextSeq}`,
+                certSequence: allocated.certSequence,
+                certificateNo: allocated.certificateNo,
+                numberProvisional: allocated.provisional,
                 customerId: pre.customerId,
                 customerName: pre.customerName,
                 address: pre.address,
@@ -951,12 +982,12 @@ export default function CertificateComplianceGeneratorPage() {
             }
           }
         } else {
-          const latestSeq = getLatestSequenceNumber(certsData, 'Refilling');
-          const nextSeq = latestSeq + 1;
+          const allocated = await allocateCertNumber('R', certsData);
           setCertForm(prev => ({
             ...prev,
-            certSequence: `R${nextSeq}`,
-            certificateNo: `Expert/26-27/R${nextSeq}`
+            certSequence: allocated.certSequence,
+            certificateNo: allocated.certificateNo,
+            numberProvisional: allocated.provisional
           }));
         }
       } catch (err) {
@@ -1303,23 +1334,47 @@ export default function CertificateComplianceGeneratorPage() {
     return { ...json, isExisting };
   };
 
+  /**
+   * Asks the server for the next number for a prefix, from the atomic Counter_Master sequence.
+   *
+   * Falls back to the local scan only when offline — see getLatestSequenceNumber. The returned
+   * number is provisional either way: POST /api/certificates re-checks uniqueness and reports any
+   * reassignment, which saveCertificateRecord adopts.
+   */
+  const allocateCertNumber = async (letters, certsForFallback = allCertificates) => {
+    const stem = `${(certForm.certPrefix || 'Expert/')}${(certForm.certPeriod || '26-27')}`;
+    const prefixLetter = String(letters || '').toUpperCase();
+    try {
+      const res = await fetch(
+        `/api/certificates/next-number?stem=${encodeURIComponent(stem)}&letters=${encodeURIComponent(prefixLetter)}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (!res.ok) throw new Error('allocator unavailable');
+      const json = await res.json();
+      return { certificateNo: json.number, certSequence: json.sequence, provisional: false };
+    } catch {
+      const nextSeq = getLatestSequenceNumber(certsForFallback, prefixLetter) + 1;
+      const sequence = `${prefixLetter}${nextSeq}`;
+      return { certificateNo: `${stem}/${sequence}`, certSequence: sequence, provisional: true };
+    }
+  };
+
   // Bumps the in-memory certificate number to the next unused sequence for the current format —
   // called right after a brand-new certificate is successfully saved/downloaded, so if the user
   // starts another certificate in the same session the number can never collide with the one just
   // issued. Never runs when saving an edit to an already-existing certificate (that would silently
   // change the number of the certificate the user is actively editing).
-  const advanceToNextCertNumber = (justSavedCertificate) => {
+  const advanceToNextCertNumber = async (justSavedCertificate) => {
     const updatedCerts = [...allCertificates.filter(c =>
       (c.verificationGuid || c.Verification_GUID) !== (justSavedCertificate.verificationGuid || justSavedCertificate.Verification_GUID)
     ), justSavedCertificate];
-    const latestSeq = getLatestSequenceNumber(updatedCerts, certForm.formatType);
-    const nextSeq = latestSeq + 1;
-    const prefixLetter = (certForm.certSequence || '').match(/^[A-Za-z]+/)?.[0] || '';
-    const nextSequence = `${prefixLetter}${nextSeq}`;
+    const prefixLetter = (certForm.certSequence || '').match(/^[A-Za-z]+/)?.[0] || 'R';
+    const next = await allocateCertNumber(prefixLetter, updatedCerts);
     setCertForm(prev => ({
       ...prev,
-      certSequence: nextSequence,
-      certificateNo: `${prev.certPrefix || 'Expert/'}${prev.certPeriod || '26-27'}/${nextSequence}`,
+      certSequence: next.certSequence,
+      certificateNo: next.certificateNo,
+      numberProvisional: next.provisional,
       verificationGuid: 'ESS-VER-' + Math.random().toString(36).substring(2, 8).toUpperCase(),
       isLocked: false,
       isContentUnlocked: false,
@@ -1385,11 +1440,9 @@ export default function CertificateComplianceGeneratorPage() {
 
   // Clears client/equipment fields and assigns the next unused certificate number for this
   // format, so the form is ready to start an unrelated new certificate from scratch.
-  const resetToBlankCertificate = (certsForNumbering) => {
-    const latestSeq = getLatestSequenceNumber(certsForNumbering, certForm.formatType);
-    const nextSeq = latestSeq + 1;
-    const prefixLetter = (certForm.certSequence || '').match(/^[A-Za-z]+/)?.[0] || '';
-    const nextSequence = `${prefixLetter}${nextSeq}`;
+  const resetToBlankCertificate = async (certsForNumbering) => {
+    const prefixLetter = (certForm.certSequence || '').match(/^[A-Za-z]+/)?.[0] || 'R';
+    const next = await allocateCertNumber(prefixLetter, certsForNumbering);
     setCertForm(prev => ({
       ...prev,
       customerId: '',
@@ -1399,8 +1452,9 @@ export default function CertificateComplianceGeneratorPage() {
       contact: '',
       authPerson: '',
       itemsList: [],
-      certSequence: nextSequence,
-      certificateNo: `${prev.certPrefix || 'Expert/'}${prev.certPeriod || '26-27'}/${nextSequence}`,
+      certSequence: next.certSequence,
+      certificateNo: next.certificateNo,
+      numberProvisional: next.provisional,
       verificationGuid: 'ESS-VER-' + Math.random().toString(36).substring(2, 8).toUpperCase(),
       isLocked: false,
       isContentUnlocked: false,

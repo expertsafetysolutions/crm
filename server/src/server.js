@@ -50,9 +50,45 @@ app.get('/api/media/:id', async (req, res) => {
 app.get('/api/verify-certificate/:guid', async (req, res) => {
   try {
     const guid = req.params.guid;
-    
+
+    // A GUID identifies exactly one certificate, but this route also accepts a certificate number,
+    // and 34 legacy rows share one. Picking the first match would confidently show one arbitrary
+    // customer's document under another's reference — worse than saying nothing. Every QR ever
+    // issued encodes a GUID, so this branch is only reachable via a hand-typed reference.
+    const matches = await sheetsService.getCertificatesByGuidOrNumber(guid);
+    if (matches.length > 1) {
+      const rows = matches.map(m => {
+        const r = m.toObject ? m.toObject() : m;
+        const g = r.Verification_GUID || r.verificationGuid || '';
+        return `<li><a href="/api/verify-certificate/${encodeURIComponent(g)}">
+          <b>${r.Customer_Name || r.customerName || 'Unknown customer'}</b>
+          <span>${r.Issue_Date || r.issueDate || ''} — ${r.Format_Type || r.formatType || 'Certificate'}</span>
+        </a></li>`;
+      }).join('');
+      return res.status(300).send(`
+        <!DOCTYPE html><html><head><title>Multiple Certificates Found — Expert Safety Solutions</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
+        <style>
+          body { font-family:'Outfit',sans-serif; background:#f8fafc; margin:0; padding:20px; display:flex; align-items:center; justify-content:center; min-height:100vh; }
+          .card { background:#fff; padding:32px 26px; border-radius:24px; box-shadow:0 10px 25px -5px rgba(0,0,0,.06); max-width:460px; width:100%; border:1.5px solid #e2e8f0; }
+          h1 { color:#1e293b; font-size:20px; margin:0 0 8px; font-weight:800; }
+          p { color:#64748b; font-size:13px; line-height:1.6; margin:0 0 18px; font-weight:500; }
+          ul { list-style:none; padding:0; margin:0; } li { margin-bottom:10px; }
+          a { display:block; text-decoration:none; border:1.5px solid #e2e8f0; border-radius:14px; padding:12px 14px; transition:all .15s; }
+          a:hover { border-color:#9a3412; background:#fff7ed; }
+          b { display:block; color:#0f172a; font-size:14px; font-weight:700; }
+          span { display:block; color:#64748b; font-size:11.5px; font-weight:600; margin-top:2px; }
+        </style></head><body><div class="card">
+          <h1>More than one certificate</h1>
+          <p>Reference <b style="display:inline">${guid}</b> matches ${matches.length} certificates. Choose the one you are verifying, or scan the QR code on the document for a direct result.</p>
+          <ul>${rows}</ul>
+        </div></body></html>
+      `);
+    }
+
     // 1. Get certificate
-    let cert = await sheetsService.getCertificateByGuid(guid);
+    let cert = matches[0] || null;
     let details = null;
     let items = [];
 

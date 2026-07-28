@@ -68,12 +68,38 @@ class MongoService {
     this.connectionPromise = mongoose.connect(targetUri).then(() => {
       this.isConnected = true;
       console.log('✅ Connected to MongoDB Atlas');
+      this.ensureIndexes();
     }).catch(err => {
       this.connectionPromise = null;
       console.error('❌ MongoDB Connection Error:', err);
       throw err;
     });
     return this.connectionPromise;
+  }
+
+  /**
+   * Database-level guard against duplicate certificate numbers.
+   *
+   * Check-then-insert cannot be made safe on its own: getAllCertificates() reads a 3s cache, so two
+   * saves in the same window both see the same pre-write snapshot and both pass. Only a unique index
+   * makes a duplicate impossible.
+   *
+   * It is PARTIAL on purpose. 34 legacy rows already share a number (and one has no number at all);
+   * a plain unique index could not be built over that data and would reject edits to it. Indexing
+   * only rows that carry Number_Locked:true — which only the new save path sets — constrains every
+   * certificate issued from now on while leaving the historical rows exactly as they are.
+   *
+   * Best-effort: a failed index build must never stop the server booting.
+   */
+  async ensureIndexes() {
+    try {
+      await models['Document_Registry'].collection.createIndex(
+        { Certificate_No: 1 },
+        { unique: true, partialFilterExpression: { Number_Locked: true }, name: 'cert_no_unique_locked' }
+      );
+    } catch (err) {
+      console.error('⚠️  Certificate number index not created:', err.message);
+    }
   }
 
   async getTab(sheetName) {
@@ -287,6 +313,55 @@ class MongoService {
   async getCertificateByGuid(guid) {
     const certs = await this.getAllCertificates();
     return certs.find(c => c.verificationGuid === guid || c.Certificate_No === guid || String(c.verificationGuid || '').toLowerCase() === String(guid || '').toLowerCase()) || null;
+  }
+
+  /**
+   * Every certificate matching a GUID *or* a certificate number, most recent first.
+   *
+   * getCertificateByGuid() takes the first match, which is correct for a GUID (they are unique) but
+   * silently picks one arbitrary customer when the caller passed a certificate number that 34
+   * legacy rows share. Verification uses this to show a disambiguation page instead of confidently
+   * vouching for the wrong document.
+   */
+  async getCertificatesByGuidOrNumber(value) {
+    const needle = String(value || '').trim().toLowerCase();
+    if (!needle) return [];
+    const certs = await this.getAllCertificates();
+    const byGuid = certs.filter(c => String(c.verificationGuid || c.Verification_GUID || '').trim().toLowerCase() === needle);
+    // A GUID match is exact and unique — never dilute it with number matches.
+    if (byGuid.length > 0) return byGuid;
+    return certs
+      .filter(c => String(c.Certificate_No || c.certificateNo || '').trim().toLowerCase() === needle)
+      .sort((a, b) => String(b.Issue_Date || b.issueDate || '').localeCompare(String(a.Issue_Date || a.issueDate || '')));
+  }
+
+  /**
+   * Next certificate number for a prefix, from the atomic Counter_Master sequence.
+   *
+   * Certificate numbers used to be computed in the browser from a max+1 scan of whatever that tab
+   * had loaded, with the letters stripped off before comparing — so R311, T311 and HPT311 all
+   * counted as "311" and every type independently started from the same floor. 34 of 100 rows ended
+   * up sharing a number. This routes numbering through the same race-free $inc counter the
+   * quotation engine uses, keyed per prefix so R and T advance independently.
+   */
+  async getNextCertificateNumber(stem, letters) {
+    const counterKey = `CERT:${stem}/${letters}`;
+    // Seed a brand-new counter from the highest number already issued under this exact stem+letters
+    // so switching on this feature cannot re-issue a number a customer already holds.
+    const certs = await this.getAllCertificates();
+    let seed = 0;
+    for (const c of certs) {
+      const raw = String(c.Certificate_No || c.certificateNo || '').trim();
+      const cut = raw.lastIndexOf('/');
+      if (cut <= 0 || raw.slice(0, cut) !== stem) continue;
+      const m = raw.slice(cut + 1).match(/^([A-Za-z]*)(\d+)$/);
+      if (m && m[1].toUpperCase() === String(letters).toUpperCase()) {
+        const n = parseInt(m[2], 10);
+        if (n > seed) seed = n;
+      }
+    }
+    const next = await this.getNextSequence(counterKey, { seedIfNew: seed });
+    return { number: `${stem}/${letters}${next}`, sequence: `${letters}${next}`, value: next };
   }
   async getEquipmentMaster() {
     const items = await this.getTab('Equipment_Master');

@@ -159,6 +159,23 @@ router.get('/certificates', async (req, res) => {
   }
 });
 
+// Allocates the next certificate number for a prefix from the atomic Counter_Master sequence.
+// Registered before /certificates/:guid siblings — Express matches in registration order and a
+// literal path must win over the parameterised one.
+router.get('/certificates/next-number', async (req, res) => {
+  try {
+    const stem = String(req.query.stem || '').trim();
+    const letters = String(req.query.letters || '').trim().toUpperCase();
+    if (!stem || !letters) {
+      return res.status(400).json({ error: 'stem and letters are required' });
+    }
+    res.json(await sheetsService.getNextCertificateNumber(stem, letters));
+  } catch (err) {
+    console.error('GET /certificates/next-number error:', err);
+    res.status(500).json({ error: 'Failed to allocate a certificate number' });
+  }
+});
+
 // Splits "Expert/26-27/R310" into { stem:'Expert/26-27', letters:'R', num:310 }.
 const parseCertificateNo = (value) => {
   const raw = String(value || '').trim();
@@ -238,6 +255,10 @@ router.post('/certificates', async (req, res) => {
 
     const newCert = await sheetsService.insertRow('Document_Registry', {
       ...payload,
+      // Brings this row under the partial unique index on Certificate_No (sheetsService.ensureIndexes).
+      // Set only here, so the 34 legacy rows that share a number stay outside the index and keep
+      // their numbers, while nothing issued from now on can duplicate one.
+      Number_Locked: true,
       Created_By: payload.Created_By || req.user.name || req.user.staffId || 'Unknown',
       Created_By_Role: payload.Created_By_Role || req.user.role || 'Staff',
       Created_At: payload.Created_At || new Date().toISOString()
@@ -289,13 +310,25 @@ router.put('/certificates/:guid', async (req, res) => {
         return res.status(403).json({ error: 'You do not have permission to update certificates. Contact Admin.' });
       }
     }
-    const updated = await sheetsService.updateRow('Document_Registry', 'verificationGuid', req.params.guid, req.body);
-    if (!updated) {
-      const byNo = await sheetsService.updateRow('Document_Registry', 'Certificate_No', req.params.guid, req.body);
-      if (!byNo) return res.status(404).json({ error: 'Certificate not found' });
-      return res.json({ success: true, certificate: byNo });
-    }
-    res.json({ success: true, certificate: updated });
+    // A certificate's identity is fixed once issued: an edit revises content, it never renumbers a
+    // document a customer may already hold. This path had no uniqueness check at all and the client
+    // routes every edit-and-resave through it, which is how numbers came to be shared. Strip the
+    // identity fields rather than validating them — there is no legitimate reason to change either.
+    const { Certificate_No, certificateNo, Verification_GUID, verificationGuid, Number_Locked, ...safeBody } = req.body;
+    const attemptedRenumber = Certificate_No !== undefined || certificateNo !== undefined;
+
+    // Deliberately no Certificate_No fallback here. 34 legacy rows share a number, so updating by
+    // number would write to whichever duplicate Mongo returned first — silently overwriting a
+    // different customer's certificate.
+    const updated = await sheetsService.updateRow('Document_Registry', 'verificationGuid', req.params.guid, safeBody);
+    if (!updated) return res.status(404).json({ error: 'Certificate not found' });
+
+    res.json({
+      success: true,
+      certificate: updated,
+      // Surfaced so the page can tell the user why the number it posted did not stick.
+      ...(attemptedRenumber ? { numberLocked: true } : {})
+    });
   } catch (err) {
     res.status(500).json({ error: 'Failed to update certificate' });
   }

@@ -68,7 +68,14 @@ router.get('/sync/all', async (req, res) => {
       sheetsService.getAllTags()
     ]);
 
-    const cleanStaff = allStaff.map(({ Password, ...rest }) => rest);
+    // Effective_Permissions is attached here, on the single shared list, so BOTH the Admin and Staff
+    // response literals below carry it — those are separate objects and that split is how `logs`
+    // once ended up Admin-only. It powers Admin impersonation: previewing a staff member has to show
+    // that person's masked UI, which needs their resolved map rather than their sparse stored one.
+    const cleanStaff = allStaff.map(({ Password, ...rest }) => ({
+      ...rest,
+      Effective_Permissions: resolvePermissions(rest, rest.Role)
+    }));
 
     // Enrich tasks with customer details robustly (case-insensitive & trimmed matching)
     const enrichedTasks = allTasks.map(t => {

@@ -231,12 +231,46 @@ export function AuthProvider({ children }) {
     localStorage.removeItem(IMPERSON_KEY);
   }, []);
 
+  // ── Effective permissions ───────────────────────────────────────────────────────────────────
+  // Resolved server-side (role defaults + per-staff overrides) and delivered on /login and /me, so
+  // refreshUserProfile() keeps it current without a re-login.
+  const permissions = (impersonatedStaff || user)?.Effective_Permissions || null;
+
+  /**
+   * Whether the current viewer may see money — rates, amounts, discounts, taxes, totals.
+   *
+   * The AND across both identities is deliberate. Impersonation swaps the displayed user but does
+   * NOT re-issue the token, so the backend still authenticates as the real Admin and keeps sending
+   * prices. That means:
+   *   - impersonation can never GRANT prices a real user lacks (the real user's flag gates it), and
+   *   - an Admin previewing a Technician sees the masked screen the Technician actually gets.
+   *
+   * This is an honest preview, not a privilege drop. An Admin genuinely holds this data; hiding it
+   * here is a UI courtesy. Anything needing a real privilege drop must re-issue a scoped token.
+   *
+   * A profile cached before this field existed has no map at all. Rather than hide prices from the
+   * office staff who have always seen them — a wrong-direction failure that would look like a bug,
+   * and which an OFFLINE user could not clear, since /me needs a connection — an absent map falls
+   * back to the roles that were price-visible before this feature shipped. The next /me overwrites
+   * it with the real answer.
+   */
+  const LEGACY_PRICE_ROLES = new Set(['admin', 'sales', 'supervisor', 'accounts']);
+  const canSeeFinance = (profile) => {
+    const map = profile?.Effective_Permissions;
+    if (map?.finance) return Boolean(map.finance.view);
+    return LEGACY_PRICE_ROLES.has(String(profile?.Role || '').trim().toLowerCase());
+  };
+  const canSeeMoney = canSeeFinance(user)
+    && (!impersonatedStaff || canSeeFinance(impersonatedStaff));
+
   return (
     <AuthContext.Provider
       value={{
         user: impersonatedStaff || user,
         realUser: user,
         impersonatedStaff,
+        permissions,
+        canSeeMoney,
         token,
         isOnline,
         pendingSyncCount,

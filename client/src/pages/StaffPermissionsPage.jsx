@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, Loader2, Save, Shield, CheckCircle2, AlertTriangle,
-  FileText, Package, Users, Wrench, Layers
+  FileText, Package, Users, Wrench, Layers, IndianRupee
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
@@ -22,7 +22,15 @@ const MODULE_META = {
   jobcard: { label: 'Job Card & Challan', icon: Wrench, hint: 'Workshop inward, service entry, delivery challans' },
   // Only `edit` is consulted for this one — the ordinary one-step Advance stays open to everyone.
   // The other three toggles are inert, kept because the grid is uniform across modules.
-  taskstage: { label: 'Task Stage Control', icon: Layers, hint: 'Set a task\'s stage directly (e.g. straight to Service for walk-in customers)' }
+  taskstage: { label: 'Task Stage Control', icon: Layers, hint: 'Set a task\'s stage directly (e.g. straight to Service for walk-in customers)' },
+  // Visibility only — there is no such thing as "editing finance", so this renders as a single
+  // toggle instead of the 4-action grid and the server forces the write actions off.
+  finance: {
+    label: 'Prices & Financials',
+    icon: IndianRupee,
+    hint: 'See rates, amounts, discounts and totals on quotations, challans, invoices and stock',
+    viewOnly: true
+  }
 };
 
 const ACTIONS = [
@@ -130,7 +138,7 @@ export default function StaffPermissionsPage() {
           </button>
           <div className="flex-1 min-w-0">
             <h1 className="font-bold truncate">Module Access</h1>
-            <div className="text-[11px] text-slate-500">Quotation &amp; Inventory permissions per staff member</div>
+            <div className="text-[11px] text-slate-500">Module and price visibility per staff member</div>
           </div>
         </div>
       </div>
@@ -148,7 +156,9 @@ export default function StaffPermissionsPage() {
           <span>
             Admins always have full access and are not listed. Granting Add, Edit or Delete
             automatically grants View. Use <b>Stock entry</b> on Inventory for store-keepers who
-            record daily stock — several staff can hold that at once.
+            record daily stock — several staff can hold that at once. <b>Prices &amp; Financials</b>
+            set to Hidden removes every rate and amount from that person's screens and from the data
+            their device receives — use it for technicians and delivery staff.
           </span>
         </div>
 
@@ -191,6 +201,16 @@ export default function StaffPermissionsPage() {
                         </div>
                       </div>
 
+                      {/* A visibility-only module has nothing to preset — one toggle says it all. */}
+                      {meta.viewOnly ? (
+                        <div className="flex gap-1.5">
+                          <Preset label="Hidden" active={!p.view}
+                            onClick={() => applyPreset(member.Staff_ID, modKey, 'none')} />
+                          <Preset label="Visible" active={p.view}
+                            onClick={() => applyPreset(member.Staff_ID, modKey, 'view')} />
+                        </div>
+                      ) : (
+                      <>
                       {/* Quick presets */}
                       <div className="flex flex-wrap gap-1.5 mb-2">
                         <Preset label="No access" active={!p.view && !p.add} onClick={() => applyPreset(member.Staff_ID, modKey, 'none')} />
@@ -216,6 +236,8 @@ export default function StaffPermissionsPage() {
                           );
                         })}
                       </div>
+                      </>
+                      )}
                     </div>
                   );
                 })}

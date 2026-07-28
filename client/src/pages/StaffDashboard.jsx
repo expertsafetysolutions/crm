@@ -119,13 +119,18 @@ const SYSTEM_REMARK_BADGE_STYLES = {
 };
 const remarkBadgeClass = (type, fallback) => SYSTEM_REMARK_BADGE_STYLES[type] || fallback;
 
+// Display-seniority ladder for "who may reassign whose work". Deliberately SEPARATE from the module
+// grants in server/src/utils/permissions.js — that answers "what may this person do", this answers
+// "who outranks whom". Merging them would tangle two unrelated questions.
 const ROLE_LEVELS = {
   'Admin': 4,
   'ADMIN': 4,
   'Manager': 3,
   'Supervisor': 2,
   'Staff': 1,
-  'Technician': 1
+  'Technician': 1,
+  'Accounts': 1,
+  'Delivery': 1
 };
 
 export default function StaffDashboard() {

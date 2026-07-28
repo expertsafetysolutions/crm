@@ -3,6 +3,7 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const sheetsService = require('../services/sheetsService');
 const { verifyStaffPassword, validatePasswordPolicy } = require('../utils/passwordUtils');
+const { resolvePermissions } = require('../utils/permissions');
 
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -44,13 +45,23 @@ router.post('/login', async (req, res) => {
     const token = jwt.sign(tokenPayload, JWT_SECRET, { expiresIn: '7d' });
 
     // Return user info (exclude password)
+    //
+    // Three similarly-named things live on this object and must not be confused:
+    //   Permissions           legacy STRING ('ASSIGNED_ONLY') controlling task visibility scope
+    //   Module_Permissions    the raw per-staff override map, sparse and often absent
+    //   Effective_Permissions the RESOLVED map (role defaults + overrides), computed fresh below
+    //
+    // The client can only evaluate the last one — the raw map alone says nothing about what a role
+    // grants by default. It is deliberately NOT put in the JWT: a 7-day token would keep serving
+    // grants an Admin had already revoked.
     const { Password, ...userProfile } = staff;
     res.json({
       success: true,
       token,
       user: {
         ...userProfile,
-        Permissions: userProfile.Permissions || 'ASSIGNED_ONLY'
+        Permissions: userProfile.Permissions || 'ASSIGNED_ONLY',
+        Effective_Permissions: resolvePermissions(staff, staff.Role)
       }
     });
   } catch (err) {
@@ -78,7 +89,10 @@ router.get('/me', authenticateToken, async (req, res) => {
     const staff = await sheetsService.getStaffById(req.user.staffId);
     if (!staff) return res.status(404).json({ error: 'User not found' });
     const { Password, ...userProfile } = staff;
-    res.json({ user: userProfile });
+    // Resolved here as well as on login, and this is the path that matters most: AuthContext calls
+    // /me on mount, on window focus and on reconnect, so a permission change an Admin makes reaches
+    // the user without forcing them to log out and back in.
+    res.json({ user: { ...userProfile, Effective_Permissions: resolvePermissions(staff, staff.Role) } });
   } catch (err) {
     res.status(500).json({ error: 'Server error fetching profile' });
   }

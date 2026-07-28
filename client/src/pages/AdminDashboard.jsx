@@ -80,10 +80,20 @@ import {
   BellOff,
   FileText,
   Package,
-  ReceiptIndianRupee
+  ReceiptIndianRupee,
+  Wrench
 } from 'lucide-react';
 import { QRCodeCanvas } from 'qrcode.react';
 import GstinInput from '../components/GstinInput';
+
+// The production stages during which a customer's equipment is physically in the workshop, and so
+// the only stages where a job card makes sense. Mirrors the same list in StaffDashboard.jsx, which
+// must in turn match PRODUCTION_STAGES in workflowEngine.js.
+const PRODUCTION_STAGES_WITH_JOB_CARD = [
+  'Material Arrangement / Internal Work',
+  'Pickup/Delivery',
+  'Service & Maintenance'
+];
 
 const REMARK_TAGS = [
   'Call',
@@ -3941,6 +3951,27 @@ export default function AdminDashboard() {
                             <RefreshCw className="w-4 h-4 text-purple-600" />
                             <span className="absolute -top-7 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded-md bg-slate-900 text-white text-[10px] font-bold whitespace-nowrap opacity-0 group-hover:opacity-100 group-active:opacity-100 pointer-events-none transition shadow-md z-20">
                               Reactivate
+                            </span>
+                          </button>
+                        )}
+
+                        {/* JOB CARD BUTTON — mirrors the one on StaffDashboard so a job card can be
+                            opened without switching to the staff interface. Same stage gate: only
+                            while the customer's equipment is physically in the workshop. */}
+                        {task.Status !== 'Completed' && task.Status !== 'Closed'
+                          && PRODUCTION_STAGES_WITH_JOB_CARD.includes(task.Stage) && (
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); navigate(`/job-card/task/${task.Task_ID}`); }}
+                            className="group relative w-8 h-8 rounded-xl bg-indigo-50 hover:bg-indigo-100 active:bg-indigo-200 border border-indigo-300 text-indigo-700 flex items-center justify-center transition shrink-0"
+                            title={task.Job_Card_ID ? 'Open Job Card' : 'Create Job Card'}
+                          >
+                            <Wrench className="w-4 h-4 text-indigo-600" />
+                            {task.Job_Card_ID && (
+                              <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-emerald-500 border border-white" />
+                            )}
+                            <span className="absolute -top-7 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded-md bg-slate-900 text-white text-[10px] font-bold whitespace-nowrap opacity-0 group-hover:opacity-100 group-active:opacity-100 pointer-events-none transition shadow-md z-20">
+                              {task.Job_Card_ID ? 'Open Job Card' : 'Job Card'}
                             </span>
                           </button>
                         )}

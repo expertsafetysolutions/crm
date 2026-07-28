@@ -3709,10 +3709,9 @@ export default function CertificateComplianceGeneratorPage() {
                         }}
                         className="px-3.5 pt-3 pb-2.5 cursor-pointer hover:bg-amber-50/60 active:bg-amber-100/60 transition"
                       >
-                        <div className="text-[10px] font-bold text-slate-500">
-                          {formatDateDDMMYYYY(c.Issue_Date || c.issueDate)}
-                        </div>
-                        <div className="text-sm font-extrabold text-slate-900 mt-0.5 truncate">
+                        {/* Issue date moved to the footer row, beside the Ref No and challan date,
+                            so all three identifiers read together instead of being split apart. */}
+                        <div className="text-sm font-extrabold text-slate-900 truncate">
                           {companyName}
                         </div>
                         <div className="text-[11px] text-indigo-700 font-semibold mt-0.5 truncate">
@@ -3720,10 +3719,20 @@ export default function CertificateComplianceGeneratorPage() {
                         </div>
                       </div>
                       <div className="flex items-center justify-between px-3.5 py-2 border-t border-slate-100 bg-slate-50/70">
-                        <span className="text-[10px] font-bold text-slate-600">
-                          Ref No: <span className="text-slate-900">{refNo}</span>
-                        </span>
-                        <div className="flex items-center gap-1">
+                        <div className="min-w-0 flex flex-wrap items-center gap-x-2.5 gap-y-0.5">
+                          <span className="text-[10px] font-bold text-slate-600">
+                            Ref No: <span className="text-slate-900">{refNo}</span>
+                          </span>
+                          <span className="text-[10px] font-bold text-slate-500">
+                            Cert: <span className="text-slate-800">{formatDateDDMMYYYY(c.Issue_Date || c.issueDate)}</span>
+                          </span>
+                          {/* Challan_Date falls back to the issue date on save, so an older record
+                              without one still shows a sensible value rather than a blank. */}
+                          <span className="text-[10px] font-bold text-slate-500">
+                            Challan: <span className="text-slate-800">{formatDateDDMMYYYY(c.Challan_Date || c.challanDate || c.Issue_Date || c.issueDate)}</span>
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-1 shrink-0">
                           <button
                             type="button"
                             onClick={(e) => {

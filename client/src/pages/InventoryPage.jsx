@@ -24,7 +24,7 @@ const TABS = [
 
 export default function InventoryPage() {
   const navigate = useNavigate();
-  const { token, user } = useAuth();
+  const { token, user, canSeeMoney } = useAuth();
   const isAdmin = String(user?.Role || '').toLowerCase() === 'admin';
 
   const [tab, setTab] = useState('items');
@@ -65,9 +65,13 @@ export default function InventoryPage() {
   // re-imported, matching on Item_ID (or Item_Name when the ID column is left blank).
   const CSV_COLUMNS = ['Item_ID', 'Item_Name', 'Category', 'HSN_Code', 'Unit', 'Standard_Rate', 'Default_GST_Rate', 'Reorder_Level', 'Description', 'Active'];
 
+  // An export must never carry what the screen hides, or price masking becomes one button click
+  // away from defeat. The constant above stays whole because it also defines the IMPORT template.
+  const exportColumns = canSeeMoney ? CSV_COLUMNS : CSV_COLUMNS.filter(c => c !== 'Standard_Rate');
+
   const downloadCsv = (rows, filename) => {
     import('papaparse').then(({ default: Papa }) => {
-      const csv = Papa.unparse({ fields: CSV_COLUMNS, data: rows });
+      const csv = Papa.unparse({ fields: exportColumns, data: rows });
       // Prepend a BOM so Excel opens ₹/UTF-8 text correctly instead of mojibake.
       const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
       const url = URL.createObjectURL(blob);
@@ -82,7 +86,7 @@ export default function InventoryPage() {
   const exportItems = () => {
     if (items.length === 0) return flash('No items to export yet.', 'err');
     downloadCsv(
-      items.map(i => CSV_COLUMNS.map(c => (i[c] !== undefined && i[c] !== null ? i[c] : ''))),
+      items.map(i => exportColumns.map(c => (i[c] !== undefined && i[c] !== null ? i[c] : ''))),
       `Item_Master_${new Date().toISOString().slice(0, 10)}.csv`
     );
   };
@@ -209,7 +213,10 @@ export default function InventoryPage() {
       body: JSON.stringify({
         itemName: itemForm.Item_Name, category: itemForm.Category, hsnCode: itemForm.HSN_Code,
         unit: itemForm.Unit, defaultGstRate: itemForm.Default_GST_Rate,
-        standardRate: itemForm.Standard_Rate, reorderLevel: itemForm.Reorder_Level,
+        // Omitted entirely for a viewer who cannot see prices: the server stripped Standard_Rate on
+        // the way out, so sending it back would overwrite a real rate with a blank.
+        ...(canSeeMoney ? { standardRate: itemForm.Standard_Rate } : {}),
+        reorderLevel: itemForm.Reorder_Level,
         description: itemForm.Description,
         longDescription: itemForm.Long_Description,
         specifications: itemForm.Specifications,
@@ -448,7 +455,7 @@ export default function InventoryPage() {
                         <div className="text-[10px] text-indigo-500 truncate">alias: {i.Aliases.join(', ')}</div>
                       )}
                     </div>
-                    <div className="font-bold text-base shrink-0">{formatMoney(i.Standard_Rate)}</div>
+                    {canSeeMoney && <div className="font-bold text-base shrink-0">{formatMoney(i.Standard_Rate)}</div>}
                   </div>
                   <div className="flex flex-wrap gap-x-3 gap-y-1 mt-2 text-[11px] text-slate-600">
                     <span><b className="text-slate-400 uppercase text-[9px]">HSN</b> {i.HSN_Code || '—'}</span>
@@ -479,7 +486,7 @@ export default function InventoryPage() {
             {/* DESKTOP: table */}
             <div className="hidden md:block">
               <Table
-                head={['Item', 'HSN', 'Unit', 'Rate', 'GST%', 'Reorder', '']}
+                head={['Item', 'HSN', 'Unit', ...(canSeeMoney ? ['Rate'] : []), 'GST%', 'Reorder', '']}
                 rows={visibleItems.map(i => [
                   <div key="n" className="flex items-center gap-2.5">
                     <LazyImage src={i.Photo_URL} alt={i.Item_Name} mode="viewport"
@@ -493,7 +500,9 @@ export default function InventoryPage() {
                       )}
                     </div>
                   </div>,
-                  i.HSN_Code || '—', i.Unit, formatMoney(i.Standard_Rate), `${i.Default_GST_Rate}%`, i.Reorder_Level || '—',
+                  i.HSN_Code || '—', i.Unit,
+                  ...(canSeeMoney ? [formatMoney(i.Standard_Rate)] : []),
+                  `${i.Default_GST_Rate}%`, i.Reorder_Level || '—',
                   (canEdit || canDelete) ? (
                     <div key="a" className="flex gap-1 justify-end">
                       {canEdit && <button onClick={() => setItemForm({ ...i, Aliases_Text: (i.Aliases || []).join(', ') })}
@@ -672,7 +681,7 @@ export default function InventoryPage() {
           <div className="grid grid-cols-2 gap-3">
             <F label="HSN/SAC" value={itemForm.HSN_Code} onChange={v => setItemForm(s => ({ ...s, HSN_Code: v }))} />
             <F label="Unit" value={itemForm.Unit} onChange={v => setItemForm(s => ({ ...s, Unit: v }))} />
-            <F label="Standard rate" type="number" value={itemForm.Standard_Rate} onChange={v => setItemForm(s => ({ ...s, Standard_Rate: v }))} />
+            {canSeeMoney && <F label="Standard rate" type="number" value={itemForm.Standard_Rate} onChange={v => setItemForm(s => ({ ...s, Standard_Rate: v }))} />}
             <F label="GST %" type="number" value={itemForm.Default_GST_Rate} onChange={v => setItemForm(s => ({ ...s, Default_GST_Rate: v }))} />
           </div>
 

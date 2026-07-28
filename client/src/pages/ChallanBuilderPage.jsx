@@ -30,7 +30,7 @@ const CONFIDENCE_STYLE = {
 export default function ChallanBuilderPage() {
   const { challanId, jobCardId } = useParams();
   const navigate = useNavigate();
-  const { token, user } = useAuth();
+  const { token, user, canSeeMoney } = useAuth();
 
   const [challan, setChallan] = useState(null);
   const [items, setItems] = useState([]);
@@ -55,9 +55,11 @@ export default function ChallanBuilderPage() {
   const lines = challan?.Line_Items || [];
   const unmapped = lines.filter(l => l.Item_Match_Confidence === 'NONE').length;
 
-  // Only worth showing money when the admin allows it AND something actually has a price — a
-  // column of zeroes helps nobody.
-  const priceVisible = showPrice && lines.some(l => Number(l.Rate) > 0);
+  // Three gates, all of which must pass: the viewer is allowed to see money at all, the admin has
+  // turned prices on for challans, and something actually has a price — a column of zeroes helps
+  // nobody. For a masked viewer the server has already stripped Rate, so the third test would fail
+  // on its own; canSeeMoney is stated explicitly so the intent does not rest on that side effect.
+  const priceVisible = canSeeMoney && showPrice && lines.some(l => Number(l.Rate) > 0);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -481,7 +483,9 @@ export default function ChallanBuilderPage() {
           </button>
         )}
 
-        {!showPrice && (
+        {/* Only shown to someone who could act on it — a viewer without price access cannot see
+            the figures at all, so pointing them at a print setting would only confuse. */}
+        {!showPrice && canSeeMoney && (
           <p className="text-[10px] text-slate-400 text-center px-4">
             Prices are recorded on this challan but not printed. An Admin can switch printing on in
             Quotation Settings → Approval &amp; Defaults.

@@ -17,10 +17,17 @@ const equipmentCategoryService = require('../services/equipmentCategoryService')
 const challanService = require('../services/challanService');
 const priceListService = require('../services/priceListService');
 const interactionLogger = require('../services/interactionLogger');
+const moneyMask = require('../utils/moneyMask');
 
 const router = express.Router();
 
 router.use(authenticateToken);
+
+// Strips rates and amounts out of responses for staff without `finance:view`. Mounted here, ahead of
+// every route, so it applies at send time whatever handler answers — including the 409 payloads that
+// carry pricing. It only touches the outbound JSON: service-to-service data (invoice conversion,
+// stock deduction, challan pricing) never passes through it and is unaffected.
+router.use(moneyMask.middleware());
 
 // Auto-injects a system-generated entry into the company's remark timeline (Customer_Interactions)
 // on task lifecycle events (created / status changed / completed). Delegates to interactionLogger,

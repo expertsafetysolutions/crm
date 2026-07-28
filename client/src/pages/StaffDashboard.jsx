@@ -67,13 +67,7 @@ import {
   Wrench
 } from 'lucide-react';
 
-// The production stages during which a customer's equipment is physically in the workshop, and so
-// the only stages where a job card makes sense. Must match PRODUCTION_STAGES in workflowEngine.js.
-const PRODUCTION_STAGES_WITH_JOB_CARD = [
-  'Material Arrangement / Internal Work',
-  'Pickup/Delivery',
-  'Service & Maintenance'
-];
+import { WORKFLOW_STAGES, PRODUCTION_STAGES_WITH_JOB_CARD } from '../utils/workflowStages';
 
 const REMARK_TAGS = [
   'Call',
@@ -236,11 +230,14 @@ export default function StaffDashboard() {
 
   const targetStaffId = user?.Staff_ID || user?.staffId || user?.id;
   const targetStaffName = user?.Name;
-  const isTargetStaff = user?.Role !== 'Admin' || localStorage.getItem('expert_safety_impersonation');
-
-  const myAttendanceLogs = useMemo(() => isTargetStaff ? attendanceLogs.filter(r => r.Staff_ID === targetStaffId) : attendanceLogs, [attendanceLogs, isTargetStaff, targetStaffId]);
-  const myLeaveRequests = useMemo(() => isTargetStaff ? leaveRequests.filter(r => r.Staff_ID === targetStaffId) : leaveRequests, [leaveRequests, isTargetStaff, targetStaffId]);
-  const mySalaryAdvances = useMemo(() => isTargetStaff ? salaryAdvances.filter(r => r.Staff_ID === targetStaffId) : salaryAdvances, [salaryAdvances, isTargetStaff, targetStaffId]);
+  // Attendance, leave and advances are always scoped to one person here — this dashboard shows
+  // "my" record, never the team's, and an Admin opening it is still just another employee looking
+  // at their own day. An earlier exemption for Admins let the unfiltered list through, so the
+  // punch card matched on the first open shift of ANY staff member and showed a colleague's
+  // punch-in as the Admin's own. Company-wide attendance belongs to the Admin dashboard.
+  const myAttendanceLogs = useMemo(() => attendanceLogs.filter(r => r.Staff_ID === targetStaffId), [attendanceLogs, targetStaffId]);
+  const myLeaveRequests = useMemo(() => leaveRequests.filter(r => r.Staff_ID === targetStaffId), [leaveRequests, targetStaffId]);
+  const mySalaryAdvances = useMemo(() => salaryAdvances.filter(r => r.Staff_ID === targetStaffId), [salaryAdvances, targetStaffId]);
   // Task remarks/conversation history are shared per-task — every staff member and admin should see
   // all remarks logged by anyone on a task, not just their own. Unlike attendance/leave/advances
   // (genuinely personal records), this must NOT be filtered down to the current staff member.
@@ -1508,6 +1505,9 @@ export default function StaffDashboard() {
 
     const payload = {
       taskId: selectedTask.Task_ID,
+      // Omitted when unchanged so the server does its normal one-step advance. This one object
+      // feeds both the online PUT and the offline queue, and /sync/batch forwards it too.
+      targetStage: (targetStage && targetStage !== selectedTask.Stage) ? targetStage : undefined,
       latLong: coords || '0.0000, 0.0000',
       remarks: remarks || `Advanced stage for ${selectedTask.Task_ID}`,
       imageUrl: photoDataUrl
@@ -1539,7 +1539,9 @@ export default function StaffDashboard() {
       await enqueueOfflineAction('ADVANCE_STAGE', payload);
       await updateQueueCount();
       // Optimistic update locally
-      setTasks(prev => prev.map(t => t.Task_ID === selectedTask.Task_ID ? { ...t, Stage: 'Advancing (Queued Offline)' } : t));
+      setTasks(prev => prev.map(t => t.Task_ID === selectedTask.Task_ID
+        ? { ...t, Stage: payload.targetStage ? `${payload.targetStage} (Queued Offline)` : 'Advancing (Queued Offline)' }
+        : t));
       closeModal();
       setSubmitting(false);
     }
@@ -1660,6 +1662,9 @@ export default function StaffDashboard() {
     setActionTaken('');
     setPhotoDataUrl('');
     setCapturedLocation('');
+    // Seeded from the task so the dropdown opens on the current stage; without this an untouched
+    // dropdown would submit whichever stage happens to be first in the list.
+    setTargetStage(task?.Stage || '');
     captureGeolocation();
   };
 
@@ -3280,6 +3285,24 @@ export default function StaffDashboard() {
                       onChange={(e) => setNewDate(e.target.value)}
                       className="block w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-slate-900 text-xs focus:bg-white focus:outline-none focus:ring-2 focus:ring-rose-500"
                     />
+                  </div>
+                )}
+
+                {activeModal === 'ADVANCE' && (
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Move to Stage *
+                    </label>
+                    <select
+                      value={targetStage}
+                      onChange={(e) => setTargetStage(e.target.value)}
+                      className="block w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-slate-900 text-xs focus:bg-white focus:outline-none focus:ring-2 focus:ring-rose-500"
+                    >
+                      {WORKFLOW_STAGES.map(s => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                    <p className="text-[11px] text-slate-500 mt-1">
+                      Leave unchanged to move one step forward as usual.
+                    </p>
                   </div>
                 )}
 

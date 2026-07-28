@@ -43,6 +43,14 @@ async function advanceTaskStage(taskId, actionPayload) {
   let nextAssignedStaff = task.Assigned_Staff;
   let nextStatus = 'In Progress';
 
+  // An unrecognised targetStage would otherwise be written to Task_Master verbatim, leaving a task
+  // that looks fine but has silently lost the stage-gated UI (e.g. the job card button, which
+  // matches on exact stage strings). Reject it rather than storing it.
+  if (actionPayload.targetStage
+      && ![...SALES_STAGES, ...PRODUCTION_STAGES].includes(actionPayload.targetStage)) {
+    throw new Error(`Unknown target stage "${actionPayload.targetStage}"`);
+  }
+
   // Allow explicit target stage or automatic next stage
   if (actionPayload.targetStage) {
     nextStage = actionPayload.targetStage;
@@ -113,6 +121,14 @@ async function advanceTaskStage(taskId, actionPayload) {
   // way 'Completed' does, otherwise a closed order would sit at Status 'In Progress' forever.
   if (nextStage === 'Completed' || nextStage === 'Order Closed') {
     nextStatus = actionPayload.status || 'Completed';
+  }
+
+  // A manual targetStage skips the switch above, so the department hand-off that normally picks a
+  // new owner never runs. Without this a task jumped into Production stays assigned to the Sales
+  // person who created it, and the hand-off push below never fires because the assignee is
+  // unchanged — the workshop is never told the job exists.
+  if (actionPayload.targetStage && !actionPayload.assignedStaff && nextDepartment !== task.Department) {
+    nextAssignedStaff = await getAvailableStaff(nextDepartment, task.Assigned_Staff);
   }
 
   // Update task in Google Sheets

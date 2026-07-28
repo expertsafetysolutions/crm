@@ -85,15 +85,7 @@ import {
 } from 'lucide-react';
 import { QRCodeCanvas } from 'qrcode.react';
 import GstinInput from '../components/GstinInput';
-
-// The production stages during which a customer's equipment is physically in the workshop, and so
-// the only stages where a job card makes sense. Mirrors the same list in StaffDashboard.jsx, which
-// must in turn match PRODUCTION_STAGES in workflowEngine.js.
-const PRODUCTION_STAGES_WITH_JOB_CARD = [
-  'Material Arrangement / Internal Work',
-  'Pickup/Delivery',
-  'Service & Maintenance'
-];
+import { WORKFLOW_STAGES, PRODUCTION_STAGES_WITH_JOB_CARD, departmentForStage } from '../utils/workflowStages';
 
 const REMARK_TAGS = [
   'Call',
@@ -665,7 +657,12 @@ export default function AdminDashboard() {
       const res = await fetch(`/api/tasks/${selectedTask.Task_ID}/stage`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ remarks: `[Admin: ${user?.Name || 'Admin'}] ${adminRemarks || 'Stage advanced by Admin'}`, latLong: '0.0000, 0.0000' })
+        body: JSON.stringify({
+          // Omitted when blank so the server falls back to its normal one-step advance.
+          targetStage: adminTargetStage || undefined,
+          remarks: `[Admin: ${user?.Name || 'Admin'}] ${adminRemarks || (adminTargetStage ? `Stage set to ${adminTargetStage} by Admin` : 'Stage advanced by Admin')}`,
+          latLong: '0.0000, 0.0000'
+        })
       });
       if (!res.ok) throw new Error('Stage advancement failed');
       closeAdminModal();
@@ -1120,6 +1117,7 @@ export default function AdminDashboard() {
     description: '',
     assignedStaff: '',
     department: 'Sales',
+    stage: 'New Inquiry',
     type: 'One-time',
     scheduledDate: getLocalDateStr(),
     recurringInterval: 'Monthly',
@@ -1987,7 +1985,11 @@ export default function AdminDashboard() {
         body: JSON.stringify({
           ...taskForm,
           customerId: targetCustomerId,
-          stage: 'New Inquiry',
+          // Must stay after the spread, or ...taskForm would clobber it. A walk-in customer is
+          // created straight on a production stage so the job card opens without four Advance
+          // clicks; Department follows the stage the way workflowEngine derives it server-side.
+          stage: taskForm.stage || 'New Inquiry',
+          department: departmentForStage(taskForm.stage, taskForm.department),
           recurringPeriod: taskForm.type === 'Recurring' ? taskForm.recurringPeriod : undefined,
           recurringInterval: taskForm.type === 'Recurring' ? taskForm.recurringInterval : undefined,
           Created_By: user?.Name || user?.Staff_ID || 'Admin',
@@ -4616,6 +4618,25 @@ export default function AdminDashboard() {
                       onChange={(e) => setAdminNewDate(e.target.value)}
                       className="block w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-slate-900 text-xs focus:bg-white focus:outline-none focus:ring-2 focus:ring-rose-500"
                     />
+                  </div>
+                )}
+
+                {activeModal === 'ADVANCE' && (
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Move to Stage *
+                    </label>
+                    <select
+                      value={adminTargetStage}
+                      onChange={(e) => setAdminTargetStage(e.target.value)}
+                      className="block w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-slate-900 text-xs focus:bg-white focus:outline-none focus:ring-2 focus:ring-rose-500"
+                    >
+                      {WORKFLOW_STAGES.map(s => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                    <p className="text-[11px] text-slate-500 mt-1">
+                      Defaults to the current stage. Department is updated automatically, and the task
+                      is handed to that department's staff.
+                    </p>
                   </div>
                 )}
 
@@ -7990,13 +8011,32 @@ export default function AdminDashboard() {
                 />
               </div>
 
+              <div>
+                <label className="block text-slate-700 font-semibold mb-1">Starting Stage</label>
+                <select
+                  value={taskForm.stage}
+                  onChange={e => setTaskForm({ ...taskForm, stage: e.target.value })}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-slate-800 focus:bg-white focus:outline-none focus:ring-2 focus:ring-rose-500"
+                >
+                  {WORKFLOW_STAGES.map(s => <option key={s} value={s}>{s}</option>)}
+                </select>
+                <p className="text-[11px] text-slate-500 mt-1">
+                  Normally leave as <b>New Inquiry</b>. For a walk-in customer who confirmed verbally,
+                  pick <b>Service &amp; Maintenance</b> — the Job Card button then appears straight away.
+                </p>
+              </div>
+
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-slate-700 font-semibold mb-1">Department</label>
                   <select
-                    value={taskForm.department}
+                    value={departmentForStage(taskForm.stage, taskForm.department)}
                     onChange={e => setTaskForm({ ...taskForm, department: e.target.value })}
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-slate-800 focus:bg-white focus:outline-none focus:ring-2 focus:ring-rose-500"
+                    disabled={PRODUCTION_STAGES_WITH_JOB_CARD.includes(taskForm.stage)}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-slate-800 focus:bg-white focus:outline-none focus:ring-2 focus:ring-rose-500 disabled:bg-slate-100 disabled:text-slate-500"
+                    title={PRODUCTION_STAGES_WITH_JOB_CARD.includes(taskForm.stage)
+                      ? 'Production stages always belong to the Production department'
+                      : undefined}
                   >
                     <option value="Sales">Sales</option>
                     <option value="Production">Production</option>

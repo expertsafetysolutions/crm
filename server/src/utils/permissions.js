@@ -10,8 +10,13 @@
  *   Module_Permissions: {
  *     quotation: { view: true, add: true,  edit: true,  delete: false },
  *     inventory: { view: true, add: true,  edit: true,  delete: false },
- *     jobcard:   { view: true, add: true,  edit: true,  delete: false }
+ *     jobcard:   { view: true, add: true,  edit: true,  delete: false },
+ *     taskstage: { view: true, add: true,  edit: true,  delete: false }
  *   }
+ *
+ * `taskstage` gates choosing a task's workflow stage directly (jumping straight to
+ * "Service & Maintenance" for a walk-in customer) rather than stepping one stage at a time. Only
+ * its `edit` action is consulted; the ordinary one-step advance stays open to everyone.
  *
  * Admin always has everything and ignores the stored map entirely. Staff with no map fall back to
  * ROLE_DEFAULTS, so existing users keep working without a migration.
@@ -21,7 +26,7 @@
  * out the intended users — while gating on inventory would hand every technician the stock ledger.
  */
 
-const MODULES = ['quotation', 'inventory', 'jobcard'];
+const MODULES = ['quotation', 'inventory', 'jobcard', 'taskstage'];
 const ACTIONS = ['view', 'add', 'edit', 'delete'];
 
 const NONE = { view: false, add: false, edit: false, delete: false };
@@ -36,12 +41,12 @@ function allModulesFull() {
 
 // Sensible starting point per existing role, used only when a staff member has no explicit map.
 const ROLE_DEFAULTS = {
-  admin: { quotation: FULL, inventory: FULL, jobcard: FULL },
-  sales: { quotation: ADD_EDIT, inventory: VIEW_ONLY, jobcard: VIEW_ONLY },
-  supervisor: { quotation: VIEW_ONLY, inventory: ADD_EDIT, jobcard: FULL },
-  production: { quotation: NONE, inventory: ADD_EDIT, jobcard: ADD_EDIT },
-  certification: { quotation: VIEW_ONLY, inventory: NONE, jobcard: VIEW_ONLY },
-  staff: { quotation: NONE, inventory: NONE, jobcard: NONE }
+  admin: { quotation: FULL, inventory: FULL, jobcard: FULL, taskstage: FULL },
+  sales: { quotation: ADD_EDIT, inventory: VIEW_ONLY, jobcard: VIEW_ONLY, taskstage: VIEW_ONLY },
+  supervisor: { quotation: VIEW_ONLY, inventory: ADD_EDIT, jobcard: FULL, taskstage: ADD_EDIT },
+  production: { quotation: NONE, inventory: ADD_EDIT, jobcard: ADD_EDIT, taskstage: ADD_EDIT },
+  certification: { quotation: VIEW_ONLY, inventory: NONE, jobcard: VIEW_ONLY, taskstage: VIEW_ONLY },
+  staff: { quotation: NONE, inventory: NONE, jobcard: NONE, taskstage: NONE }
 };
 
 function isAdmin(user) {

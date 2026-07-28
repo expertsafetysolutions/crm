@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, Loader2, Save, Shield, CheckCircle2, AlertTriangle,
-  FileText, Package, Users, Wrench
+  FileText, Package, Users, Wrench, Layers
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
@@ -19,7 +19,10 @@ import { useAuth } from '../context/AuthContext';
 const MODULE_META = {
   quotation: { label: 'Quotation', icon: FileText, hint: 'Create and send quotations, PIs and invoices' },
   inventory: { label: 'Inventory & Items', icon: Package, hint: 'Item master, stock inward, daily usage' },
-  jobcard: { label: 'Job Card & Challan', icon: Wrench, hint: 'Workshop inward, service entry, delivery challans' }
+  jobcard: { label: 'Job Card & Challan', icon: Wrench, hint: 'Workshop inward, service entry, delivery challans' },
+  // Only `edit` is consulted for this one — the ordinary one-step Advance stays open to everyone.
+  // The other three toggles are inert, kept because the grid is uniform across modules.
+  taskstage: { label: 'Task Stage Control', icon: Layers, hint: 'Set a task\'s stage directly (e.g. straight to Service for walk-in customers)' }
 };
 
 const ACTIONS = [

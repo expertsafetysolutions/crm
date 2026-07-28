@@ -8,7 +8,7 @@ const pushService = require('../services/pushService');
 const { authenticateToken } = require('./authRoutes');
 const { verifyStaffPassword, validatePasswordPolicy } = require('../utils/passwordUtils');
 const gstUtils = require('../utils/gstUtils');
-const { requirePermission, resolvePermissions, sanitizePermissions, MODULES, ACTIONS } = require('../utils/permissions');
+const { requirePermission, resolvePermissions, sanitizePermissions, can, MODULES, ACTIONS } = require('../utils/permissions');
 const quotationEngine = require('../services/quotationEngine');
 const conversionService = require('../services/conversionService');
 const inventoryService = require('../services/inventoryService');
@@ -1816,7 +1816,14 @@ router.patch('/tasks/:id', updateTaskHandler);
 router.put('/tasks/:id', updateTaskHandler);
 
 // Advance Task Workflow Stage
-router.put('/tasks/:id/stage', async (req, res) => {
+//
+// Stepping one stage forward stays open to any authenticated staff member, as it always has.
+// Choosing an arbitrary target stage is the privileged action — it can move work past the stages
+// that create quotations, or hand it to another department — so that form is gated on taskstage:edit.
+router.put('/tasks/:id/stage', (req, res, next) => {
+  if (!req.body.targetStage) return next();
+  return requirePermission('taskstage', 'edit')(req, res, next);
+}, async (req, res) => {
   try {
     const taskId = req.params.id;
     const result = await workflowEngine.advanceTaskStage(taskId, {
@@ -2053,13 +2060,30 @@ router.post('/sync/batch', async (req, res) => {
       return res.status(400).json({ error: 'Actions must be an array' });
     }
 
+    // Resolved once per batch rather than per action: a queue can hold many ADVANCE_STAGE items and
+    // the permission cannot change mid-flush.
+    let mayPickStage = null;
+    const canPickStage = async () => {
+      if (mayPickStage === null) {
+        const staff = await sheetsService.getStaffById(req.user?.staffId);
+        mayPickStage = can(resolvePermissions(staff, req.user?.role), 'taskstage', 'edit');
+      }
+      return mayPickStage;
+    };
+
     const syncResults = [];
     for (const item of actions) {
       try {
         if (item.type === 'ADVANCE_STAGE') {
+          // Drop an ungranted targetStage rather than rejecting the item — the queued work still
+          // advances one stage, which is what an ungranted user could have done online anyway.
+          // Failing here would strand the action in IndexedDB forever.
+          const targetStage = (item.payload.targetStage && await canPickStage())
+            ? item.payload.targetStage
+            : undefined;
           const resStage = await workflowEngine.advanceTaskStage(item.payload.taskId, {
             staffId: req.user.staffId,
-            targetStage: item.payload.targetStage,
+            targetStage,
             latLong: item.payload.latLong,
             remarks: item.payload.remarks,
             imageUrl: item.payload.imageUrl

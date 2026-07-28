@@ -37,7 +37,9 @@
       "Bash(node --check server/src/services/jobCardService.js)",
       "Bash(python -)",
       "Bash(node --check server/src/services/challanService.js)",
-      "Bash(node --check server/src/services/conversionService.js)"
+      "Bash(node --check server/src/services/conversionService.js)",
+      "Bash(npx vercel *)",
+      "Bash(node --check server/src/routes/apiRoutes.js)"
     ]
   }
 }

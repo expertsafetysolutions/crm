@@ -3039,10 +3039,6 @@ export default function AdminDashboard() {
         </div>
       </div>
 
-        </div>
-      </div>
-      {/* END COLLAPSIBLE HEADER BLOCK */}
-
       {/* OVERVIEW & STATS FRONT PAGE WITH THE 5 MENU CARDS */}
       {activeTab === 'OVERVIEW' && (
         <div className="space-y-6 animate-fadeIn">
@@ -3058,7 +3054,7 @@ export default function AdminDashboard() {
             <div className="space-y-3">
               {/* Card 1 */}
               <div
-                onClick={() => setExpandedOverviewModule(expandedOverviewModule === 'PIPELINE' ? null : 'PIPELINE')}
+                onClick={() => { const next = expandedOverviewModule === 'PIPELINE' ? null : 'PIPELINE'; setExpandedOverviewModule(next); if (next) setHeaderOpen(false); }}
                 className="group p-4 sm:p-5 rounded-2xl bg-white border border-slate-200 hover:border-rose-300 shadow-sm hover:shadow-md transition-all duration-200 flex items-center justify-between cursor-pointer select-none"
               >
                 <div className="flex items-center gap-4 min-w-0">
@@ -3089,7 +3085,7 @@ export default function AdminDashboard() {
 
               {/* Card 2 */}
               <div
-                onClick={() => setExpandedOverviewModule(expandedOverviewModule === 'STAFF' ? null : 'STAFF')}
+                onClick={() => { const next = expandedOverviewModule === 'STAFF' ? null : 'STAFF'; setExpandedOverviewModule(next); if (next) setHeaderOpen(false); }}
                 className="group p-4 sm:p-5 rounded-2xl bg-white border border-slate-200 hover:border-indigo-300 shadow-sm hover:shadow-md transition-all duration-200 flex items-center justify-between cursor-pointer select-none"
               >
                 <div className="flex items-center gap-4 min-w-0">
@@ -3120,7 +3116,7 @@ export default function AdminDashboard() {
 
               {/* Card 3 */}
               <div
-                onClick={() => setExpandedOverviewModule(expandedOverviewModule === 'CUSTOMERS' ? null : 'CUSTOMERS')}
+                onClick={() => { const next = expandedOverviewModule === 'CUSTOMERS' ? null : 'CUSTOMERS'; setExpandedOverviewModule(next); if (next) setHeaderOpen(false); }}
                 className="group p-4 sm:p-5 rounded-2xl bg-white border border-slate-200 hover:border-amber-300 shadow-sm hover:shadow-md transition-all duration-200 flex items-center justify-between cursor-pointer select-none"
               >
                 <div className="flex items-center gap-4 min-w-0">
@@ -3151,7 +3147,7 @@ export default function AdminDashboard() {
 
               {/* Card 4 */}
               <div
-                onClick={() => setExpandedOverviewModule(expandedOverviewModule === 'ATTENDANCE' ? null : 'ATTENDANCE')}
+                onClick={() => { const next = expandedOverviewModule === 'ATTENDANCE' ? null : 'ATTENDANCE'; setExpandedOverviewModule(next); if (next) setHeaderOpen(false); }}
                 className="group p-4 sm:p-5 rounded-2xl bg-white border border-slate-200 hover:border-emerald-300 shadow-sm hover:shadow-md transition-all duration-200 flex items-center justify-between cursor-pointer select-none"
               >
                 <div className="flex items-center gap-4 min-w-0">
@@ -3184,7 +3180,7 @@ export default function AdminDashboard() {
 
               {/* Card 5 */}
               <div
-                onClick={() => setExpandedOverviewModule(expandedOverviewModule === 'LOGS' ? null : 'LOGS')}
+                onClick={() => { const next = expandedOverviewModule === 'LOGS' ? null : 'LOGS'; setExpandedOverviewModule(next); if (next) setHeaderOpen(false); }}
                 className="group p-4 sm:p-5 rounded-2xl bg-white border border-slate-200 hover:border-teal-300 shadow-sm hover:shadow-md transition-all duration-200 flex items-center justify-between cursor-pointer select-none"
               >
                 <div className="flex items-center gap-4 min-w-0">
@@ -3216,6 +3212,10 @@ export default function AdminDashboard() {
           </div>
         </div>
       )}
+
+        </div>
+      </div>
+      {/* END COLLAPSIBLE HEADER BLOCK */}
 
       {/* Return to Overview Banner when inside any module */}
       {activeTab !== 'OVERVIEW' && (

@@ -121,6 +121,48 @@ const SYSTEM_PUMP_HOUSE_CHECKPOINTS = [
   { id: 'isolationValvesPosition', label: 'Isolation Valves Position', type: COLUMN_TYPES.CHECKPOINT }
 ];
 
+// ─── Workshop job card (inward inspection) ─────────────────────────────────────────────────────
+// A different job from the service report: this is the intake check when a customer's equipment
+// arrives at the workshop, so it carries the physical identity of each cylinder (EUID, serial,
+// cylinder number) that a site inspection has no need for, and its own accessory checklist.
+//
+// The authoritative checkpoint list lives server-side in Equipment_Category_Master so an admin can
+// add Foam or Clean Agent without a deploy. These entries are the seeded defaults and the fallback
+// when categories haven't loaded yet, kept here so the table/PDF renderers resolve columns through
+// the same engine as every other module.
+const JOB_CARD_IDENTITY_COLUMNS = [
+  { id: 'clientIdNo', label: 'Client ID No', type: COLUMN_TYPES.TEXT, emphasis: EMPHASIS.ID },
+  { id: 'itemName', label: 'Description', type: COLUMN_TYPES.TEXT, align: 'left', emphasis: EMPHASIS.STRONG },
+  { id: 'capacity', label: 'Capacity', type: COLUMN_TYPES.TEXT },
+  { id: 'euidNo', label: 'EUID No', type: COLUMN_TYPES.TEXT, emphasis: EMPHASIS.ID },
+  { id: 'serialNo', label: 'Serial No', type: COLUMN_TYPES.TEXT },
+  { id: 'cylinderNo', label: 'Cylinder No', type: COLUMN_TYPES.TEXT, emphasis: EMPHASIS.ID },
+  { id: 'mfgYear', label: 'MFG', type: COLUMN_TYPES.TEXT },
+  { id: 'lastHptDate', label: 'Last HP Test', type: COLUMN_TYPES.DATE }
+];
+
+const JOB_CARD_ABC_CHECKPOINTS = [
+  { id: 'controlValve', label: 'Control Valve', type: COLUMN_TYPES.CHECKPOINT },
+  { id: 'safetyPin', label: 'Safety Pin', type: COLUMN_TYPES.CHECKPOINT },
+  { id: 'pressureGauge', label: 'Pressure Gauge', type: COLUMN_TYPES.CHECKPOINT },
+  { id: 'valveHook', label: 'Valve Hook', type: COLUMN_TYPES.CHECKPOINT },
+  { id: 'body', label: 'Body', type: COLUMN_TYPES.CHECKPOINT },
+  { id: 'mainLabel', label: 'Main Label', type: COLUMN_TYPES.CHECKPOINT },
+  { id: 'hoseBelt', label: 'Hose Belt', type: COLUMN_TYPES.CHECKPOINT }
+];
+
+// CO2 has no pressure gauge — the charge is verified by weighing against the nameplate, which is
+// why Empty Weight is a checkpoint here and the measured value is captured alongside it.
+const JOB_CARD_CO2_CHECKPOINTS = [
+  { id: 'controlWheel', label: 'Control Wheel', type: COLUMN_TYPES.CHECKPOINT },
+  { id: 'lockRing', label: 'Lock Ring', type: COLUMN_TYPES.CHECKPOINT },
+  { id: 'safetyPin', label: 'Safety Pin', type: COLUMN_TYPES.CHECKPOINT },
+  { id: 'handle', label: 'Handle', type: COLUMN_TYPES.CHECKPOINT },
+  { id: 'handleGrip', label: 'Handle Grip', type: COLUMN_TYPES.CHECKPOINT },
+  { id: 'mainLabel', label: 'Main Label', type: COLUMN_TYPES.CHECKPOINT },
+  { id: 'emptyWeight', label: 'Empty Weight', type: COLUMN_TYPES.CHECKPOINT }
+];
+
 export const REPORT_TYPES = {
   FIRE_EXTINGUISHER: {
     id: 'FIRE_EXTINGUISHER',
@@ -206,10 +248,32 @@ export const REPORT_TYPES = {
       { id: 'itemName', label: 'Description', type: COLUMN_TYPES.TEXT, align: 'left' },
       REMARKS_COLUMN
     ]
+  },
+
+  // Lives in REPORT_TYPES so it resolves columns, collects NOT OK issues and builds blank rows
+  // through the same functions as every other module. Flagged internal so it never reaches the
+  // Service Report type picker — it is a workshop intake checklist, not a customer-facing report.
+  JOB_CARD_INWARD: {
+    id: 'JOB_CARD_INWARD',
+    label: 'Job Card — Inward Inspection',
+    shortLabel: 'Job Card Inward',
+    route: 'job-card-inward',
+    title: 'WORKSHOP INWARD INSPECTION',
+    internal: true,
+    numbering: { prefix: 'Expert/', period: '26-27', sequence: 'JC1' },
+    columns: [...JOB_CARD_IDENTITY_COLUMNS, ...JOB_CARD_ABC_CHECKPOINTS, REMARKS_COLUMN],
+    baseColumns: JOB_CARD_IDENTITY_COLUMNS,
+    defaultSubType: 'ABC',
+    subTypes: {
+      ABC: { id: 'ABC', label: 'ABC / DCP Type', checkpoints: JOB_CARD_ABC_CHECKPOINTS },
+      CO2: { id: 'CO2', label: 'CO2 Type', checkpoints: JOB_CARD_CO2_CHECKPOINTS }
+    }
   }
 };
 
-export const REPORT_TYPE_LIST = Object.values(REPORT_TYPES);
+// Internal modules are excluded so the settings editor and the report-type pickers keep listing
+// exactly the customer-facing report types; getReportType('JOB_CARD_INWARD') still resolves.
+export const REPORT_TYPE_LIST = Object.values(REPORT_TYPES).filter(t => !t.internal);
 
 export const DEFAULT_REPORT_TYPE = REPORT_TYPES.FIRE_EXTINGUISHER.id;
 
@@ -380,6 +444,24 @@ export function composeIssueSummary(issues = []) {
       return `• [${who}] ${i.checkpointLabel}: NOT OK${rec}`;
     })
     .join('\n');
+}
+
+/**
+ * Job-card inward columns for one equipment category, using the admin-maintained checkpoint list
+ * from Equipment_Category_Master when it has loaded and the built-in sub-type as the fallback.
+ *
+ * Categories are server data so a new one (Foam, Clean Agent) needs no deploy, but the renderers
+ * still want a column list in the shape resolveColumns() returns — this adapts one to the other.
+ */
+export function resolveJobCardColumns(category) {
+  const checkpoints = Array.isArray(category?.Checkpoints) && category.Checkpoints.length > 0
+    ? [...category.Checkpoints]
+        .sort((a, b) => (Number(a.order) || 0) - (Number(b.order) || 0))
+        .map(cp => ({ id: cp.id, label: cp.label || cp.id, type: COLUMN_TYPES.CHECKPOINT }))
+    : null;
+
+  if (!checkpoints) return resolveColumns(REPORT_TYPES.JOB_CARD_INWARD.id, {}, category?.Code || 'ABC');
+  return [...JOB_CARD_IDENTITY_COLUMNS, ...checkpoints, REMARKS_COLUMN];
 }
 
 /** Builds a blank row for a module, with every checkpoint defaulted to OK. Pass subTypeId for a

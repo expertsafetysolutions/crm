@@ -1,6 +1,7 @@
 const sheetsService = require('./sheetsService');
 const emailService = require('./emailService');
 const whatsappService = require('./whatsappService');
+const interactionLogger = require('./interactionLogger');
 const { mergeQuotationSettings } = require('./defaultQuotationSettings');
 
 /**
@@ -40,17 +41,33 @@ async function getSettings() {
   return mergeQuotationSettings(await sheetsService.getQuotationSettings('DEFAULT'));
 }
 
-/** dd/mm/yyyy for customer-facing text; documents store ISO yyyy-mm-dd. */
+/**
+ * dd/mm/yyyy for customer-facing text; documents store ISO yyyy-mm-dd.
+ *
+ * Sliced to 10 chars first because certificates store full ISO timestamps in the same fields that
+ * carry plain dates elsewhere — splitting one of those on '-' otherwise yields "28T01:14:43.155Z".
+ */
 function formatDateDMY(dateStr) {
   if (!dateStr) return '';
-  const [y, m, d] = String(dateStr).split('-');
+  const [y, m, d] = String(dateStr).slice(0, 10).split('-');
   return (y && m && d) ? `${d}/${m}/${y}` : String(dateStr);
 }
 
-/** "ABC 6Kg - 10 Nos, CO2 4.5Kg - 2 Nos" for item-summary variables. */
+/**
+ * "ABC 6Kg - 10 Nos, CO2 4.5Kg - 2 Nos" for item-summary variables.
+ *
+ * Certificate rows use camelCase (itemName/qty) and already carry their unit inside the qty string
+ * ("5 Nos."), so a numeric qty gets a unit appended and a pre-formatted one is passed through.
+ */
 function summarizeItems(lineItems) {
   return (lineItems || [])
-    .map(l => `${l.Item_Name || ''}${l.Qty ? ` - ${Number(l.Qty)} ${l.Unit || 'Nos'}` : ''}`.trim())
+    .map(l => {
+      const name = l.Item_Name || l.itemName || '';
+      const qty = l.Qty !== undefined ? l.Qty : l.qty;
+      if (qty === undefined || qty === null || qty === '') return name.trim();
+      const qtyText = Number.isFinite(Number(qty)) ? `${Number(qty)} ${l.Unit || l.unit || 'Nos'}` : String(qty);
+      return `${name} - ${qtyText}`.trim();
+    })
     .filter(Boolean)
     .join(', ');
 }
@@ -58,23 +75,36 @@ function summarizeItems(lineItems) {
 /**
  * Builds the substitution map shared by every template type.
  *
- * Works across quotations, proforma invoices and sales invoices: document-number and date fields
- * fall back across the three shapes so one template can serve any of them. Keys here must stay in
- * sync with TEMPLATE_VARIABLES in the settings UI, which is what admins pick from.
+ * Works across quotations, proforma invoices, sales invoices, delivery challans and certificates:
+ * document-number, date, party and amount fields fall back across every shape so one template can
+ * serve any of them. Keys here must stay in sync with TEMPLATE_VARIABLES in the settings UI, which
+ * is what admins pick from.
+ *
+ * Certificates are the awkward one — Document_Registry stores both casings of every field (see
+ * CLAUDE.md), so each certificate fallback needs its camelCase twin.
  */
 function buildVars(doc, extra = {}) {
-  const docNo = doc.Quote_No_Display || doc.Quote_No || doc.PI_No || doc.Invoice_No || '';
-  const docDate = doc.Created_At || doc.PI_Date || doc.Invoice_Date || '';
+  const docNo = doc.Quote_No_Display || doc.Quote_No || doc.PI_No || doc.Invoice_No
+    || doc.Challan_No || doc.Certificate_No || doc.certificateNo || '';
+  // Type-specific dates come first; Created_At is the catch-all, and on a quotation it is the only
+  // one present. A challan or certificate carries its own issue date, which is what the customer
+  // reads on the paper document.
+  const docDate = doc.PI_Date || doc.Invoice_Date || doc.Challan_Date
+    || doc.Issue_Date || doc.issueDate || doc.Created_At || '';
+
+  const customerName = doc.Customer_Name_Snapshot || doc.Customer_Name || doc.customerName || '';
+  // Challans total in Total_Amount; every priced document elsewhere uses Grand_Total.
+  const amount = doc.Grand_Total !== undefined ? doc.Grand_Total : doc.Total_Amount;
 
   return {
     // Customer
-    company_name: doc.Customer_Name_Snapshot || '',
-    customer_name: doc.Customer_Name_Snapshot || '',
+    company_name: customerName,
+    customer_name: customerName,
     contact_person: doc.Customer_Auth_Person_Snapshot || doc.Auth_Person || '',
-    customer_gstin: doc.Customer_GSTIN_Snapshot || '',
+    customer_gstin: doc.Customer_GSTIN_Snapshot || doc.GSTIN || doc.gstin || '',
     customer_email: doc.Customer_Email_Snapshot || '',
-    customer_phone: doc.Customer_Contact_Snapshot || '',
-    customer_address: doc.Customer_Address_Snapshot || '',
+    customer_phone: doc.Customer_Contact_Snapshot || doc.contact || '',
+    customer_address: doc.Customer_Address_Snapshot || doc.Address || doc.address || '',
 
     // Document identity
     document_no: docNo,
@@ -86,21 +116,22 @@ function buildVars(doc, extra = {}) {
     category: doc.Category || doc.Subject || '',
 
     // Money
-    amount: formatCurrency(doc.Grand_Total),
+    amount: formatCurrency(amount),
     taxable_amount: formatCurrency(doc.Subtotal),
     tax_amount: formatCurrency(doc.Total_GST),
     discount_amount: formatCurrency((Number(doc.Line_Discount_Total) || 0) + (Number(doc.Document_Level_Discount_Amt) || 0)),
     amount_paid: formatCurrency(doc.Amount_Paid || 0),
-    balance_due: formatCurrency((Number(doc.Grand_Total) || 0) - (Number(doc.Amount_Paid) || 0)),
+    balance_due: formatCurrency((Number(amount) || 0) - (Number(doc.Amount_Paid) || 0)),
 
-    // Dates
+    // Dates. valid_until serves both a quotation's expiry and a certificate's validity — one
+    // template variable, whichever of the two the document actually has.
     due_date: formatDateDMY(doc.Due_Date || doc.Expiry_Date),
-    valid_until: formatDateDMY(doc.Expiry_Date),
+    valid_until: formatDateDMY(doc.Expiry_Date || doc.Valid_Until || doc.validUntil),
     expiry_date: formatDateDMY(doc.Expiry_Date),
 
-    // Items + link
-    item_summary: summarizeItems(doc.Line_Items),
-    item_count: String((doc.Line_Items || []).length),
+    // Items + link. A certificate's rows live in itemsList, a challan's in Line_Items.
+    item_summary: summarizeItems(doc.Line_Items || doc.itemsList),
+    item_count: String((doc.Line_Items || doc.itemsList || []).length),
     view_link: doc.Portal_Guid ? quotePortalLink(doc) : '',
 
     // Assigned staff / seller
@@ -118,10 +149,10 @@ function buildVars(doc, extra = {}) {
  * with named variables mapped to the positional body params Meta expects, in the fixed order
  * customer_name, quote_no, amount, view_link. Templates must be authored in that parameter order.
  */
-async function dispatchTemplated({ doc, templateKey, recipientEmail, recipientPhone, attachments, settings, channel }) {
+async function dispatchTemplated({ doc, templateKey, recipientEmail, recipientPhone, attachments, settings, channel, extraVars, actor }) {
   const cfg = settings || await getSettings();
   const template = cfg.draft_templates?.[templateKey] || {};
-  const vars = buildVars(doc);
+  const vars = buildVars(doc, extraVars);
   // An explicit channel (from the per-channel Email/WhatsApp buttons) overrides the configured
   // dispatch_mode for this send only; it does not change the saved setting.
   const mode = channel || cfg.dispatch_mode || 'Email';
@@ -131,7 +162,18 @@ async function dispatchTemplated({ doc, templateKey, recipientEmail, recipientPh
 
   const results = [];
 
-  if (wantEmail) {
+  // Per-document email switch (Quotation Settings -> Email Templates). Checked here rather than in
+  // each route so it also governs the reminder crons, and reported as a normal per-channel failure
+  // so callers see WHY nothing went out instead of a silent no-op. An absent key means enabled.
+  if (wantEmail && cfg.email_enabled?.[templateKey] === false) {
+    results.push({
+      ok: false,
+      channel: 'Email',
+      recipient: recipientEmail || '',
+      disabled: true,
+      error: 'Email for this document type is switched off in Quotation Settings → Email Templates'
+    });
+  } else if (wantEmail) {
     const body = substitute(template.body, vars);
     results.push(await emailService.sendEmail(cfg.smtp_config, {
       to: recipientEmail,
@@ -162,6 +204,15 @@ async function dispatchTemplated({ doc, templateKey, recipientEmail, recipientPh
         bodyParams: [vars.customer_name, vars.quote_no, vars.amount, vars.view_link]
       }));
     }
+  }
+
+  // Auto-records what went out on the owning task's discussion timeline. Placed here, in the one
+  // funnel every send passes through, so each document type is covered without its own call site.
+  // Awaited but never allowed to fail the dispatch — the message has already left either way.
+  try {
+    await interactionLogger.logDispatch({ doc, templateKey, results, actor });
+  } catch (e) {
+    console.error('Dispatch timeline logging failed:', e.message);
   }
 
   return results;
@@ -215,7 +266,7 @@ async function resolveAttachments({ catalogIds, inline, settings }) {
  * `attachments` may be a ready-made nodemailer array (legacy callers) or a
  * { catalogIds, inline } picker payload from the builder.
  */
-async function sendQuotation(quotation, attachments, channel) {
+async function sendQuotation(quotation, attachments, channel, actor) {
   const settings = await getSettings();
 
   let resolved = attachments;
@@ -234,8 +285,93 @@ async function sendQuotation(quotation, attachments, channel) {
     recipientPhone: quotation.Customer_Contact_Snapshot,
     attachments: resolved && resolved.length ? resolved : undefined,
     settings,
-    channel
+    channel,
+    actor
   });
+}
+
+/**
+ * Proforma invoice / tax invoice dispatch.
+ *
+ * Same shape as sendQuotation, minus the portal: neither document has a Portal_Guid, so {view_link}
+ * is empty for them and their default templates do not use it. Both are send-on-demand only — there
+ * is deliberately no auto-send at issue time, because a wrong rate on an issued invoice is not
+ * something an un-sending can take back.
+ */
+async function sendSalesDocument(doc, templateKey, attachments, channel, extraVars, actor) {
+  const settings = await getSettings();
+
+  let resolved = attachments;
+  if (attachments && !Array.isArray(attachments)) {
+    resolved = await resolveAttachments({
+      catalogIds: attachments.catalogIds,
+      inline: attachments.inline,
+      settings
+    });
+  }
+
+  return dispatchTemplated({
+    doc,
+    templateKey,
+    recipientEmail: doc.Customer_Email_Snapshot,
+    recipientPhone: doc.Customer_Contact_Snapshot,
+    attachments: resolved && resolved.length ? resolved : undefined,
+    settings,
+    channel,
+    extraVars,
+    actor
+  });
+}
+
+function sendProformaInvoice(pi, attachments, channel, actor) {
+  return sendSalesDocument(pi, 'pi_email', attachments, channel, undefined, actor);
+}
+
+function sendSalesInvoice(invoice, attachments, channel, actor) {
+  return sendSalesDocument(invoice, 'invoice_email', attachments, channel, undefined, actor);
+}
+
+/**
+ * Delivery challan dispatch.
+ *
+ * A challan is built from a job card, and job cards only started snapshotting the customer's email
+ * recently — so the address is resolved from the live Customer_Master row when the snapshot is
+ * blank, which is every challan raised before that. `recipientEmail` is passed in by the route,
+ * which does that lookup; this only fills the template.
+ */
+function sendChallan(challan, { recipientEmail, attachments, channel, actor } = {}) {
+  return sendSalesDocument(
+    { ...challan, Customer_Email_Snapshot: recipientEmail || challan.Customer_Email_Snapshot || '' },
+    'challan_email',
+    attachments,
+    channel,
+    undefined,
+    actor
+  );
+}
+
+/**
+ * Certificate dispatch.
+ *
+ * Certificates live in Document_Registry with both casings of every field and carry no email of
+ * their own, so the route resolves the address from Customer_ID and passes it in. The verification
+ * link is the same public QR URL printed on the document, which is the most useful thing the mail
+ * can carry — it stays valid even if the attachment is lost.
+ */
+function sendCertificate(certificate, { recipientEmail, attachments, channel, actor } = {}) {
+  const guid = certificate.Verification_GUID || certificate.verificationGuid || '';
+  return sendSalesDocument(
+    { ...certificate, Customer_Email_Snapshot: recipientEmail || '' },
+    'certificate_email',
+    attachments,
+    channel,
+    {
+      certificate_type: certificate.Format_Type || certificate.formatType || 'Certificate',
+      certificate_no: certificate.Certificate_No || certificate.certificateNo || '',
+      verification_link: guid ? `${portalBaseUrl()}/api/verify-certificate/${guid}` : ''
+    },
+    actor
+  );
 }
 
 async function sendFollowUpReminder(quotation) {
@@ -269,6 +405,10 @@ module.exports = {
   dispatchTemplated,
   resolveAttachments,
   sendQuotation,
+  sendProformaInvoice,
+  sendSalesInvoice,
+  sendChallan,
+  sendCertificate,
   sendFollowUpReminder,
   sendPaymentDueReminder
 };

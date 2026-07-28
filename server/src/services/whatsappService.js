@@ -14,6 +14,8 @@
  * var NAMED by access_token_ref (default WHATSAPP_ACCESS_TOKEN) and never stored in Mongo.
  */
 
+const safeMode = require('./safeMode');
+
 function resolveToken(config) {
   const name = (config && config.access_token_ref) || 'WHATSAPP_ACCESS_TOKEN';
   return process.env[name] || '';
@@ -71,6 +73,8 @@ async function postToMeta(config, payload) {
  */
 async function sendTemplate(config, { to, templateName, languageCode = 'en', bodyParams = [], headerParams = [] }) {
   const recipient = normalizePhone(to);
+  // Checked before configuration: safe mode must win regardless of how WhatsApp is set up.
+  if (safeMode.isActive()) return safeMode.blockWhatsapp(recipient || to);
   if (!isConfigured(config)) {
     return { ok: false, channel: 'WhatsApp', recipient, error: 'WhatsApp Cloud API is not configured or is disabled in settings' };
   }
@@ -117,6 +121,7 @@ async function sendTemplate(config, { to, templateName, languageCode = 'en', bod
  */
 async function sendFreeformText(config, { to, body }) {
   const recipient = normalizePhone(to);
+  if (safeMode.isActive()) return safeMode.blockWhatsapp(recipient || to);
   if (!isConfigured(config)) {
     return { ok: false, channel: 'WhatsApp', recipient, error: 'WhatsApp Cloud API is not configured or is disabled in settings' };
   }

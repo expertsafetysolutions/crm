@@ -22,6 +22,10 @@ const QuotationSettingsPage = lazy(() => import('./pages/QuotationSettingsPage')
 const SalesDocumentsPage = lazy(() => import('./pages/SalesDocumentsPage'));
 const InventoryPage = lazy(() => import('./pages/InventoryPage'));
 const StaffPermissionsPage = lazy(() => import('./pages/StaffPermissionsPage'));
+const JobCardPage = lazy(() => import('./pages/JobCardPage'));
+const ChallanBuilderPage = lazy(() => import('./pages/ChallanBuilderPage'));
+const ChallanListPage = lazy(() => import('./pages/ChallanListPage'));
+const CustomerPriceListPage = lazy(() => import('./pages/CustomerPriceListPage'));
 
 // Keyed so switching report type (or new-vs-edit) remounts the page with fresh state, since
 // React Router otherwise reuses the same instance when only the URL params change.
@@ -36,6 +40,18 @@ function ServiceReportRoute() {
 function QuotationRoute() {
   const { quotationId } = useParams();
   return <QuotationBuilderPage key={quotationId || 'new'} />;
+}
+
+// Keyed for the same reason as the routes above: a technician moving from one job card to another
+// only changes the URL param, and without a key the previous card's item rows would persist.
+function JobCardRoute() {
+  const { taskId, jobCardId } = useParams();
+  return <JobCardPage key={jobCardId || taskId || 'new'} />;
+}
+
+function ChallanRoute() {
+  const { challanId, jobCardId } = useParams();
+  return <ChallanBuilderPage key={challanId || jobCardId || 'new'} />;
 }
 
 function RouteLoadingFallback() {
@@ -71,13 +87,20 @@ export default function App() {
   // The quotation/inventory pages render their own sticky header and action bar, so they hide the
   // app navbar the same way the certificate and settings pages do.
   const isQuotationPage = location.pathname.startsWith('/quotations') || location.pathname.startsWith('/inventory')
-    || location.pathname.startsWith('/sales-documents');
+    || location.pathname.startsWith('/sales-documents') || location.pathname.startsWith('/challans')
+    || location.pathname.startsWith('/price-list');
+  // The job card renders its own header and action bar so it hides the navbar too — but unlike the
+  // pages above it KEEPS the offline banner, because it is the one screen designed to be filled in
+  // a workshop with no signal and the pending-sync count is the technician's only proof their work
+  // is safe.
+  const isJobCardPage = location.pathname.startsWith('/job-card');
+  const hidesChrome = isCertificatePage || isSettingsPage || isQuotationPage || isJobCardPage;
 
   return (
     <DocSettingsProvider>
       <div className="min-h-screen bg-slate-50 text-slate-800 flex flex-col selection:bg-rose-500 selection:text-white">
-        {!isCertificatePage && !isSettingsPage && !isQuotationPage && <OfflineBanner />}
-        {!isCertificatePage && !isSettingsPage && !isQuotationPage && impersonatedStaff && (
+        {(!hidesChrome || isJobCardPage) && <OfflineBanner />}
+        {!hidesChrome && impersonatedStaff && (
           <div className="bg-gradient-to-r from-rose-600 via-indigo-600 to-emerald-600 text-white px-3 sm:px-4 py-1.5 shadow-md flex items-center justify-between gap-2 z-50 sticky top-0 animate-fadeIn border-b border-white/20">
             <div className="flex items-center gap-2 min-w-0">
               <span className="px-1.5 py-0.5 rounded-md bg-white/20 text-white font-extrabold text-[9px] tracking-wider uppercase shrink-0">
@@ -100,14 +123,14 @@ export default function App() {
             </button>
           </div>
         )}
-        {!isCertificatePage && !isSettingsPage && !isQuotationPage && (
+        {!hidesChrome && (
           <Navbar
             currentView={isViewingAdmin ? 'admin' : 'staff'}
             setCurrentView={handleSetCurrentView}
           />
         )}
 
-        <main className={(isCertificatePage || isSettingsPage || isQuotationPage) ? 'flex-1' : 'flex-1 pb-16'}>
+        <main className={hidesChrome ? 'flex-1' : 'flex-1 pb-16'}>
           <Suspense fallback={<RouteLoadingFallback />}>
             <Routes>
               {/* Typed service-report routes, one URL per report module */}
@@ -131,6 +154,14 @@ export default function App() {
               {/* PI / Sales Invoice register — the read side of the conversion pipeline */}
               <Route path="/sales-documents" element={<SalesDocumentsPage />} />
               <Route path="/settings/permissions" element={<StaffPermissionsPage />} />
+              {/* Workshop job card. Keyed so moving between cards remounts with fresh state. */}
+              <Route path="/job-card/task/:taskId" element={<JobCardRoute />} />
+              <Route path="/job-card/:jobCardId" element={<JobCardRoute />} />
+              {/* Delivery challan: register, and the builder that issues one from a job card. */}
+              <Route path="/challans" element={<ChallanListPage />} />
+              <Route path="/challans/new/:jobCardId" element={<ChallanRoute />} />
+              <Route path="/challans/:challanId" element={<ChallanRoute />} />
+              <Route path="/price-list" element={<CustomerPriceListPage />} />
               <Route path="/*" element={isViewingAdmin ? <AdminDashboard /> : <StaffDashboard />} />
             </Routes>
           </Suspense>

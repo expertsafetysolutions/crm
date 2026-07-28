@@ -7,6 +7,10 @@ const apiRouter = require('./routes/apiRoutes');
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+// Warns loudly at boot if MAIL_SAFE_MODE is set. Runs before anything else can send, and before
+// the request log starts, so the banner is the first thing in the output rather than buried.
+require('./services/safeMode').announceOnBoot();
+
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
@@ -515,66 +519,123 @@ function isAuthorizedCron(req) {
   return !process.env.CRON_SECRET || req.headers.authorization === `Bearer ${process.env.CRON_SECRET}`;
 }
 
-app.get('/api/cron/refilling-due-check', async (req, res) => {
-  if (!isAuthorizedCron(req)) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-  try {
-    const workflowEngine = require('./services/workflowEngine');
-    const result = await workflowEngine.generateRefillingDueTasks();
-    res.json({ success: true, ...result });
-  } catch (err) {
-    console.error('Refilling-due cron job error:', err);
-    res.status(500).json({ error: 'Refilling-due check failed' });
-  }
-});
+const reminderScheduler = require('./services/reminderScheduler');
 
-// Module D: fans out follow-up reminders for every quotation due today, and expires stale ones.
-app.get('/api/cron/quotation-followup-check', async (req, res) => {
+/**
+ * The four reminder jobs, each behind its own admin-configurable hour.
+ *
+ * `run` is the actual worker. Nothing here decides WHEN — that is reminderScheduler's job, driven
+ * by Quotation_Settings.reminder_schedule so the office can move a send time without a deploy.
+ */
+const REMINDER_JOBS = {
+  [reminderScheduler.JOBS.QUOTATION_FOLLOWUP]: {
+    label: 'Quotation follow-up reminders',
+    run: async () => {
+      const quotationCronService = require('./services/quotationCronService');
+      const quotationEngine = require('./services/quotationEngine');
+      // Expiry first: a quotation that lapsed overnight must not also get a reminder today.
+      const expired = await quotationEngine.expireStaleQuotations();
+      const reminders = await quotationCronService.runQuotationFollowUpReminders();
+      return { reminders, expired };
+    }
+  },
+  [reminderScheduler.JOBS.PAYMENT_DUE]: {
+    label: 'Invoice payment-due reminders',
+    run: () => require('./services/quotationCronService').runPaymentDueReminders()
+  },
+  [reminderScheduler.JOBS.REFILLING_DUE]: {
+    label: 'Refilling-due task generation',
+    run: () => require('./services/workflowEngine').generateRefillingDueTasks()
+  },
+  [reminderScheduler.JOBS.ANNUAL_PROSPECT]: {
+    label: 'Annual prospect task generation',
+    run: () => require('./services/quotationCronService').generateAnnualProspectTasks()
+  }
+};
+
+/**
+ * Runs one job if the clock (or an explicit force) says it should.
+ *
+ * Never throws: one failing job must not abort the others in the same tick, so the error is
+ * captured into the per-job result instead.
+ */
+async function runReminderJob(job, { force = false } = {}) {
+  const verdict = await reminderScheduler.isDueNow(job, { force });
+  if (!verdict.due) return { job, ran: false, ...verdict };
+
+  // Vercel retries a cron invocation on a non-2xx, and the Run-now button sits alongside it, so an
+  // unguarded hour could dispatch the same reminders twice. Forced runs skip the guard on purpose.
+  if (!force) {
+    const slot = await reminderScheduler.claimHourlySlot(job);
+    if (!slot.claimed) {
+      return { job, ran: false, reason: 'already-ran-this-hour', attempt: slot.attempt, ...verdict };
+    }
+  }
+
+  try {
+    const result = await REMINDER_JOBS[job].run();
+    return { job, ran: true, ...verdict, result };
+  } catch (err) {
+    console.error(`Reminder job ${job} failed:`, err);
+    return { job, ran: true, ok: false, ...verdict, error: err.message };
+  }
+}
+
+/**
+ * Hourly dispatcher — the single cron entry in vercel.json.
+ *
+ * Fires every hour and runs whichever jobs the admin scheduled for the current IST hour. This
+ * indirection is what makes the send time configurable at all: Vercel's schedule is baked into
+ * vercel.json at deploy time, but this endpoint reads the hour from the database on every tick.
+ */
+app.get('/api/cron/reminder-dispatch', async (req, res) => {
   if (!isAuthorizedCron(req)) return res.status(401).json({ error: 'Unauthorized' });
   try {
-    const quotationCronService = require('./services/quotationCronService');
-    const quotationEngine = require('./services/quotationEngine');
-    const expired = await quotationEngine.expireStaleQuotations();
-    const reminders = await quotationCronService.runQuotationFollowUpReminders();
-    res.json({ success: true, reminders, expired });
+    const results = [];
+    for (const job of Object.keys(REMINDER_JOBS)) {
+      results.push(await runReminderJob(job));
+    }
+    res.json({
+      success: true,
+      istHour: reminderScheduler.istHour(),
+      schedule: await reminderScheduler.getSchedule(),
+      results
+    });
   } catch (err) {
-    console.error('Quotation follow-up cron job error:', err);
-    res.status(500).json({ error: 'Quotation follow-up check failed' });
+    console.error('Reminder dispatch error:', err);
+    res.status(500).json({ error: 'Reminder dispatch failed' });
   }
 });
 
-// Module G: payment-due reminders at each configured offset around the invoice due date.
-app.get('/api/cron/payment-due-reminder-check', async (req, res) => {
-  if (!isAuthorizedCron(req)) return res.status(401).json({ error: 'Unauthorized' });
-  try {
-    const quotationCronService = require('./services/quotationCronService');
-    const result = await quotationCronService.runPaymentDueReminders();
-    res.json({ success: true, ...result });
-  } catch (err) {
-    console.error('Payment-due cron job error:', err);
-    res.status(500).json({ error: 'Payment-due check failed' });
-  }
-});
+/**
+ * The four original per-job URLs, kept as direct triggers.
+ *
+ * They now FORCE their job — anyone calling one of these explicitly wants it to run, not to be told
+ * it is the wrong hour. That keeps the Run-now button and any existing bookmark working, and means
+ * a stale vercel.json on an older deployment still does something sensible.
+ */
+const LEGACY_CRON_PATHS = {
+  '/api/cron/refilling-due-check': reminderScheduler.JOBS.REFILLING_DUE,
+  '/api/cron/quotation-followup-check': reminderScheduler.JOBS.QUOTATION_FOLLOWUP,
+  '/api/cron/payment-due-reminder-check': reminderScheduler.JOBS.PAYMENT_DUE,
+  '/api/cron/annual-prospect-check': reminderScheduler.JOBS.ANNUAL_PROSPECT
+};
 
-// Module F: generates annual renewal leads from quotations that never converted.
-app.get('/api/cron/annual-prospect-check', async (req, res) => {
-  if (!isAuthorizedCron(req)) return res.status(401).json({ error: 'Unauthorized' });
-  try {
-    const quotationCronService = require('./services/quotationCronService');
-    const result = await quotationCronService.generateAnnualProspectTasks();
-    res.json({ success: true, ...result });
-  } catch (err) {
-    console.error('Annual-prospect cron job error:', err);
-    res.status(500).json({ error: 'Annual-prospect check failed' });
-  }
-});
+for (const [path, job] of Object.entries(LEGACY_CRON_PATHS)) {
+  app.get(path, async (req, res) => {
+    if (!isAuthorizedCron(req)) return res.status(401).json({ error: 'Unauthorized' });
+    try {
+      res.json({ success: true, ...(await runReminderJob(job, { force: true })) });
+    } catch (err) {
+      console.error(`${job} cron job error:`, err);
+      res.status(500).json({ error: `${REMINDER_JOBS[job].label} failed` });
+    }
+  });
+}
 
-// Routes
-app.use('/api/auth', authRouter);
-app.use('/api', apiRouter);
-
-// Root endpoint check
+// Unauthenticated liveness probe. MUST stay above app.use('/api', apiRouter): apiRouter's first
+// middleware is authenticateToken, which answers 401 without calling next(), so a health route
+// registered after it is unreachable and every uptime monitor reads the API as down.
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'ONLINE',
@@ -582,6 +643,10 @@ app.get('/api/health', (req, res) => {
     timestamp: new Date().toISOString()
   });
 });
+
+// Routes
+app.use('/api/auth', authRouter);
+app.use('/api', apiRouter);
 
 const attendanceService = require('./services/attendanceService');
 

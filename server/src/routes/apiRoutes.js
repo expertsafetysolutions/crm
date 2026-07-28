@@ -12,28 +12,28 @@ const { requirePermission, resolvePermissions, sanitizePermissions, MODULES, ACT
 const quotationEngine = require('../services/quotationEngine');
 const conversionService = require('../services/conversionService');
 const inventoryService = require('../services/inventoryService');
+const jobCardService = require('../services/jobCardService');
+const equipmentCategoryService = require('../services/equipmentCategoryService');
+const challanService = require('../services/challanService');
+const priceListService = require('../services/priceListService');
+const interactionLogger = require('../services/interactionLogger');
 
 const router = express.Router();
 
 router.use(authenticateToken);
 
 // Auto-injects a system-generated entry into the company's remark timeline (Customer_Interactions)
-// on task lifecycle events (created / status changed / completed). Mirrors the shape of manually
-// logged remarks (POST /customer-interactions) so it renders in the same timeline UI, tagged with
-// System_Generated: true so it can be styled distinctly from staff-written remarks.
+// on task lifecycle events (created / status changed / completed). Delegates to interactionLogger,
+// which is the one place that writes these rows — the module-level events (material received,
+// challan issued, payment received…) go through the same service, so every automatic entry in the
+// timeline has an identical shape.
 async function logSystemTaskRemark({ customerId, taskId, remarkText, tag, staffId, staffName }) {
-  const nowMs = Date.now();
-  await sheetsService.insertRow('Customer_Interactions', {
-    Interaction_ID: `INT_${nowMs}`,
-    Created_At: nowMs,
-    Customer_ID: customerId || '',
-    Task_ID: taskId || '',
-    Timestamp: new Date().toISOString(),
-    Type: tag,
-    Staff_ID: staffId || 'SYSTEM',
-    Staff_Name: staffName || 'System',
-    Remarks: remarkText,
-    System_Generated: true
+  await interactionLogger.logEvent({
+    tag,
+    summary: remarkText,
+    taskId,
+    customerId,
+    actor: staffId ? { staffId, name: staffName } : null
   });
 }
 
@@ -159,6 +159,68 @@ router.get('/certificates', async (req, res) => {
   }
 });
 
+// Splits "Expert/26-27/R310" into { stem:'Expert/26-27', letters:'R', num:310 }.
+const parseCertificateNo = (value) => {
+  const raw = String(value || '').trim();
+  const cut = raw.lastIndexOf('/');
+  const stem = cut > 0 ? raw.slice(0, cut) : '';
+  const tail = cut > 0 ? raw.slice(cut + 1) : raw;
+  const m = tail.match(/^([A-Za-z]*)(\d+)$/);
+  return m ? { stem, letters: m[1], num: parseInt(m[2], 10) } : null;
+};
+
+/**
+ * Makes a certificate's number and verification GUID unique at the moment of saving.
+ *
+ * Both are minted in the browser — the number from a max+1 scan of whatever certificates that tab
+ * happened to load, the GUID from ~2.2 billion random values with no check at all. Two people
+ * generating certificates at the same time therefore get the same number, and a GUID collision is
+ * worse still: the public /verify-certificate page would show one customer's certificate under
+ * another's QR code.
+ *
+ * The client keeps its optimistic number so the user still sees one immediately and offline; the
+ * server just refuses to let two documents share one, and reports back what it actually used.
+ */
+const ensureUniqueCertificateIdentity = (payload, existing) => {
+  const out = { ...payload };
+  const reassigned = {};
+
+  const wantedNo = String(payload.Certificate_No || payload.certificateNo || '').trim();
+  const takenNo = existing.some(c =>
+    String(c.Certificate_No || c.certificateNo || '').trim().toLowerCase() === wantedNo.toLowerCase()
+  );
+
+  if (wantedNo && takenNo) {
+    const parsed = parseCertificateNo(wantedNo);
+    if (parsed) {
+      let max = parsed.num;
+      for (const c of existing) {
+        const p = parseCertificateNo(c.Certificate_No || c.certificateNo);
+        if (p && p.stem === parsed.stem && p.letters === parsed.letters && p.num > max) max = p.num;
+      }
+      const width = String(parsed.num).length;
+      const nextNo = `${parsed.stem}/${parsed.letters}${String(max + 1).padStart(width, '0')}`;
+      out.Certificate_No = nextNo;
+      out.certificateNo = nextNo;
+      out.certSequence = `${parsed.letters}${String(max + 1).padStart(width, '0')}`;
+      reassigned.certificateNo = { requested: wantedNo, assigned: nextNo };
+    }
+  }
+
+  const wantedGuid = String(payload.Verification_GUID || payload.verificationGuid || '').trim();
+  const takenGuid = existing.some(c =>
+    String(c.verificationGuid || c.Verification_GUID || '').trim().toLowerCase() === wantedGuid.toLowerCase()
+  );
+  if (!wantedGuid || takenGuid) {
+    const fresh = `ESS-VER-${require('crypto').randomBytes(6).toString('hex').toUpperCase()}`;
+    out.Verification_GUID = fresh;
+    out.verificationGuid = fresh;
+    reassigned.verificationGuid = { requested: wantedGuid, assigned: fresh };
+  }
+
+  return { payload: out, reassigned };
+};
+
 router.post('/certificates', async (req, res) => {
   try {
     if (req.user.role !== 'Admin') {
@@ -167,13 +229,52 @@ router.post('/certificates', async (req, res) => {
         return res.status(403).json({ error: 'You do not have permission to generate certificates. Contact Admin.' });
       }
     }
+
+    const existing = await sheetsService.getAllCertificates();
+    const { payload, reassigned } = ensureUniqueCertificateIdentity(req.body, existing);
+    if (Object.keys(reassigned).length > 0) {
+      console.warn('Certificate identity reassigned on save:', JSON.stringify(reassigned));
+    }
+
     const newCert = await sheetsService.insertRow('Document_Registry', {
-      ...req.body,
-      Created_By: req.body.Created_By || req.user.name || req.user.staffId || 'Unknown',
-      Created_By_Role: req.body.Created_By_Role || req.user.role || 'Staff',
-      Created_At: req.body.Created_At || new Date().toISOString()
+      ...payload,
+      Created_By: payload.Created_By || req.user.name || req.user.staffId || 'Unknown',
+      Created_By_Role: payload.Created_By_Role || req.user.role || 'Staff',
+      Created_At: payload.Created_At || new Date().toISOString()
     });
-    res.json({ success: true, certificate: newCert });
+
+    // Close the loop back to the source challan. Delivery_Challan_Master.Linked_Certificate_Guids
+    // was initialised but never written, so the challan register could not tell whether the
+    // certificates it was raised for actually exist. Best-effort: a failed back-link must never
+    // lose the certificate itself, which is already saved above.
+    const sourceChallanId = payload.Source_Challan_ID || payload.sourceChallanId;
+    const savedGuid = newCert?.verificationGuid || newCert?.Verification_GUID || payload.verificationGuid;
+    if (sourceChallanId && savedGuid) {
+      try {
+        const challan = await sheetsService.getChallanById(sourceChallanId);
+        const linked = Array.isArray(challan?.Linked_Certificate_Guids) ? challan.Linked_Certificate_Guids : [];
+        if (challan && !linked.includes(savedGuid)) {
+          await sheetsService.updateRow('Delivery_Challan_Master', 'Challan_ID', sourceChallanId, {
+            Linked_Certificate_Guids: [...linked, savedGuid]
+          });
+        }
+      } catch (linkErr) {
+        console.error('Certificate saved but challan back-link failed:', linkErr.message);
+      }
+    }
+
+    await interactionLogger.logEvent({
+      tag: interactionLogger.EVENT_TAG.CERTIFICATE_GENERATED,
+      summary: `${payload.Certificate_No || payload.certificateNo || '(no number)'}`
+        + ` | ${payload.formatType || payload.Format_Type || 'Certificate'}`
+        + `${payload.validUntil || payload.Valid_Until ? ` | valid until ${payload.validUntil || payload.Valid_Until}` : ''}`,
+      taskId: payload.Task_ID || payload.taskId,
+      customerId: payload.Customer_ID || payload.customerId,
+      actor: req.user
+    });
+
+    // `reassigned` lets the page correct what it is showing when the server had to step in.
+    res.json({ success: true, certificate: newCert, reassigned });
   } catch (err) {
     console.error('Save certificate failed:', err);
     res.status(500).json({ error: 'Failed to save certificate record' });
@@ -1993,6 +2094,39 @@ router.post('/sync/batch', async (req, res) => {
           };
           await sheetsService.insertRow('Activity_Logs', logEntry);
           syncResults.push({ id: item.id, status: 'SUCCESS', result: logEntry });
+        } else if (item.type === 'JOB_CARD_ITEM_UPSERT') {
+          // Insert-or-$set keyed on Job_Card_Item_ID, so the same queued entry replayed after a
+          // partial flush converges on one row instead of duplicating the cylinder.
+          const saved = await jobCardService.upsertJobCardItemOffline(item.payload, req.user);
+          syncResults.push({ id: item.id, status: 'SUCCESS', result: saved });
+        } else if (item.type === 'JOB_CARD_PARTS_ADD') {
+          // Deduped on parts[].lineId inside addPartsToItem, so a replay is a no-op rather than
+          // fitting the same safety pin twice.
+          const saved = await jobCardService.addPartsToItem(
+            item.payload.jobCardItemId,
+            item.payload.parts,
+            req.user,
+            { consumeStock: item.payload.consumeStock !== false, date: item.payload.date }
+          );
+          syncResults.push({ id: item.id, status: 'SUCCESS', result: saved });
+        } else if (item.type === 'JOB_CARD_RECHECK') {
+          const saved = await jobCardService.applyRecheck(
+            item.payload.jobCardId,
+            item.payload.resolutions,
+            req.user
+          );
+          syncResults.push({ id: item.id, status: 'SUCCESS', result: saved });
+        } else {
+          // Terminal else — REQUIRED. Without it an unrecognised type falls through the whole
+          // chain, never enters syncResults, and the client therefore never removes it from
+          // IndexedDB (flushOfflineQueue only deletes on SUCCESS or terminal). The entry would
+          // then re-POST on every flush forever. Reported as terminal so the client can drain it.
+          syncResults.push({
+            id: item.id,
+            status: 'ERROR',
+            terminal: true,
+            error: `Unsupported offline action type: ${item.type}`
+          });
         }
       } catch (innerErr) {
         console.error('Batch sync item error:', innerErr);
@@ -3091,7 +3225,7 @@ router.post('/quotations/:id/dispatch', requirePermission('quotation','edit'), a
         inline: req.body.inlineAttachments
       };
     }
-    const results = await dispatchService.sendQuotation(quotation, attachments, channel);
+    const results = await dispatchService.sendQuotation(quotation, attachments, channel, req.user);
     const updated = await quotationEngine.markDispatched(req.params.id, results, req.user);
 
     let followUpTask = null;
@@ -3218,7 +3352,7 @@ router.get('/analytics/order-lost', async (req, res) => {
 });
 
 // --- CONVERSION PIPELINE (Module G) ---
-router.post('/quotations/:id/convert-to-pi', async (req, res) => {
+router.post('/quotations/:id/convert-to-pi', requirePermission('quotation','add'), async (req, res) => {
   try {
     res.json(await conversionService.convertQuotationToPI(req.params.id, req.user));
   } catch (err) {
@@ -3227,7 +3361,7 @@ router.post('/quotations/:id/convert-to-pi', async (req, res) => {
   }
 });
 
-router.post('/quotations/:id/convert-to-invoice', async (req, res) => {
+router.post('/quotations/:id/convert-to-invoice', requirePermission('quotation','add'), async (req, res) => {
   try {
     res.json(await conversionService.convertQuotationToInvoice(req.params.id, req.user));
   } catch (err) {
@@ -3255,7 +3389,7 @@ router.get('/proforma-invoices/:id', async (req, res) => {
   }
 });
 
-router.post('/proforma-invoices/:id/convert-to-invoice', async (req, res) => {
+router.post('/proforma-invoices/:id/convert-to-invoice', requirePermission('quotation','add'), async (req, res) => {
   try {
     res.json(await conversionService.convertPIToInvoice(req.params.id, req.user));
   } catch (err) {
@@ -3263,6 +3397,89 @@ router.post('/proforma-invoices/:id/convert-to-invoice', async (req, res) => {
     res.status(400).json({ error: err.message || 'Conversion failed' });
   }
 });
+
+/**
+ * Shared dispatch handler for PI and Sales Invoice.
+ *
+ * Mirrors POST /quotations/:id/dispatch: same channel resolution, the same up-front refusal when
+ * every targeted channel is unreachable, and the same per-channel result array. Kept generic
+ * because the two documents differ only in collection, id field and template.
+ *
+ * Send-on-demand only — nothing here fires automatically at issue time. An invoice that went out
+ * with a wrong rate cannot be un-sent, so a human presses the button.
+ */
+function makeSalesDocDispatchHandler({ collection, idField, load, sender, label }) {
+  return async (req, res) => {
+    try {
+      const doc = await load(req.params.id);
+      if (!doc) return res.status(404).json({ error: `${label} not found` });
+
+      const channel = req.body.channel;
+      if (channel && !['Email', 'WhatsApp', 'Both'].includes(channel)) {
+        return res.status(400).json({ error: 'channel must be Email, WhatsApp or Both' });
+      }
+
+      const settings = await quotationEngine.getSettings();
+      const mode = channel || settings.dispatch_mode || 'Email';
+      const wantEmail = mode === 'Email' || mode === 'Both';
+      const wantWhatsapp = mode === 'WhatsApp' || mode === 'Both';
+
+      const missing = [];
+      if (wantEmail && !doc.Customer_Email_Snapshot) missing.push('email address');
+      if (wantWhatsapp && !doc.Customer_Contact_Snapshot) missing.push('mobile number');
+      if (missing.length && missing.length === [wantEmail, wantWhatsapp].filter(Boolean).length) {
+        return res.status(400).json({
+          error: `This customer has no ${missing.join(' or ')} on file. Add one on the customer record and try again.`
+        });
+      }
+
+      let attachments;
+      if (Array.isArray(req.body.attachments)) {
+        attachments = req.body.attachments;
+      } else if (req.body.catalogIds || req.body.inlineAttachments) {
+        attachments = { catalogIds: req.body.catalogIds, inline: req.body.inlineAttachments };
+      }
+
+      const dispatchService = require('../services/dispatchService');
+      const results = await dispatchService[sender](doc, attachments, channel, req.user);
+
+      const log = Array.isArray(doc.Dispatch_Log) ? doc.Dispatch_Log : [];
+      const entries = results.map(r => ({
+        channel: r.channel,
+        status: r.ok ? 'sent' : 'failed',
+        error: r.ok ? '' : String(r.error || ''),
+        recipient: r.recipient || '',
+        timestamp: new Date().toISOString()
+      }));
+      const update = { Dispatch_Log: [...log, ...entries], Last_Dispatched_At: new Date().toISOString() };
+      if (entries.some(e => e.status === 'sent')) update.Sent_At = new Date().toISOString();
+
+      const updated = await sheetsService.updateRow(collection, idField, req.params.id, update);
+      res.json({ document: updated, dispatchResults: results });
+    } catch (err) {
+      console.error(`POST /${label} dispatch error:`, err);
+      res.status(500).json({ error: err.message || `Failed to dispatch ${label}` });
+    }
+  };
+}
+
+router.post('/proforma-invoices/:id/dispatch', requirePermission('quotation', 'edit'),
+  makeSalesDocDispatchHandler({
+    collection: 'PI_Master',
+    idField: 'PI_ID',
+    load: id => sheetsService.getPIById(id),
+    sender: 'sendProformaInvoice',
+    label: 'Proforma Invoice'
+  }));
+
+router.post('/sales-invoices/:id/dispatch', requirePermission('quotation', 'edit'),
+  makeSalesDocDispatchHandler({
+    collection: 'Sales_Invoice_Master',
+    idField: 'Invoice_ID',
+    load: id => sheetsService.getSalesInvoiceById(id),
+    sender: 'sendSalesInvoice',
+    label: 'Sales Invoice'
+  }));
 
 router.get('/sales-invoices', async (req, res) => {
   try {
@@ -3283,12 +3500,483 @@ router.get('/sales-invoices/:id', async (req, res) => {
   }
 });
 
-router.post('/sales-invoices/:id/record-payment', async (req, res) => {
+router.post('/sales-invoices/:id/record-payment', requirePermission('quotation','edit'), async (req, res) => {
   try {
     res.json(await conversionService.recordPayment(req.params.id, req.body, req.user));
   } catch (err) {
     console.error('POST /record-payment error:', err);
     res.status(400).json({ error: err.message || 'Failed to record payment' });
+  }
+});
+
+// --- WORKSHOP JOB CARD ---
+// Route order matters: Express matches in registration order, so every literal path below must be
+// declared before the '/job-cards/:id' pattern or the param route swallows it. Same precedent as
+// '/items/recycle-bin' sitting above '/items/:id'.
+
+router.get('/equipment-categories', requirePermission('jobcard','view'), async (req, res) => {
+  try {
+    res.json(await equipmentCategoryService.getCategories({ includeInactive: req.query.includeInactive === 'true' }));
+  } catch (err) {
+    console.error('GET /equipment-categories error:', err);
+    res.status(500).json({ error: 'Failed to fetch equipment categories' });
+  }
+});
+
+router.post('/equipment-categories', async (req, res) => {
+  try {
+    if (req.user.role !== 'Admin') return res.status(403).json({ error: 'Admin access required' });
+    res.json(await equipmentCategoryService.createCategory(req.body, req.user));
+  } catch (err) {
+    console.error('POST /equipment-categories error:', err);
+    res.status(400).json({ error: err.message || 'Failed to create equipment category' });
+  }
+});
+
+router.put('/equipment-categories/:id', async (req, res) => {
+  try {
+    if (req.user.role !== 'Admin') return res.status(403).json({ error: 'Admin access required' });
+    res.json(await equipmentCategoryService.updateCategory(req.params.id, req.body, req.user));
+  } catch (err) {
+    console.error('PUT /equipment-categories error:', err);
+    res.status(400).json({ error: err.message || 'Failed to update equipment category' });
+  }
+});
+
+router.get('/job-cards', requirePermission('jobcard','view'), async (req, res) => {
+  try {
+    let cards = await sheetsService.getAllJobCards();
+    const { taskId, customerId, status } = req.query;
+    if (taskId) cards = cards.filter(c => c.Task_ID === taskId);
+    if (customerId) cards = cards.filter(c => c.Customer_ID === customerId);
+    if (status) cards = cards.filter(c => c.Status === status);
+    res.json(cards.sort((a, b) => (b.Created_At_Ms || 0) - (a.Created_At_Ms || 0)));
+  } catch (err) {
+    console.error('GET /job-cards error:', err);
+    res.status(500).json({ error: 'Failed to fetch job cards' });
+  }
+});
+
+router.get('/job-cards/lookup-hpt', requirePermission('jobcard','view'), async (req, res) => {
+  try {
+    const { customerId, euidNo, cylinderNo, serialNo, clientIdNo } = req.query;
+    res.json(await jobCardService.resolveLastHpTestDate(customerId, { euidNo, cylinderNo, serialNo, clientIdNo }));
+  } catch (err) {
+    console.error('GET /job-cards/lookup-hpt error:', err);
+    res.status(500).json({ error: 'Failed to look up hydro-test history' });
+  }
+});
+
+router.get('/job-cards/by-task/:taskId', requirePermission('jobcard','view'), async (req, res) => {
+  try {
+    const found = await jobCardService.getJobCardByTask(req.params.taskId);
+    // 404 is the signal the client uses to decide Create vs Open, so it is expected, not an error.
+    if (!found) return res.status(404).json({ error: 'No job card for this task' });
+    res.json(found);
+  } catch (err) {
+    console.error('GET /job-cards/by-task error:', err);
+    res.status(500).json({ error: 'Failed to fetch job card' });
+  }
+});
+
+router.post('/job-cards', requirePermission('jobcard','add'), async (req, res) => {
+  try {
+    res.json(await jobCardService.createJobCard(req.body, req.user));
+  } catch (err) {
+    console.error('POST /job-cards error:', err);
+    res.status(400).json({ error: err.message || 'Failed to create job card' });
+  }
+});
+
+router.put('/job-cards/items/:itemId', requirePermission('jobcard','edit'), async (req, res) => {
+  try {
+    res.json(await jobCardService.updateJobCardItem(req.params.itemId, req.body, req.user));
+  } catch (err) {
+    console.error('PUT /job-cards/items error:', err);
+    res.status(400).json({ error: err.message || 'Failed to update item' });
+  }
+});
+
+router.delete('/job-cards/items/:itemId', requirePermission('jobcard','delete'), async (req, res) => {
+  try {
+    res.json({ success: await jobCardService.deleteJobCardItem(req.params.itemId) });
+  } catch (err) {
+    console.error('DELETE /job-cards/items error:', err);
+    res.status(400).json({ error: err.message || 'Failed to delete item' });
+  }
+});
+
+router.post('/job-cards/items/:itemId/parts', requirePermission('jobcard','edit'), async (req, res) => {
+  try {
+    const { parts, consumeStock, date } = req.body;
+    res.json(await jobCardService.addPartsToItem(req.params.itemId, parts, req.user, {
+      consumeStock: consumeStock !== false,
+      date
+    }));
+  } catch (err) {
+    console.error('POST /job-cards/items/parts error:', err);
+    res.status(400).json({ error: err.message || 'Failed to add parts' });
+  }
+});
+
+router.delete('/job-cards/items/:itemId/parts/:lineId', requirePermission('jobcard','edit'), async (req, res) => {
+  try {
+    res.json(await jobCardService.removePartFromItem(req.params.itemId, req.params.lineId, req.user));
+  } catch (err) {
+    console.error('DELETE /job-cards/items/parts error:', err);
+    res.status(400).json({ error: err.message || 'Failed to remove part' });
+  }
+});
+
+router.get('/job-cards/:id', requirePermission('jobcard','view'), async (req, res) => {
+  try {
+    const found = await jobCardService.getJobCardFull(req.params.id);
+    if (!found) return res.status(404).json({ error: 'Job card not found' });
+    res.json(found);
+  } catch (err) {
+    console.error('GET /job-cards/:id error:', err);
+    res.status(500).json({ error: 'Failed to fetch job card' });
+  }
+});
+
+router.post('/job-cards/:id/items', requirePermission('jobcard','add'), async (req, res) => {
+  try {
+    const rows = Array.isArray(req.body) ? req.body : req.body.items;
+    res.json(await jobCardService.addJobCardItems(req.params.id, rows, req.user));
+  } catch (err) {
+    console.error('POST /job-cards/items error:', err);
+    res.status(400).json({ error: err.message || 'Failed to add items' });
+  }
+});
+
+router.get('/job-cards/:id/pending-rechecks', requirePermission('jobcard','view'), async (req, res) => {
+  try {
+    res.json(await jobCardService.getPendingRechecks(req.params.id));
+  } catch (err) {
+    console.error('GET /job-cards/pending-rechecks error:', err);
+    res.status(500).json({ error: 'Failed to fetch pending rechecks' });
+  }
+});
+
+router.post('/job-cards/:id/recheck', requirePermission('jobcard','edit'), async (req, res) => {
+  try {
+    const resolutions = Array.isArray(req.body) ? req.body : req.body.resolutions;
+    res.json(await jobCardService.applyRecheck(req.params.id, resolutions, req.user));
+  } catch (err) {
+    console.error('POST /job-cards/recheck error:', err);
+    res.status(400).json({ error: err.message || 'Failed to record recheck' });
+  }
+});
+
+router.post('/job-cards/:id/complete', requirePermission('jobcard','edit'), async (req, res) => {
+  try {
+    res.json(await jobCardService.completeService(req.params.id, req.user));
+  } catch (err) {
+    console.error('POST /job-cards/complete error:', err);
+    // 409 carries the unresolved inward issues so the client can reopen the recheck modal on them.
+    if (err.statusCode === 409) {
+      return res.status(409).json({ error: err.message, pendingRechecks: err.pendingRechecks });
+    }
+    res.status(400).json({ error: err.message || 'Failed to complete job card' });
+  }
+});
+
+router.get('/job-cards/:id/standby', requirePermission('jobcard','view'), async (req, res) => {
+  try {
+    res.json(await jobCardService.getPendingStandby(req.params.id));
+  } catch (err) {
+    console.error('GET /job-cards/standby error:', err);
+    res.status(400).json({ error: err.message || 'Failed to fetch standby units' });
+  }
+});
+
+router.post('/job-cards/:id/standby', requirePermission('jobcard','edit'), async (req, res) => {
+  try {
+    const units = Array.isArray(req.body) ? req.body : req.body.units;
+    res.json(await jobCardService.issueStandby(req.params.id, units, req.user));
+  } catch (err) {
+    console.error('POST /job-cards/standby error:', err);
+    res.status(400).json({ error: err.message || 'Failed to issue standby units' });
+  }
+});
+
+router.post('/job-cards/:id/standby/return', requirePermission('jobcard','edit'), async (req, res) => {
+  try {
+    const euids = Array.isArray(req.body) ? req.body : req.body.euids;
+    res.json(await jobCardService.returnStandby(req.params.id, euids, req.user));
+  } catch (err) {
+    console.error('POST /job-cards/standby/return error:', err);
+    res.status(400).json({ error: err.message || 'Failed to record standby return' });
+  }
+});
+
+router.post('/job-cards/:id/generate-challan', requirePermission('jobcard','add'), async (req, res) => {
+  try {
+    const { itemIds, challanDate } = req.body || {};
+    res.json(await challanService.generateChallanDraft(req.params.id, { itemIds, challanDate }, req.user));
+  } catch (err) {
+    console.error('POST /job-cards/generate-challan error:', err);
+    if (err.statusCode === 409) {
+      return res.status(409).json({ error: err.message, pendingRechecks: err.pendingRechecks });
+    }
+    res.status(400).json({ error: err.message || 'Failed to generate challan draft' });
+  }
+});
+
+// --- DELIVERY CHALLAN ---
+// '/challans/suggest-no' is registered before '/challans/:id' so the param route cannot swallow it.
+
+router.get('/challans', requirePermission('jobcard','view'), async (req, res) => {
+  try {
+    let rows = await sheetsService.getAllChallans();
+    const { status, customerId, jobCardId } = req.query;
+    if (status) rows = rows.filter(c => c.Status === status);
+    if (customerId) rows = rows.filter(c => c.Customer_ID === customerId);
+    if (jobCardId) rows = rows.filter(c => c.Job_Card_ID === jobCardId);
+    res.json(rows.sort((a, b) => (b.Created_At_Ms || 0) - (a.Created_At_Ms || 0)));
+  } catch (err) {
+    console.error('GET /challans error:', err);
+    res.status(500).json({ error: 'Failed to fetch challans' });
+  }
+});
+
+router.get('/challans/suggest-no', requirePermission('jobcard','view'), async (req, res) => {
+  try {
+    res.json({ suggestion: await challanService.suggestNextChallanNo() });
+  } catch (err) {
+    console.error('GET /challans/suggest-no error:', err);
+    res.status(500).json({ error: 'Failed to suggest a challan number' });
+  }
+});
+
+router.get('/challans/:id', requirePermission('jobcard','view'), async (req, res) => {
+  try {
+    const challan = await sheetsService.getChallanById(req.params.id);
+    if (!challan) return res.status(404).json({ error: 'Challan not found' });
+    res.json(challan);
+  } catch (err) {
+    console.error('GET /challans/:id error:', err);
+    res.status(500).json({ error: 'Failed to fetch challan' });
+  }
+});
+
+router.put('/challans/:id', requirePermission('jobcard','edit'), async (req, res) => {
+  try {
+    res.json(await challanService.updateChallanDraft(req.params.id, req.body, req.user));
+  } catch (err) {
+    console.error('PUT /challans/:id error:', err);
+    res.status(400).json({ error: err.message || 'Failed to update challan' });
+  }
+});
+
+router.post('/challans/:id/issue', requirePermission('jobcard','edit'), async (req, res) => {
+  try {
+    res.json(await challanService.issueChallan(req.params.id, req.body, req.user));
+  } catch (err) {
+    console.error('POST /challans/:id/issue error:', err);
+    // A duplicate number is a warning the user can override, not a hard failure — 409 carries the
+    // conflicting document so the UI can show what it clashes with.
+    if (err.statusCode === 409) {
+      return res.status(409).json({ error: err.message, duplicateOf: err.duplicateOf });
+    }
+    res.status(400).json({ error: err.message || 'Failed to issue challan' });
+  }
+});
+
+// Gated on the quotation module, not jobcard: this is the point money is created, and a workshop
+// technician who may raise a challan should not thereby be able to raise a tax invoice.
+router.post('/challans/:id/convert-to-invoice', requirePermission('quotation','add'), async (req, res) => {
+  try {
+    res.json(await challanService.convertChallanToInvoice(req.params.id, req.body || {}, req.user));
+  } catch (err) {
+    console.error('POST /challans/convert-to-invoice error:', err);
+    if (err.statusCode === 409) {
+      return res.status(409).json({ error: err.message, unpricedLines: err.unpricedLines });
+    }
+    res.status(400).json({ error: err.message || 'Failed to create invoice' });
+  }
+});
+
+/**
+ * Email address for a document that does not snapshot one. Prefers the snapshot (frozen at issue
+ * time, which is the value the rest of the pipeline treats as authoritative) and only falls back to
+ * the live Customer_Master row when it is blank — which is every challan and every certificate
+ * raised before those snapshots existed.
+ */
+async function resolveCustomerEmail(snapshotEmail, customerId) {
+  if (snapshotEmail) return snapshotEmail;
+  if (!customerId) return '';
+  const customers = await sheetsService.getAllCustomers();
+  const match = customers.find(c => String(c.Customer_ID || '').trim().toLowerCase()
+    === String(customerId).trim().toLowerCase());
+  return match?.Email || '';
+}
+
+/** Appends a dispatch attempt to any document's Dispatch_Log. Shared by challan + certificate. */
+async function recordDispatchAttempt(collection, idField, idValue, existingLog, results) {
+  const entries = results.map(r => ({
+    channel: r.channel,
+    status: r.ok ? 'sent' : 'failed',
+    error: r.ok ? '' : String(r.error || ''),
+    recipient: r.recipient || '',
+    timestamp: new Date().toISOString()
+  }));
+  const update = {
+    Dispatch_Log: [...(Array.isArray(existingLog) ? existingLog : []), ...entries],
+    Last_Dispatched_At: new Date().toISOString()
+  };
+  return sheetsService.updateRow(collection, idField, idValue, update);
+}
+
+// Emails an ISSUED challan to the customer. A draft is refused: the number is typed by hand at
+// issue time, so a draft has no number on it and would reach the customer as a blank reference.
+router.post('/challans/:id/dispatch', requirePermission('jobcard', 'edit'), async (req, res) => {
+  try {
+    const challan = await sheetsService.getChallanById(req.params.id);
+    if (!challan) return res.status(404).json({ error: 'Challan not found' });
+    if (challan.Status !== 'Issued') {
+      return res.status(400).json({ error: 'Only an issued challan can be emailed — issue it with its challan-book number first' });
+    }
+
+    const recipientEmail = await resolveCustomerEmail(challan.Customer_Email_Snapshot, challan.Customer_ID);
+    if (!recipientEmail) {
+      return res.status(400).json({ error: 'This customer has no email address on file. Add one on the customer record and try again.' });
+    }
+
+    const dispatchService = require('../services/dispatchService');
+    const results = await dispatchService.sendChallan(challan, {
+      recipientEmail,
+      attachments: req.body.inlineAttachments ? { inline: req.body.inlineAttachments } : undefined,
+      channel: 'Email',
+      actor: req.user
+    });
+
+    const updated = await recordDispatchAttempt('Delivery_Challan_Master', 'Challan_ID', req.params.id, challan.Dispatch_Log, results);
+    res.json({ document: updated, dispatchResults: results });
+  } catch (err) {
+    console.error('POST /challans/:id/dispatch error:', err);
+    res.status(500).json({ error: err.message || 'Failed to email challan' });
+  }
+});
+
+// Emails a certificate. Keyed on the verification GUID, the same identifier the public QR page and
+// PUT/DELETE /certificates/:guid use.
+router.post('/certificates/:guid/dispatch', async (req, res) => {
+  try {
+    if (req.user.role !== 'Admin') {
+      const staff = await sheetsService.getStaffById(req.user.staffId);
+      if (!staff || !staff.Can_Access_Certificates) {
+        return res.status(403).json({ error: 'You do not have permission to send certificates. Contact Admin.' });
+      }
+    }
+
+    const cert = await sheetsService.getCertificateByGuid(req.params.guid);
+    if (!cert) return res.status(404).json({ error: 'Certificate not found' });
+    const raw = cert.toObject ? cert.toObject() : cert;
+    if (raw.Is_Deleted) return res.status(410).json({ error: 'This certificate has been revoked and cannot be sent' });
+
+    const recipientEmail = await resolveCustomerEmail(
+      raw.Customer_Email || raw.customerEmail,
+      raw.Customer_ID || raw.customerId
+    );
+    if (!recipientEmail) {
+      return res.status(400).json({ error: 'This customer has no email address on file. Add one on the customer record and try again.' });
+    }
+
+    const dispatchService = require('../services/dispatchService');
+    const results = await dispatchService.sendCertificate(raw, {
+      recipientEmail,
+      // The certificate PDF is rendered in the browser by html2canvas, exactly like the quotation
+      // PDF, so the page posts the bytes with the send rather than the server re-rendering it.
+      attachments: req.body.inlineAttachments ? { inline: req.body.inlineAttachments } : undefined,
+      channel: 'Email',
+      actor: req.user
+    });
+
+    // Same key fallback as PUT /certificates/:guid — older rows were written under the PascalCase
+    // spelling. A failed log write must never lose a mail that has already gone out, so the
+    // results are returned either way.
+    let updated = await recordDispatchAttempt('Document_Registry', 'verificationGuid', req.params.guid, raw.Dispatch_Log, results);
+    if (!updated) {
+      updated = await recordDispatchAttempt('Document_Registry', 'Verification_GUID', req.params.guid, raw.Dispatch_Log, results);
+    }
+    res.json({ document: updated || raw, dispatchResults: results });
+  } catch (err) {
+    console.error('POST /certificates/:guid/dispatch error:', err);
+    res.status(500).json({ error: err.message || 'Failed to email certificate' });
+  }
+});
+
+router.get('/challans/:id/certificate-prefill', requirePermission('jobcard','view'), async (req, res) => {
+  try {
+    res.json(await challanService.buildCertificatePrefill(req.params.id, req.query.formatType));
+  } catch (err) {
+    console.error('GET /challans/certificate-prefill error:', err);
+    res.status(400).json({ error: err.message || 'Failed to build certificate prefill' });
+  }
+});
+
+router.post('/challans/:id/pod', requirePermission('jobcard','edit'), async (req, res) => {
+  try {
+    res.json(await challanService.recordPOD(req.params.id, req.body || {}, req.user));
+  } catch (err) {
+    console.error('POST /challans/pod error:', err);
+    // 409 carries the un-returned loaner units so the app can list exactly what is still out.
+    if (err.statusCode === 409) {
+      return res.status(409).json({ error: err.message, pendingStandby: err.pendingStandby });
+    }
+    res.status(400).json({ error: err.message || 'Failed to record proof of delivery' });
+  }
+});
+
+router.post('/challans/:id/cancel', requirePermission('jobcard','delete'), async (req, res) => {
+  try {
+    res.json(await challanService.cancelChallan(req.params.id, req.body?.reason, req.user));
+  } catch (err) {
+    console.error('POST /challans/:id/cancel error:', err);
+    res.status(400).json({ error: err.message || 'Failed to cancel challan' });
+  }
+});
+
+// --- CUSTOMER PRICE LIST ---
+// Builds itself from dispatched quotations and raised invoices; the routes below are for viewing
+// and for the manual corrections that override them.
+
+router.get('/price-list/resolve', requirePermission('quotation','view'), async (req, res) => {
+  try {
+    const itemIds = String(req.query.itemIds || '').split(',').map(s => s.trim()).filter(Boolean);
+    res.json(await priceListService.resolveRates(req.query.customerId, itemIds));
+  } catch (err) {
+    console.error('GET /price-list/resolve error:', err);
+    res.status(500).json({ error: 'Failed to resolve rates' });
+  }
+});
+
+router.get('/price-list/:customerId', requirePermission('quotation','view'), async (req, res) => {
+  try {
+    res.json(await priceListService.getPriceList(req.params.customerId));
+  } catch (err) {
+    console.error('GET /price-list error:', err);
+    res.status(500).json({ error: 'Failed to fetch price list' });
+  }
+});
+
+router.put('/price-list/:customerId/:itemId', requirePermission('quotation','edit'), async (req, res) => {
+  try {
+    const { rate, locked, itemName } = req.body || {};
+    res.json(await priceListService.setManualPrice(req.params.customerId, req.params.itemId, { rate, locked, itemName }, req.user));
+  } catch (err) {
+    console.error('PUT /price-list error:', err);
+    res.status(400).json({ error: err.message || 'Failed to save price' });
+  }
+});
+
+router.delete('/price-list/:priceId', requirePermission('quotation','delete'), async (req, res) => {
+  try {
+    res.json({ success: await priceListService.deletePrice(req.params.priceId) });
+  } catch (err) {
+    console.error('DELETE /price-list error:', err);
+    res.status(400).json({ error: err.message || 'Failed to delete price' });
   }
 });
 

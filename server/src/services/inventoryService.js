@@ -134,9 +134,25 @@ async function deductForInvoice(invoice, actor) {
     }
   }
 
+  const shortfalls = results.filter(r => r.wentNegative);
+
+  // Only a shortfall reaches the timeline. A normal deduction is bookkeeping the office does not
+  // need narrated; stock going negative is a problem someone has to act on.
+  if (shortfalls.length > 0) {
+    const interactionLogger = require('./interactionLogger');
+    await interactionLogger.logEvent({
+      tag: interactionLogger.EVENT_TAG.STOCK_SHORT,
+      summary: `${shortfalls.length} item(s) short on invoice ${invoice.Invoice_No || invoice.Invoice_ID}`
+        + ` | ${shortfalls.map(s => `${s.itemName} (${s.balanceAfter})`).join(', ')}`,
+      taskId: invoice.Task_ID,
+      customerId: invoice.Customer_ID,
+      actor
+    });
+  }
+
   return {
     deductedCount: results.filter(r => !r.error).length,
-    shortfalls: results.filter(r => r.wentNegative),
+    shortfalls,
     results
   };
 }

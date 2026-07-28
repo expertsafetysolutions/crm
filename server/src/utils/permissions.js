@@ -1,5 +1,5 @@
 /**
- * Per-staff module permissions for the quotation and inventory modules.
+ * Per-staff module permissions for the quotation, inventory and job card modules.
  *
  * The existing codebase gates routes with ad-hoc `req.user.role !== 'Admin'` checks, which is
  * all-or-nothing. These modules need finer control — e.g. a store-keeper who may add and edit
@@ -9,14 +9,19 @@
  *
  *   Module_Permissions: {
  *     quotation: { view: true, add: true,  edit: true,  delete: false },
- *     inventory: { view: true, add: true,  edit: true,  delete: false }
+ *     inventory: { view: true, add: true,  edit: true,  delete: false },
+ *     jobcard:   { view: true, add: true,  edit: true,  delete: false }
  *   }
  *
  * Admin always has everything and ignores the stored map entirely. Staff with no map fall back to
  * ROLE_DEFAULTS, so existing users keep working without a migration.
+ *
+ * `jobcard` is its own module rather than reusing one of the other two: the technicians who fill
+ * job cards are Production staff, who default to `quotation: NONE` — gating on quotation would lock
+ * out the intended users — while gating on inventory would hand every technician the stock ledger.
  */
 
-const MODULES = ['quotation', 'inventory'];
+const MODULES = ['quotation', 'inventory', 'jobcard'];
 const ACTIONS = ['view', 'add', 'edit', 'delete'];
 
 const NONE = { view: false, add: false, edit: false, delete: false };
@@ -24,14 +29,19 @@ const VIEW_ONLY = { view: true, add: false, edit: false, delete: false };
 const ADD_EDIT = { view: true, add: true, edit: true, delete: false };
 const FULL = { view: true, add: true, edit: true, delete: true };
 
+/** Full access to every module. Derived from MODULES so adding one can't leave Admin behind. */
+function allModulesFull() {
+  return MODULES.reduce((acc, mod) => { acc[mod] = FULL; return acc; }, {});
+}
+
 // Sensible starting point per existing role, used only when a staff member has no explicit map.
 const ROLE_DEFAULTS = {
-  admin: { quotation: FULL, inventory: FULL },
-  sales: { quotation: ADD_EDIT, inventory: VIEW_ONLY },
-  supervisor: { quotation: VIEW_ONLY, inventory: ADD_EDIT },
-  production: { quotation: NONE, inventory: ADD_EDIT },
-  certification: { quotation: VIEW_ONLY, inventory: NONE },
-  staff: { quotation: NONE, inventory: NONE }
+  admin: { quotation: FULL, inventory: FULL, jobcard: FULL },
+  sales: { quotation: ADD_EDIT, inventory: VIEW_ONLY, jobcard: VIEW_ONLY },
+  supervisor: { quotation: VIEW_ONLY, inventory: ADD_EDIT, jobcard: FULL },
+  production: { quotation: NONE, inventory: ADD_EDIT, jobcard: ADD_EDIT },
+  certification: { quotation: VIEW_ONLY, inventory: NONE, jobcard: VIEW_ONLY },
+  staff: { quotation: NONE, inventory: NONE, jobcard: NONE }
 };
 
 function isAdmin(user) {
@@ -41,7 +51,7 @@ function isAdmin(user) {
 /** Resolves the effective permission map for a staff record. */
 function resolvePermissions(staff, roleFromToken) {
   const role = String(staff?.Role || roleFromToken || '').trim().toLowerCase();
-  if (role === 'admin') return { quotation: FULL, inventory: FULL };
+  if (role === 'admin') return allModulesFull();
 
   const defaults = ROLE_DEFAULTS[role] || ROLE_DEFAULTS.staff;
   const stored = staff?.Module_Permissions;
@@ -92,7 +102,7 @@ function requirePermission(moduleName, action) {
   return async (req, res, next) => {
     try {
       if (isAdmin(req.user)) {
-        req.permissions = { quotation: FULL, inventory: FULL };
+        req.permissions = allModulesFull();
         return next();
       }
 

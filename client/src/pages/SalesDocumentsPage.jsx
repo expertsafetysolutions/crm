@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  ArrowLeft, Search, FileText, Loader2, ReceiptIndianRupee, AlertTriangle, CheckCircle2
+  ArrowLeft, Search, FileText, Loader2, ReceiptIndianRupee, AlertTriangle, CheckCircle2, Mail
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import RecordPaymentModal from '../components/RecordPaymentModal';
@@ -22,6 +22,15 @@ const TABS = [
   { id: 'pi', label: 'Proforma Invoices', endpoint: '/api/proforma-invoices', idKey: 'PI_ID', noKey: 'PI_No', dateKey: 'PI_Date' }
 ];
 
+/** Most recent Email entry in a document's Dispatch_Log, or null if it has never been sent. */
+function lastEmailSend(row) {
+  const log = Array.isArray(row.Dispatch_Log) ? row.Dispatch_Log : [];
+  for (let i = log.length - 1; i >= 0; i--) {
+    if (log[i].channel === 'Email') return log[i];
+  }
+  return null;
+}
+
 export default function SalesDocumentsPage() {
   const navigate = useNavigate();
   const { token } = useAuth();
@@ -34,8 +43,18 @@ export default function SalesDocumentsPage() {
   const [payTarget, setPayTarget] = useState(null);
   const [busyId, setBusyId] = useState('');
   const [flash, setFlash] = useState(null);
+  // Per-document email switches from Quotation Settings. Absent === on, matching the server.
+  const [emailEnabled, setEmailEnabled] = useState({});
 
   const active = TABS.find(t => t.id === tab);
+  const canEmail = emailEnabled[tab === 'pi' ? 'pi_email' : 'invoice_email'] !== false;
+
+  useEffect(() => {
+    fetch('/api/quotation-settings', { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => (r.ok ? r.json() : null))
+      .then(s => setEmailEnabled(s?.email_enabled || {}))
+      .catch(() => {});
+  }, [token]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -100,6 +119,37 @@ export default function SalesDocumentsPage() {
       if (data.inventoryResult?.shortfalls?.length) {
         showFlash('warn', `Invoice created, but ${data.inventoryResult.shortfalls.length} item(s) are short on stock.`);
       }
+      await load();
+    } catch (e) {
+      showFlash('err', e.message);
+    } finally {
+      setBusyId('');
+    }
+  };
+
+  /**
+   * Send-on-demand only. A resend is confirmed rather than blocked — a customer losing the mail is
+   * a real case, but sending the same invoice twice by a stray tap is not.
+   */
+  const sendEmail = async (row) => {
+    const id = row[active.idKey];
+    const previous = lastEmailSend(row);
+    if (previous?.status === 'sent'
+      && !window.confirm(`${row[active.noKey]} was already emailed to ${previous.recipient}. Send it again?`)) return;
+
+    setBusyId(id);
+    try {
+      const res = await fetch(`${active.endpoint}/${id}/dispatch`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channel: 'Email' })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Send failed');
+
+      const emailResult = (data.dispatchResults || []).find(r => r.channel === 'Email');
+      if (emailResult?.ok) showFlash('ok', `${row[active.noKey]} emailed to ${emailResult.recipient}.`);
+      else showFlash('err', emailResult?.error || 'The email could not be sent.');
       await load();
     } catch (e) {
       showFlash('err', e.message);
@@ -199,7 +249,9 @@ export default function SalesDocumentsPage() {
                 <MobileCard key={r[active.idKey]} row={r} tab={tab} active={active}
                   busy={busyId === r[active.idKey]}
                   onConvert={() => convertPI(r)}
-                  onPay={() => setPayTarget(r)} />
+                  onPay={() => setPayTarget(r)}
+                  canEmail={canEmail}
+                  onSend={() => sendEmail(r)} />
               ))}
             </div>
 
@@ -257,8 +309,11 @@ export default function SalesDocumentsPage() {
                             </td>
                           )}
                           <td className="px-4 py-2.5 text-right whitespace-nowrap">
-                            <RowAction row={r} tab={tab} busy={busyId === id}
-                              onConvert={() => convertPI(r)} onPay={() => setPayTarget(r)} />
+                            <div className="inline-flex items-center gap-1.5">
+                              <SendEmailButton row={r} busy={busyId === id} enabled={canEmail} onSend={() => sendEmail(r)} />
+                              <RowAction row={r} tab={tab} busy={busyId === id}
+                                onConvert={() => convertPI(r)} onPay={() => setPayTarget(r)} />
+                            </div>
                           </td>
                         </tr>
                       );
@@ -279,6 +334,40 @@ export default function SalesDocumentsPage() {
         />
       )}
     </div>
+  );
+}
+
+/**
+ * Emails the document to the customer.
+ *
+ * Hidden entirely when the document type's email is switched off in settings — the office turned
+ * the feature off, so the control should not be in their way. When it IS on but unsendable (no
+ * address on file) it stays visible and disabled with the reason in the tooltip, because that is a
+ * data gap the user can go and fix.
+ */
+function SendEmailButton({ row, busy, enabled = true, onSend }) {
+  if (!enabled) return null;
+
+  const previous = lastEmailSend(row);
+  const sent = previous?.status === 'sent';
+  const noEmail = !row.Customer_Email_Snapshot;
+
+  return (
+    <button
+      onClick={onSend}
+      disabled={busy || noEmail}
+      title={noEmail
+        ? 'No email address on this customer record'
+        : sent ? `Last sent ${new Date(previous.timestamp).toLocaleString('en-IN')} to ${previous.recipient}` : 'Email this document to the customer'}
+      className={`px-2.5 py-1.5 text-xs font-bold rounded-lg border inline-flex items-center gap-1 ${
+        noEmail ? 'border-slate-200 text-slate-300 cursor-not-allowed'
+          : sent ? 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+          : 'border-slate-200 text-slate-700 hover:bg-slate-50'
+      }`}
+    >
+      <Mail className="w-3.5 h-3.5" />
+      {sent ? 'Resend' : 'Send'}
+    </button>
   );
 }
 
@@ -310,7 +399,7 @@ function RowAction({ row, tab, busy, onConvert, onPay }) {
   );
 }
 
-function MobileCard({ row, tab, active, busy, onConvert, onPay }) {
+function MobileCard({ row, tab, active, busy, onConvert, onPay, onSend, canEmail }) {
   const overdue = isChasable(row) && (daysPastDue(row.Due_Date) ?? -1) > 0;
   const meta = tab === 'invoices' ? paymentStatusMeta(row.Payment_Status) : docStatusMeta(row.Status);
   return (
@@ -338,7 +427,8 @@ function MobileCard({ row, tab, active, busy, onConvert, onPay }) {
         </div>
       )}
 
-      <div className="mt-2">
+      <div className="mt-2 flex items-center gap-2">
+        <SendEmailButton row={row} busy={busy} enabled={canEmail} onSend={onSend} />
         <RowAction row={row} tab={tab} busy={busy} onConvert={onConvert} onPay={onPay} />
       </div>
     </div>

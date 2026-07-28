@@ -32,7 +32,12 @@
       "Bash(npx web-push *)",
       "Bash(npm install *)",
       "Bash(curl -s -o /dev/null http://localhost:5000/api/health)",
-      "Bash(node tests/tmpSnapshotCheck.js)"
+      "Bash(node tests/tmpSnapshotCheck.js)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:5000/api/health)",
+      "Bash(node --check server/src/services/jobCardService.js)",
+      "Bash(python -)",
+      "Bash(node --check server/src/services/challanService.js)",
+      "Bash(node --check server/src/services/conversionService.js)"
     ]
   }
 }

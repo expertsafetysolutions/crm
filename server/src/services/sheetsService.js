@@ -33,7 +33,17 @@ const models = {
   Inventory_Master: createModel('Inventory_Master'),
   Stock_Transactions: createModel('Stock_Transactions'),
   Counter_Master: createModel('Counter_Master'),
-  Media_Store: createModel('Media_Store')
+  Media_Store: createModel('Media_Store'),
+
+  // Workshop job card. Items live in their own collection rather than as an array on the header:
+  // updateRow() only supports $set, so multi-day, multi-device part fitting against an array would
+  // be a read-modify-write and two technicians (or an offline queue draining after a live write)
+  // would silently clobber each other. One document per cylinder confines every write to one row.
+  Job_Card_Master: createModel('Job_Card_Master'),
+  Job_Card_Item: createModel('Job_Card_Item'),
+  Delivery_Challan_Master: createModel('Delivery_Challan_Master'),
+  Customer_Price_List: createModel('Customer_Price_List'),
+  Equipment_Category_Master: createModel('Equipment_Category_Master')
 };
 
 class MongoService {
@@ -431,13 +441,72 @@ class MongoService {
   }
   async getStockTransactions() { return this.getTab('Stock_Transactions'); }
 
+  async getAllJobCards() { return this.getTab('Job_Card_Master'); }
+  async getJobCardById(jobCardId) {
+    const cards = await this.getAllJobCards();
+    return cards.find(c => c.Job_Card_ID === jobCardId) || null;
+  }
+  // One task carries at most one job card, so this doubles as the uniqueness check on create.
+  async getJobCardByTask(taskId) {
+    if (!taskId) return null;
+    const target = String(taskId).trim().toLowerCase();
+    const cards = await this.getAllJobCards();
+    return cards.find(c => String(c.Task_ID || '').trim().toLowerCase() === target) || null;
+  }
+  async getAllJobCardItems() { return this.getTab('Job_Card_Item'); }
+  async getJobCardItems(jobCardId) {
+    const rows = await this.getAllJobCardItems();
+    return rows
+      .filter(r => r.Job_Card_ID === jobCardId)
+      .sort((a, b) => (Number(a.Sr_No) || 0) - (Number(b.Sr_No) || 0));
+  }
+  async getJobCardItemById(itemId) {
+    const rows = await this.getAllJobCardItems();
+    return rows.find(r => r.Job_Card_Item_ID === itemId) || null;
+  }
+
+  async getAllChallans() { return this.getTab('Delivery_Challan_Master'); }
+  async getChallanById(challanId) {
+    const rows = await this.getAllChallans();
+    return rows.find(c => c.Challan_ID === challanId) || null;
+  }
+  async getChallansByJobCard(jobCardId) {
+    const rows = await this.getAllChallans();
+    return rows.filter(c => c.Job_Card_ID === jobCardId);
+  }
+
+  async getCustomerPriceList(customerId) {
+    const rows = await this.getTab('Customer_Price_List');
+    if (!customerId) return rows;
+    const target = String(customerId).trim().toLowerCase();
+    return rows.filter(r => String(r.Customer_ID || '').trim().toLowerCase() === target);
+  }
+
+  async getEquipmentCategories() { return this.getTab('Equipment_Category_Master'); }
+
   // Atomic per-key sequence used for customer-facing document numbers (quotations, PIs,
   // invoices). $inc inside findOneAndUpdate is the only safe way to hand out gap-free numbers
   // here — computing "max existing + 1" from getTab() would race under concurrent requests and
   // could issue the same number twice.
-  async getNextSequence(counterKey) {
+  //
+  // `seedIfNew` is the high-water mark to start a BRAND NEW counter from. It exists because a
+  // counter key is derived from the admin-configurable prefix: edit the prefix and the old key is
+  // abandoned, a fresh one starts at zero, and the next document re-issues a number that is already
+  // on a customer's invoice. Seeding a new counter from the highest number already issued makes a
+  // prefix change safe. The seed is applied via $setOnInsert, so it only ever affects creation and
+  // two concurrent callers still cannot both take the same value.
+  async getNextSequence(counterKey, { seedIfNew = 0 } = {}) {
     await this.connect();
     const Model = models['Counter_Master'];
+
+    if (seedIfNew > 0) {
+      await Model.updateOne(
+        { Counter_Key: counterKey },
+        { $setOnInsert: { Counter_Key: counterKey, Current_Value: seedIfNew } },
+        { upsert: true }
+      );
+    }
+
     const result = await Model.findOneAndUpdate(
       { Counter_Key: counterKey },
       { $inc: { Current_Value: 1 } },

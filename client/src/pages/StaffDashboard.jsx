@@ -63,8 +63,17 @@ import {
   Tag as TagIcon,
   Check,
   Key,
-  Award
+  Award,
+  Wrench
 } from 'lucide-react';
+
+// The production stages during which a customer's equipment is physically in the workshop, and so
+// the only stages where a job card makes sense. Must match PRODUCTION_STAGES in workflowEngine.js.
+const PRODUCTION_STAGES_WITH_JOB_CARD = [
+  'Material Arrangement / Internal Work',
+  'Pickup/Delivery',
+  'Service & Maintenance'
+];
 
 const REMARK_TAGS = [
   'Call',
@@ -81,12 +90,38 @@ const REMARK_TAGS = [
   'Certification'
 ];
 
-// Distinct badge colors for auto-generated task lifecycle remarks (see System_Generated remarks
-// inserted by the server on task create/status-change) — falls back to the caller's default style.
+// Distinct badge colors for auto-generated remarks — every System_Generated row the server writes:
+// task lifecycle, module events, and outbound email/WhatsApp. Anything unlisted (including the
+// hand-picked tags in REMARK_TAGS above) falls back to the caller's default style.
+// Keys must match interactionLogger.EVENT_TAG / TAG on the server.
 const SYSTEM_REMARK_BADGE_STYLES = {
+  // Task lifecycle
   'NEW TASK CREATED': 'bg-blue-100 text-blue-800 border border-blue-200',
   'TASK STATUS UPDATED': 'bg-amber-100 text-amber-800 border border-amber-200',
-  'TASK COMPLETED': 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+  'TASK COMPLETED': 'bg-emerald-100 text-emerald-800 border border-emerald-200',
+  // Outbound messages
+  'Email': 'bg-sky-100 text-sky-800 border border-sky-200',
+  'Whatsapp': 'bg-green-100 text-green-800 border border-green-200',
+  // Workshop
+  'Material Received': 'bg-orange-100 text-orange-800 border border-orange-200',
+  'Work In Progress': 'bg-amber-100 text-amber-800 border border-amber-200',
+  'Recheck Done': 'bg-yellow-100 text-yellow-800 border border-yellow-200',
+  'Standby Issued': 'bg-slate-100 text-slate-700 border border-slate-200',
+  'Standby Returned': 'bg-slate-100 text-slate-700 border border-slate-200',
+  'Service Complete': 'bg-emerald-100 text-emerald-800 border border-emerald-200',
+  // Dispatch
+  'Challan Generated': 'bg-indigo-100 text-indigo-800 border border-indigo-200',
+  'Challan Issued': 'bg-indigo-100 text-indigo-800 border border-indigo-200',
+  'Delivered': 'bg-violet-100 text-violet-800 border border-violet-200',
+  'Certificate Generated': 'bg-teal-100 text-teal-800 border border-teal-200',
+  // Sales
+  'Quotation Generated': 'bg-blue-100 text-blue-800 border border-blue-200',
+  'Order Confirmed': 'bg-cyan-100 text-cyan-800 border border-cyan-200',
+  'PI Generated': 'bg-purple-100 text-purple-800 border border-purple-200',
+  'Invoice Generated': 'bg-purple-100 text-purple-800 border border-purple-200',
+  'Payment Received': 'bg-emerald-100 text-emerald-800 border border-emerald-200',
+  // Needs attention
+  'Stock Short': 'bg-rose-100 text-rose-800 border border-rose-200'
 };
 const remarkBadgeClass = (type, fallback) => SYSTEM_REMARK_BADGE_STYLES[type] || fallback;
 
@@ -2395,6 +2430,26 @@ export default function StaffDashboard() {
                   </div>
                 )}
               </div>
+
+              {/* JOB CARD BUTTON — only on the production stages, which is when the customer's
+                  equipment is physically in the workshop. The task already carries Job_Card_ID, so
+                  Create-vs-Open needs no extra fetch. */}
+              {!isCompleted && PRODUCTION_STAGES_WITH_JOB_CARD.includes(task.Stage) && (
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); navigate(`/job-card/task/${task.Task_ID}`); }}
+                  className="group relative w-8 h-8 rounded-xl bg-indigo-50 hover:bg-indigo-100 active:bg-indigo-200 border border-indigo-300 text-indigo-700 flex items-center justify-center transition shrink-0"
+                  title={task.Job_Card_ID ? 'Open Job Card' : 'Create Job Card'}
+                >
+                  <Wrench className="w-4 h-4 text-indigo-600" />
+                  {task.Job_Card_ID && (
+                    <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-emerald-500 border border-white" />
+                  )}
+                  <span className="absolute -top-7 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded-md bg-slate-900 text-white text-[10px] font-bold whitespace-nowrap opacity-0 group-hover:opacity-100 group-active:opacity-100 pointer-events-none transition shadow-md z-20">
+                    {task.Job_Card_ID ? 'Open Job Card' : 'Job Card'}
+                  </span>
+                </button>
+              )}
 
               {/* ADVANCE STAGE BUTTON */}
               {!isCompleted && (

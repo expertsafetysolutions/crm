@@ -1,6 +1,6 @@
-import React, { useRef, useLayoutEffect, useState, useImperativeHandle } from 'react';
-import { QRCodeCanvas } from 'qrcode.react';
-import { formatMoney, formatDate, amountInWords, buildUpiUri, isUpiDeepLink, extractUpiVpa } from '../utils/quotationUtils';
+import React, { useRef, useLayoutEffect, useEffect, useState, useImperativeHandle } from 'react';
+import { formatMoney, formatDate, amountInWords, isUpiDeepLink, extractUpiVpa } from '../utils/quotationUtils';
+import { prepareCrispQr } from '../utils/qrImagePrep';
 
 /**
  * Print/PDF layout for a quotation, proforma invoice or sales invoice.
@@ -145,10 +145,41 @@ function SecurityWatermark({ config = {}, width, height }) {
   );
 }
 
+// Print size of the payment QR. At the previous 80px — with the artwork's logo and caption eating a
+// third of the box — the code printed ~15mm, about 0.34mm per module, under the ~0.4mm a phone
+// camera needs off paper. Cropping to the code and widening to 96px puts it near 0.56mm.
+const QR_BOX_PX = 96;
+// Rasterise well above the printed size: html2canvas captures at 2x and jsPDF re-encodes, so
+// starting from a generous bitmap keeps the module edges hard through both steps.
+const QR_SOURCE_PX = 512;
+
+/**
+ * Resolves the payment QR to a cropped, hard-thresholded PNG.
+ *
+ * Returns the raw src immediately and swaps in the prepared version when it is ready, so a capture
+ * triggered before preparation finishes still prints a working (if softer) code rather than a gap.
+ */
+function useCrispQr(src) {
+  const [prepared, setPrepared] = useState(src);
+
+  useEffect(() => {
+    let cancelled = false;
+    setPrepared(src);
+    if (!src) return undefined;
+    prepareCrispQr(src, QR_SOURCE_PX)
+      .then(result => { if (!cancelled) setPrepared(result); })
+      .catch(() => { /* the raw image is already in place */ });
+    return () => { cancelled = true; };
+  }, [src]);
+
+  return prepared;
+}
+
 const DOC_TITLES = {
   QUOTATION: 'QUOTATION',
   PI: 'PROFORMA INVOICE',
-  INVOICE: 'TAX INVOICE'
+  INVOICE: 'TAX INVOICE',
+  CHALLAN: 'DELIVERY CHALLAN'
 };
 
 /**
@@ -236,6 +267,10 @@ const QuotationPdfTemplate = React.forwardRef(({
   paymentTerm,
   tncItems = []
 }, ref) => {
+  // Must run before the no-document early return below: a hook that is skipped on one render and
+  // called on the next changes the hook order and React throws.
+  const bankQrSrc = useCrispQr(branding.bankQr || '/assets/HDFC Bank Details.jpeg');
+
   if (!doc) return null;
 
   const isIgst = doc.GST_Type === 'IGST';
@@ -244,33 +279,50 @@ const QuotationPdfTemplate = React.forwardRef(({
   const overlay = settings?.signature_stamp_overlay || {};
   const security = settings?.security_watermark || {};
 
+  /*
+   * A delivery challan is a goods-movement document, not a tax document. It never prints the tax
+   * apparatus — taxable value, GST, discounts, bank details — because none of that has been agreed
+   * at the point the goods leave.
+   *
+   * Rate and Amount are the one negotiable part. They are always RECORDED on the challan so it can
+   * become an invoice in one step, but printing them is an Admin decision (challan_config.show_price):
+   * the person signing for goods at the gate is usually not the person who should see the pricing.
+   * Even when it is switched on, the columns appear only if a line actually carries a rate, so a
+   * challan for unpriced items prints clean instead of showing a column of zeroes.
+   */
+  const isChallan = docType === 'CHALLAN';
+  const challanCfg = settings?.challan_config || {};
+  const showChallanPrice = isChallan
+    && challanCfg.show_price === true
+    && (doc.Line_Items || []).some(l => Number(l.Rate) > 0);
+
+  const showMoney = !isChallan || showChallanPrice;
+  const showTaxColumns = !isChallan;
+
   // The discount column only appears when at least one line is actually discounted, so a
   // full-price quotation isn't left with a column of dashes. Mirrors the photo column below.
-  const showDiscount = (doc.Line_Items || []).some(l => Number(l.Discount_Amt) > 0);
+  const showDiscount = !isChallan && (doc.Line_Items || []).some(l => Number(l.Discount_Amt) > 0);
 
   // The photo column only appears when at least one line actually has an image, so a
   // service-only quotation isn't left with a column of dashes.
   const showPhotos = overlay.show_product_photos !== false
     && (doc.Line_Items || []).some(l => l.Photo_URL);
 
-  const docNo = doc.Quote_No_Display || doc.PI_No || doc.Invoice_No || '';
-  const docDate = doc.Created_At || doc.PI_Date || doc.Invoice_Date || '';
+  // A challan is keyed on its own hand-entered number and delivery date; every other document type
+  // resolves through the existing fallback chain, untouched.
+  const docNo = isChallan
+    ? (doc.Challan_No || '')
+    : (doc.Quote_No_Display || doc.PI_No || doc.Invoice_No || '');
+  const docDate = isChallan
+    ? (doc.Challan_Date || '')
+    : (doc.Created_At || doc.PI_Date || doc.Invoice_Date || '');
 
   // Admins sometimes paste a whole scanner deep-link ("upi://pay?pa=…&sign=…", ~200 chars) into the
-  // UPI ID field. Encode that verbatim so the QR still scans, but never print it as text — it is an
-  // unbreakable token that blows the bank card past the page edge.
+  // UPI ID field. Only the VPA is ever printed — the raw link is an unbreakable token that blows the
+  // bank card past the page edge. The payment QR itself is now the bank's own artwork, so nothing is
+  // generated from this value any more; it survives purely as the printed "UPI:" line.
   const rawUpi = String(bank.upi_id || '').trim();
-  const upiIsDeepLink = isUpiDeepLink(rawUpi);
-  const upiVpa = upiIsDeepLink ? extractUpiVpa(rawUpi) : rawUpi;
-
-  const upiUri = upiIsDeepLink
-    ? rawUpi
-    : buildUpiUri({
-      upiId: rawUpi,
-      payeeName: seller.legal_name,
-      amount: doc.Grand_Total,
-      note: docNo
-    });
+  const upiVpa = isUpiDeepLink(rawUpi) ? extractUpiVpa(rawUpi) : rawUpi;
 
   const cell = 'border border-slate-400 px-1.5 py-1 align-top';
 
@@ -423,14 +475,16 @@ const QuotationPdfTemplate = React.forwardRef(({
                 <th className={`${cell} text-center`} style={{ width: '26px' }}>#</th>
                 {showPhotos && <th className={`${cell} text-center`} style={{ width: '52px' }}>Photo</th>}
                 <th className={`${cell} text-left`}>Description of Goods / Services</th>
-                <th className={`${cell} text-center`} style={{ width: '58px' }}>HSN</th>
+                {(!isChallan || challanCfg.show_hsn !== false) && (
+                  <th className={`${cell} text-center`} style={{ width: '58px' }}>HSN</th>
+                )}
                 <th className={`${cell} text-right`} style={{ width: '40px' }}>Qty</th>
                 <th className={`${cell} text-center`} style={{ width: '34px' }}>Unit</th>
-                <th className={`${cell} text-right`} style={{ width: '62px' }}>Rate</th>
+                {showMoney && <th className={`${cell} text-right`} style={{ width: '62px' }}>Rate</th>}
                 {showDiscount && <th className={`${cell} text-right`} style={{ width: '54px' }}>Disc.</th>}
-                <th className={`${cell} text-right`} style={{ width: '66px' }}>Taxable</th>
-                <th className={`${cell} text-center`} style={{ width: '34px' }}>GST</th>
-                <th className={`${cell} text-right`} style={{ width: '72px' }}>Amount</th>
+                {showTaxColumns && <th className={`${cell} text-right`} style={{ width: '66px' }}>Taxable</th>}
+                {showTaxColumns && <th className={`${cell} text-center`} style={{ width: '34px' }}>GST</th>}
+                {showMoney && <th className={`${cell} text-right`} style={{ width: '72px' }}>Amount</th>}
               </tr>
             </thead>
             <tbody>
@@ -462,26 +516,64 @@ const QuotationPdfTemplate = React.forwardRef(({
                       </div>
                     )}
                   </td>
-                  <td className={`${cell} text-center`}>{l.HSN_Code || '-'}</td>
+                  {(!isChallan || challanCfg.show_hsn !== false) && (
+                    <td className={`${cell} text-center`}>{l.HSN_Code || '-'}</td>
+                  )}
                   <td className={`${cell} text-right`}>{Number(l.Qty) || 0}</td>
                   <td className={`${cell} text-center`}>{l.Unit || 'Nos'}</td>
-                  <td className={`${cell} text-right`}>{formatMoney(l.Rate, false)}</td>
+                  {showMoney && <td className={`${cell} text-right`}>{formatMoney(l.Rate, false)}</td>}
                   {showDiscount && (
                     <td className={`${cell} text-right`}>
                       {Number(l.Discount_Amt) > 0 ? formatMoney(l.Discount_Amt, false) : '-'}
                     </td>
                   )}
-                  <td className={`${cell} text-right`}>{formatMoney(l.Taxable_Value, false)}</td>
-                  <td className={`${cell} text-center`}>{Number(l.GST_Rate) || 0}%</td>
-                  <td className={`${cell} text-right font-bold`}>{formatMoney(l.Line_Total, false)}</td>
+                  {showTaxColumns && <td className={`${cell} text-right`}>{formatMoney(l.Taxable_Value, false)}</td>}
+                  {showTaxColumns && <td className={`${cell} text-center`}>{Number(l.GST_Rate) || 0}%</td>}
+                  {showMoney && (
+                    <td className={`${cell} text-right font-bold`}>
+                      {/* A challan has no tax, so its line total is simply qty x rate. */}
+                      {formatMoney(isChallan ? l.Amount : l.Line_Total, false)}
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>
           </table>
 
+          {/* ---------- CHALLAN SUMMARY ----------
+              A challan settles nothing, so it carries no tax table, no amount in words and no bank
+              details — only what physically went out, and the value only when the Admin allows it. */}
+          {isChallan && (
+            <div className="flex gap-2 mt-2 text-[9px] items-start">
+              <div className="flex-1" style={{ minWidth: 0 }}>
+                {challanCfg.declaration && (
+                  <div className="border border-slate-400 px-1.5 py-1">
+                    <span className="italic">{challanCfg.declaration}</span>
+                  </div>
+                )}
+              </div>
+              <div style={{ width: '250px' }} className="shrink-0">
+                <table className="w-full border border-slate-400 text-[9px]">
+                  <tbody>
+                    <tr style={{ backgroundColor: BRAND_RED, color: '#ffffff' }}>
+                      <td className="px-1.5 py-1 font-black">TOTAL QUANTITY</td>
+                      <td className="px-1.5 py-1 text-right font-black text-[11px]">
+                        {(doc.Line_Items || []).reduce((s, l) => s + (Number(l.Qty) || 0), 0)}
+                      </td>
+                    </tr>
+                    {showChallanPrice && (
+                      <Total k="Total Value" v={formatMoney(doc.Total_Amount)} bold />
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
           {/* ---------- TOTALS ----------
               items-start keeps the bank-details card at its natural height instead of stretching
               it to match the totals table beside it. */}
+          {!isChallan && (
           <div className="flex gap-2 mt-2 text-[9px] items-start">
             {/* minWidth:0 lets this column shrink; a flex item defaults to min-width:auto and would
                 otherwise refuse to go narrower than its longest unbreakable child. */}
@@ -507,10 +599,29 @@ const QuotationPdfTemplate = React.forwardRef(({
                       {bank.branch && <div><span className="text-slate-500">Branch:</span> <b>{bank.branch}</b></div>}
                       {upiVpa && <div><span className="text-slate-500">UPI:</span> <b>{upiVpa}</b></div>}
                     </div>
-                    {overlay.show_upi_qr !== false && upiUri && (
+                    {overlay.show_upi_qr !== false && (
                       <div className="px-1.5 py-1 border-l border-slate-400 text-center shrink-0">
-                        {/* level M + margin: a denser QR does not survive print + JPEG compression */}
-                        <QRCodeCanvas value={upiUri} size={64} level="M" includeMargin={true} />
+                        {/* The bank's own printed QR rather than one generated from the UPI ID: it
+                            settles into the account the business actually reconciles against.
+                            useCrispQr has already cropped away the artwork's logo and caption and
+                            hard-thresholded every pixel to black or white, so the whole box is
+                            code and nothing here is left grey for JPEG to smear. */}
+                        <img
+                          src={bankQrSrc}
+                          alt="Scan to pay"
+                          loading="eager"
+                          crossOrigin="anonymous"
+                          style={{
+                            width: `${QR_BOX_PX}px`,
+                            height: `${QR_BOX_PX}px`,
+                            display: 'block',
+                            margin: '0 auto',
+                            // The source is already square and pre-scaled, so there is nothing to
+                            // letterbox; a white backing stops any page tint bleeding into the
+                            // quiet zone, which scanners read as part of the code.
+                            backgroundColor: '#ffffff'
+                          }}
+                        />
                         <div className="text-[7px] text-slate-600 font-bold">SCAN TO PAY</div>
                       </div>
                     )}
@@ -550,8 +661,15 @@ const QuotationPdfTemplate = React.forwardRef(({
               </table>
             </div>
           </div>
+          )}
 
-          {tncItems.length > 0 && (
+          {isChallan && challanCfg.terms && (
+            <div className="mt-2 text-[7.5px] text-slate-700 leading-snug whitespace-pre-line">
+              {challanCfg.terms}
+            </div>
+          )}
+
+          {!isChallan && tncItems.length > 0 && (
             <div className="mt-2">
               <div className="text-[8px] font-black uppercase tracking-wide mb-0.5" style={{ color: BRAND_RED_DARK }}>Terms &amp; Conditions</div>
               <ol className="text-[7.5px] text-slate-700 leading-snug" style={{ paddingLeft: '14px', listStyleType: 'decimal' }}>

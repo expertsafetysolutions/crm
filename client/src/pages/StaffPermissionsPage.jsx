@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, Loader2, Save, Shield, CheckCircle2, AlertTriangle,
-  FileText, Package, Users
+  FileText, Package, Users, Wrench
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
@@ -18,7 +18,8 @@ import { useAuth } from '../context/AuthContext';
  */
 const MODULE_META = {
   quotation: { label: 'Quotation', icon: FileText, hint: 'Create and send quotations, PIs and invoices' },
-  inventory: { label: 'Inventory & Items', icon: Package, hint: 'Item master, stock inward, daily usage' }
+  inventory: { label: 'Inventory & Items', icon: Package, hint: 'Item master, stock inward, daily usage' },
+  jobcard: { label: 'Job Card & Challan', icon: Wrench, hint: 'Workshop inward, service entry, delivery challans' }
 };
 
 const ACTIONS = [

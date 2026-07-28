@@ -14,8 +14,14 @@ async function initDB() {
 }
 
 /**
- * Add an offline action to IndexedDB queue
+ * Add an offline action to IndexedDB queue.
+ *
+ * Every type listed here MUST have a matching branch in POST /api/sync/batch. A type the server
+ * does not recognise is reported back as a terminal error and dropped (see flushOfflineQueue);
+ * before that guard existed such an entry stayed in IndexedDB forever and re-POSTed on every flush.
+ *
  * @param {string} type - 'ADVANCE_STAGE' | 'RESCHEDULE' | 'ACTIVITY_LOG'
+ *                      | 'JOB_CARD_ITEM_UPSERT' | 'JOB_CARD_PARTS_ADD' | 'JOB_CARD_RECHECK'
  * @param {object} payload - action parameters
  */
 export async function enqueueOfflineAction(type, payload) {
@@ -71,10 +77,13 @@ export async function flushOfflineQueue(token) {
     }
 
     const data = await res.json();
-    // Successfully synced items can be cleared from IndexedDB
+    // Successfully synced items can be cleared from IndexedDB. Terminal errors are dropped too:
+    // an unrecognised action type or a deleted parent record can never succeed on retry, so
+    // keeping it would re-POST the same failure on every flush for the life of the install.
+    // Non-terminal errors stay queued — those are transient and worth retrying.
     if (data.results) {
       for (const itemResult of data.results) {
-        if (itemResult.status === 'SUCCESS') {
+        if (itemResult.status === 'SUCCESS' || itemResult.terminal) {
           await removeOfflineAction(itemResult.id);
         }
       }

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useDocSettings } from '../context/DocSettingsContext';
 import { getLocalDateStr, formatDateDDMMYYYY, getRecordCreatedAt } from '../utils/dateUtils';
@@ -30,7 +30,8 @@ import {
   AlertTriangle,
   Building2,
   History,
-  RotateCw
+  RotateCw,
+  Mail
 } from 'lucide-react';
 import { QRCodeCanvas } from 'qrcode.react';
 // html2canvas/jspdf are loaded on demand (see generateCertificateCanvas/buildCertificatePdf) —
@@ -327,6 +328,11 @@ function CustomLinesEditor({ lines, onChange, placeholder, accent = 'amber' }) {
 
 export default function CertificateComplianceGeneratorPage() {
   const { taskId } = useParams();
+  // A challan-derived certificate arrives as ?challanId=…&formatType=…, so the same page serves
+  // the blank, task-prefilled and challan-prefilled cases without a separate route.
+  const [searchParams] = useSearchParams();
+  const challanId = searchParams.get('challanId');
+  const challanFormatType = searchParams.get('formatType') || 'Refilling';
   const navigate = useNavigate();
   const { token, user } = useAuth();
   const { docSettings, updateDocSettings } = useDocSettings();
@@ -411,6 +417,16 @@ export default function CertificateComplianceGeneratorPage() {
   const [newCertTypeIcon, setNewCertTypeIcon] = useState('📄');
   const [task, setTask] = useState(null);
   const [adminSubmitting, setAdminSubmitting] = useState('');
+  // Certificate email ships OFF. The Email button only appears once it is switched on in
+  // Quotation Settings → Email Templates, so the action row stays uncluttered until it is wanted.
+  const [certEmailOn, setCertEmailOn] = useState(false);
+
+  useEffect(() => {
+    fetch('/api/quotation-settings', { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => (r.ok ? r.json() : null))
+      .then(s => setCertEmailOn(s?.email_enabled?.certificate_email === true))
+      .catch(() => {});
+  }, [token]);
 
   const certPreviewRef = useRef(null);
   const [certBase64Assets, setCertBase64Assets] = useState({
@@ -755,6 +771,11 @@ export default function CertificateComplianceGeneratorPage() {
         tableTitle: nextTableTitle,
         sectionOrder: normalizeSectionOrder(systemSettings.sectionOrder),
         sectionVisibility: systemSettings.sectionVisibility || {},
+        // Defaults on for the two challan-derived types, since the challan number is the
+        // customer's cross-reference back to the delivery; off for types that never come from one.
+        Show_Challan_Ref: systemSettings.showChallanRef !== undefined
+          ? Boolean(systemSettings.showChallanRef)
+          : ['Refilling', 'HP Testing'].includes(newFormat),
         isSettingsLocked: nextIsLocked
       };
     });
@@ -850,6 +871,48 @@ export default function CertificateComplianceGeneratorPage() {
             }));
             setCertCustomerSearch(foundTask.Customer_Name || cust.Company_Name || '');
           }
+        } else if (challanId) {
+          // Draft built from an issued delivery challan: the party, dates and the certified items
+          // all come across, but the certificate NUMBER is still minted by the sequence logic
+          // below, exactly as it is for a blank certificate.
+          const res = await fetch(
+            `/api/challans/${encodeURIComponent(challanId)}/certificate-prefill?formatType=${encodeURIComponent(challanFormatType)}`,
+            { headers: { Authorization: `Bearer ${token}` } }
+          );
+          if (cancelled) return;
+          if (!res.ok) {
+            setLoadError((await res.json()).error || 'Could not load the challan');
+          } else {
+            const pre = await res.json();
+            if (pre.lineCount === 0) {
+              setLoadError(`This challan has no ${challanFormatType} items to certify.`);
+            } else {
+              const latestSeq = getLatestSequenceNumber(certsData, pre.formatType);
+              const nextSeq = latestSeq + 1;
+              const letter = /hp\s*test/i.test(pre.formatType) ? 'H' : 'R';
+              setCertForm(prev => ({
+                ...prev,
+                formatType: pre.formatType,
+                certPrefix: 'Expert/',
+                certPeriod: '26-27',
+                certSequence: `${letter}${nextSeq}`,
+                certificateNo: `Expert/26-27/${letter}${nextSeq}`,
+                customerId: pre.customerId,
+                customerName: pre.customerName,
+                address: pre.address,
+                gstin: pre.gstin,
+                contact: pre.contact,
+                challanDate: pre.challanDate,
+                issueDate: pre.issueDate,
+                validUntil: pre.validUntil,
+                itemsList: pre.itemsList,
+                Source_Challan_ID: pre.Source_Challan_ID,
+                Source_Challan_No: pre.Source_Challan_No,
+                Show_Challan_Ref: pre.Show_Challan_Ref
+              }));
+              setCertCustomerSearch(pre.customerName || '');
+            }
+          }
         } else {
           const latestSeq = getLatestSequenceNumber(certsData, 'Refilling');
           const nextSeq = latestSeq + 1;
@@ -866,7 +929,7 @@ export default function CertificateComplianceGeneratorPage() {
       }
     })();
     return () => { cancelled = true; };
-  }, [taskId, token]);
+  }, [taskId, token, challanId, challanFormatType]);
 
   const retryLoadCustomers = async () => {
     try {
@@ -1166,7 +1229,11 @@ export default function CertificateComplianceGeneratorPage() {
       GSTIN: certForm.gstin, Issue_Date: certForm.issueDate, Valid_Until: certForm.validUntil,
       Challan_Date: certForm.challanDate || certForm.issueDate,
       Verification_GUID: certForm.verificationGuid, Revision: certForm.revision || 0,
-      Status: certForm.status || 'VERIFIED & COMPLIANT'
+      Status: certForm.status || 'VERIFIED & COMPLIANT',
+      // Stored so emailing this certificate can post its "Email" remark onto the owning task's
+      // discussion timeline. Blank when the page was opened standalone rather than from a task —
+      // the remark then lands on the customer's timeline only.
+      Task_ID: task?.Task_ID || certForm.Task_ID || ''
     };
     const isExisting = allCertificates.some(c => c.verificationGuid === certForm.verificationGuid || c.Verification_GUID === certForm.verificationGuid);
     const method = isExisting ? 'PUT' : 'POST';
@@ -1174,6 +1241,23 @@ export default function CertificateComplianceGeneratorPage() {
     const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(payload) });
     if (!res.ok) throw new Error('Failed to save certificate');
     const json = await res.json();
+
+    // The number and GUID are minted here optimistically, so two people generating certificates at
+    // the same moment would otherwise both claim the same ones. The server refuses that and hands
+    // back what it actually stored; adopt it so the form, the QR code and the saved record agree.
+    if (json.reassigned && Object.keys(json.reassigned).length > 0) {
+      const fixed = json.certificate || {};
+      setCertForm(prev => ({
+        ...prev,
+        certificateNo: fixed.certificateNo || fixed.Certificate_No || prev.certificateNo,
+        certSequence: fixed.certSequence || prev.certSequence,
+        verificationGuid: fixed.verificationGuid || fixed.Verification_GUID || prev.verificationGuid
+      }));
+      if (json.reassigned.certificateNo) {
+        alert(`Certificate number ${json.reassigned.certificateNo.requested} was already taken — this certificate has been saved as ${json.reassigned.certificateNo.assigned}.`);
+      }
+    }
+
     if (json.certificate) {
       setAllCertificates(prev => isExisting
         ? prev.map(x => (x.verificationGuid === certForm.verificationGuid || x.Verification_GUID === certForm.verificationGuid) ? json.certificate : x)
@@ -1389,6 +1473,52 @@ export default function CertificateComplianceGeneratorPage() {
     if (imgH <= pgH + 1) { pdf.addImage(imgData, 'JPEG', 0, 0, pdfW, Math.min(imgH, pgH)); }
     else { let hl = imgH, pos = 0; pdf.addImage(imgData, 'JPEG', 0, pos, pdfW, imgH); hl -= pgH; while (hl > 1) { pos -= pgH; pdf.addPage(); pdf.addImage(imgData, 'JPEG', 0, pos, pdfW, imgH); hl -= pgH; } }
     return { pdf, imgData };
+  };
+
+  /**
+   * Saves the certificate, renders its PDF, and emails both to the customer.
+   *
+   * Saved first, unconditionally: the server addresses the mail by verification GUID, so a
+   * certificate that only exists in this form has nothing to send. The PDF is built here rather
+   * than on the server because html2canvas renders it from the live preview DOM — the same reason
+   * the quotation builder posts its own bytes.
+   */
+  const emailCertificateToCustomer = async () => {
+    try {
+      setAdminSubmitting('email');
+      const result = await saveCertificateRecord({ isLocked: true });
+      setCertForm(prev => ({ ...prev, isLocked: true }));
+
+      // saveCertificateRecord adopts a server-reassigned GUID into state, but state has not
+      // re-rendered yet — read the saved record so the mail addresses the row that was written.
+      const saved = result.certificate || {};
+      const guid = saved.verificationGuid || saved.Verification_GUID || certForm.verificationGuid;
+
+      const { pdf } = await buildCertificatePdf();
+      const fileName = `${getDownloadFilename(certForm.certificateNo, certForm.customerName, certForm.issueDate)}.pdf`;
+
+      const res = await fetch(`/api/certificates/${guid}/dispatch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          inlineAttachments: [{
+            fileName,
+            mimeType: 'application/pdf',
+            base64: pdf.output('datauristring')
+          }]
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Send failed');
+
+      const email = (data.dispatchResults || []).find(r => r.channel === 'Email');
+      if (email?.ok) alert(`✅ Certificate ${certForm.certificateNo} emailed to ${email.recipient}.`);
+      else alert(`Could not send: ${email?.error || 'unknown error'}`);
+    } catch (err) {
+      alert('Email failed: ' + err.message);
+    } finally {
+      setAdminSubmitting('');
+    }
   };
 
   // Combines the header text search with the Company / Date Range / Certificate Type filters
@@ -2665,10 +2795,26 @@ export default function CertificateComplianceGeneratorPage() {
                 );
 
                 certSectionBlocks.signatory = (
-                <div className="space-y-1">
-                  <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wide">Authorized Signatory</label>
-                  <input type="text" value={certForm.authorizedSignatory} onChange={e => setCertForm(prev=>({...prev,authorizedSignatory:e.target.value}))}
-                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg font-medium text-slate-800 text-xs focus:ring-2 focus:ring-amber-500 focus:outline-none"/>
+                <div className="space-y-2">
+                  <div className="space-y-1">
+                    <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wide">Authorized Signatory</label>
+                    <input type="text" value={certForm.authorizedSignatory} onChange={e => setCertForm(prev=>({...prev,authorizedSignatory:e.target.value}))}
+                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg font-medium text-slate-800 text-xs focus:ring-2 focus:ring-amber-500 focus:outline-none"/>
+                  </div>
+                  {/* Per certificate type. Saved with the rest of this type's settings, so Refilling
+                      can print the delivery-challan reference while, say, a Training Certificate —
+                      which never comes from a challan — does not. */}
+                  <label className="flex items-center gap-2 px-3 py-2 bg-white border border-slate-300 rounded-lg cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={certForm.Show_Challan_Ref !== false}
+                      onChange={e => setCertForm(prev => ({ ...prev, Show_Challan_Ref: e.target.checked }))}
+                      className="w-4 h-4 accent-amber-600"
+                    />
+                    <span className="text-[11px] font-bold text-slate-700">
+                      Print delivery challan no. on this certificate
+                    </span>
+                  </label>
                 </div>
                 );
 
@@ -2824,6 +2970,7 @@ export default function CertificateComplianceGeneratorPage() {
                                   amcPeriod: certForm.amcPeriod,
                                   amcFrequency: certForm.amcFrequency,
                                   visitObservations: certForm.visitObservations,
+                                  showChallanRef: certForm.Show_Challan_Ref !== false,
                                   isSettingsLocked: false
                                 }
                               }
@@ -2960,6 +3107,14 @@ export default function CertificateComplianceGeneratorPage() {
                 <Printer className="w-3.5 h-3.5" /><span>{adminSubmitting === 'print' ? 'Preparing…' : 'Print'}</span>
               </button>
 
+              {certEmailOn && (
+                <button type="button" disabled={!readyToFinalize || Boolean(adminSubmitting)} onClick={emailCertificateToCustomer}
+                  title="Save, attach the PDF and email this certificate to the customer"
+                  className="flex-1 min-w-[80px] py-2 px-2.5 rounded-xl bg-sky-700 hover:bg-sky-800 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50">
+                  <Mail className="w-3.5 h-3.5" /><span>{adminSubmitting === 'email' ? 'Sending…' : 'Email'}</span>
+                </button>
+              )}
+
               <button type="button" disabled={Boolean(adminSubmitting)} onClick={handleLoadNextCertificate} title="Open the next newer certificate, or a blank one if you're already on the newest"
                 className="flex-1 min-w-[80px] py-2 px-2.5 rounded-xl bg-zinc-600 hover:bg-zinc-700 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50">
                 <span>{adminSubmitting === 'save' ? 'Saving…' : 'Next'}</span><ChevronRight className="w-3.5 h-3.5" />
@@ -3060,7 +3215,15 @@ export default function CertificateComplianceGeneratorPage() {
                 <table className="w-full text-xs font-extrabold text-red-950 bg-red-50/80 rounded border border-red-300 mb-4" style={{ borderCollapse: 'separate', borderSpacing: 0, height: '32px', tableLayout: 'fixed' }}>
                   <tbody>
                     <tr>
-                      <td className="px-4 text-left" style={{ verticalAlign: 'middle' }}>{isSectionVisible('certNo') && <>Ref / Cert No:&nbsp;<span className="text-slate-900">{certForm.certificateNo}</span></>}</td>
+                      <td className="px-4 text-left" style={{ verticalAlign: 'middle' }}>
+                        {isSectionVisible('certNo') && <>Ref / Cert No:&nbsp;<span className="text-slate-900">{certForm.certificateNo}</span></>}
+                        {/* The challan number is the customer's cross-reference back to the
+                            delivery. Printed per certificate type, via the Show Challan Ref
+                            toggle in Document Settings. */}
+                        {certForm.Show_Challan_Ref && certForm.Source_Challan_No && (
+                          <span className="text-slate-600">&nbsp;· D.C. No:&nbsp;<span className="text-slate-900">{certForm.Source_Challan_No}</span></span>
+                        )}
+                      </td>
                       <td className="px-4 text-right" style={{ verticalAlign: 'middle' }}>Date:&nbsp;<span className="text-slate-800 font-bold">{formatDateDDMMYYYY(certForm.issueDate)}</span></td>
                     </tr>
                   </tbody>
@@ -3350,6 +3513,13 @@ export default function CertificateComplianceGeneratorPage() {
           }} className="flex-1 min-w-[70px] py-2.5 px-2 rounded-xl bg-indigo-600 active:scale-95 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50">
             <Printer className="w-3.5 h-3.5" /><span>{adminSubmitting === 'print' ? 'Preparing…' : 'Print'}</span>
           </button>
+
+          {certEmailOn && (
+            <button type="button" disabled={!readyToFinalize || Boolean(adminSubmitting)} onClick={emailCertificateToCustomer}
+              className="flex-1 min-w-[70px] py-2.5 px-2 rounded-xl bg-sky-700 active:scale-95 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50">
+              <Mail className="w-3.5 h-3.5" /><span>{adminSubmitting === 'email' ? 'Sending…' : 'Email'}</span>
+            </button>
+          )}
 
           <button type="button" disabled={Boolean(adminSubmitting)} onClick={handleLoadNextCertificate}
             className="flex-1 min-w-[70px] py-2.5 px-2 rounded-xl bg-zinc-600 active:scale-95 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50">

@@ -79,6 +79,26 @@ const DEFAULT_QUOTATION_SETTINGS = {
     pass_ref: 'SMTP_PASS'
   },
 
+  /**
+   * Per-document email master switch, keyed by draft_templates key.
+   *
+   * Enforced inside dispatchService.dispatchTemplated, so it covers every sender — the manual Send
+   * buttons AND the reminder crons — rather than only the routes that remember to check it.
+   *
+   * A key that is absent counts as ENABLED: an existing install upgrading into this feature must
+   * not silently stop sending quotations. Only the two workshop documents ship off, because they
+   * are new and the office does not email them today.
+   */
+  email_enabled: {
+    quotation_email: true,
+    followup_reminder: true,
+    invoice_payment_due: true,
+    pi_email: true,
+    invoice_email: true,
+    challan_email: false,
+    certificate_email: false
+  },
+
   // Reusable files (product catalogues, brochures, compliance certificates) an Admin uploads once
   // and the builder then ticks per quotation. Each entry:
   //   { id, label, media_id, file_name, mime_type, size_bytes, default_selected }
@@ -117,6 +137,25 @@ const DEFAULT_QUOTATION_SETTINGS = {
   approval_threshold: {
     discount_pct_trigger: 10,
     discount_amt_trigger: 0
+  },
+
+  // Delivery challan behaviour.
+  //
+  // Rates are ALWAYS resolved and stored on a challan's line items, so converting one to an invoice
+  // needs no second lookup and the figures cannot drift in between. `show_price` controls only
+  // whether they are PRINTED. It defaults to off because a delivery challan is a goods-movement
+  // document — the person signing for the goods at the gate is usually not the person who should
+  // see the pricing.
+  //
+  // Even with the toggle on, the Rate/Amount columns appear only when at least one line actually
+  // carries a rate, so a challan for items with no price on record prints clean instead of showing
+  // a column of zeroes.
+  challan_config: {
+    show_price: false,
+    show_hsn: true,
+    // Printed under the signature block; blank hides the line entirely.
+    declaration: 'Received the above goods in good condition.',
+    terms: ''
   },
 
   defaults: {
@@ -162,12 +201,58 @@ const DEFAULT_QUOTATION_SETTINGS = {
       body: 'Dear {customer_name},\n\nInvoice {quote_no} for {amount} is due on {due_date}. Kindly arrange the payment.\n\nRegards,\nExpert Safety Solutions',
       whatsapp_template_name: '',
       whatsapp_template_status: 'not_submitted'
+    },
+    // No {view_link} in these two: the customer portal exists only for quotations, so a PI or
+    // invoice has no Portal_Guid and the variable would render as the literal placeholder.
+    pi_email: {
+      subject: 'Proforma Invoice {document_no} from Expert Safety Solutions',
+      body: 'Dear {customer_name},\n\nPlease find attached our proforma invoice {document_no} dated {document_date} for {amount}.\n\nKindly confirm so we can proceed with the order.\n\nRegards,\nExpert Safety Solutions',
+      whatsapp_template_name: '',
+      whatsapp_template_status: 'not_submitted'
+    },
+    invoice_email: {
+      subject: 'Tax Invoice {document_no} from Expert Safety Solutions',
+      body: 'Dear {customer_name},\n\nPlease find attached tax invoice {document_no} dated {document_date} for {amount}, payable by {due_date}.\n\nThank you for your business.\n\nRegards,\nExpert Safety Solutions',
+      whatsapp_template_name: '',
+      whatsapp_template_status: 'not_submitted'
+    },
+    // A delivery challan is a goods-movement note, so the default body carries no money at all —
+    // matching challan_config.show_price, which keeps rates off the printed document too.
+    challan_email: {
+      subject: 'Delivery Challan {document_no} — Expert Safety Solutions',
+      body: 'Dear {customer_name},\n\nPlease find attached delivery challan {document_no} dated {document_date} covering {item_count} line(s):\n\n{item_summary}\n\nKindly acknowledge receipt.\n\nRegards,\nExpert Safety Solutions',
+      whatsapp_template_name: '',
+      whatsapp_template_status: 'not_submitted'
+    },
+    // {verification_link} is unique to this template — the public QR page for the certificate.
+    certificate_email: {
+      subject: '{certificate_type} {document_no} — Expert Safety Solutions',
+      body: 'Dear {customer_name},\n\nPlease find attached your {certificate_type} {document_no}, issued on {document_date} and valid until {valid_until}.\n\nYou can verify it online at any time here:\n{verification_link}\n\nRegards,\nExpert Safety Solutions',
+      whatsapp_template_name: '',
+      whatsapp_template_status: 'not_submitted'
     }
   },
 
   // Offsets (in days relative to invoice due date) at which payment reminders fire.
   // Negative = before due, 0 = on due date, positive = overdue.
-  payment_reminder_offsets: [-3, 0, 7]
+  payment_reminder_offsets: [-3, 0, 7],
+
+  /**
+   * The hour of day (IST, 0-23) each automatic reminder goes out.
+   *
+   * Vercel cron cannot be reconfigured from the database, so vercel.json runs one dispatcher every
+   * hour and the dispatcher asks THIS setting whether the current hour is the one for a given job.
+   * That is why the granularity is an hour and not a minute — see reminderScheduler.js.
+   *
+   * `null` disables a job outright: the hour never matches, so it simply never runs. Distinct from
+   * email_enabled, which stops the mail but still lets the job advance its bookkeeping.
+   */
+  reminder_schedule: {
+    quotation_followup: 11,   // Quotation follow-up reminders
+    payment_due: 12,          // Invoice payment-due reminders
+    refilling_due: 9,         // Generates refilling-due follow-up TASKS (no customer email)
+    annual_prospect: 9        // Generates annual renewal lead TASKS (no customer email)
+  }
 };
 
 /** Deep-merges a stored settings doc over the defaults so partial saves never lose keys. */

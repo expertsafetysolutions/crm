@@ -3,6 +3,7 @@ const sheetsService = require('./sheetsService');
 const workflowEngine = require('./workflowEngine');
 const pushService = require('./pushService');
 const gstUtils = require('../utils/gstUtils');
+const interactionLogger = require('./interactionLogger');
 const { mergeQuotationSettings } = require('./defaultQuotationSettings');
 
 /**
@@ -69,10 +70,66 @@ function periodLabel(resetMode) {
   return `${String(startYear).slice(-2)}-${String(startYear + 1).slice(-2)}`;
 }
 
-async function nextDocumentNumber(prefix, resetMode) {
+/**
+ * Composes the prefix and period without repeating the period.
+ *
+ * Admins naturally type the financial year into the prefix ("EXPERT/26-27/QUT") because that is how
+ * the number reads on paper, and the engine then appended it a second time —
+ * "EXPERT/26-27/QUT/26-27/001". Treating a period already present as a path segment as intentional
+ * fixes that without forbidding it or silently rewriting anyone's configured prefix.
+ */
+function composeNumberStem(prefix, period) {
+  const clean = String(prefix || '').replace(/\/+$/, '');
+  const segments = clean.split('/').filter(Boolean);
+  return segments.includes(period) ? clean : `${clean}/${period}`;
+}
+
+/**
+ * Highest number already issued under a stem, so a NEW counter starts above it rather than at 1.
+ *
+ * The counter key is derived from the admin-editable prefix. Change the prefix and the old counter
+ * is orphaned; without this, the next document would restart at 001 and collide with numbers
+ * already sitting on customers' invoices.
+ */
+function highWaterMark(prefix, documents, field) {
+  const clean = String(prefix || '').replace(/\/+$/, '');
+  let max = 0;
+
+  for (const doc of documents) {
+    const value = String(doc?.[field] || '');
+    if (!value.startsWith(clean)) continue;
+
+    // The sequence is the LAST purely-numeric path segment. Scanning from the right rather than
+    // parsing at a fixed offset is what makes this work across format changes: it reads 005 from
+    // both "EXPERT/QUT/26-27/005" and the older doubled-period "EXPERT/26-27/QUT/26-27/005", and
+    // skips the revision suffix in ".../002/R1". A period like "26-27" is never mistaken for a
+    // sequence because it is not purely numeric.
+    const segments = value.split('/').filter(Boolean);
+    for (let i = segments.length - 1; i >= 0; i--) {
+      if (!/^\d+$/.test(segments[i])) continue;
+      const n = parseInt(segments[i], 10);
+      if (n > max) max = n;
+      break;
+    }
+  }
+  return max;
+}
+
+/**
+ * Next customer-facing document number, e.g. EXPERT/QUT/26-27/006.
+ *
+ * `existing` is the collection of documents already issued of this type, used only to seed a
+ * brand-new counter. Callers that omit it still get a correct number whenever the counter already
+ * exists, which is every case except a prefix change or a fresh install.
+ */
+async function nextDocumentNumber(prefix, resetMode, { existing = [], field = '' } = {}) {
   const period = periodLabel(resetMode);
-  const seq = await sheetsService.getNextSequence(`${prefix}/${period}`);
-  return `${prefix}/${period}/${String(seq).padStart(3, '0')}`;
+  const stem = composeNumberStem(prefix, period);
+  // Seeded against the configured PREFIX, not the composed stem, so numbers issued under an older
+  // stem for the same prefix still count towards the high-water mark.
+  const seedIfNew = field ? highWaterMark(prefix, existing, field) : 0;
+  const seq = await sheetsService.getNextSequence(stem, { seedIfNew });
+  return `${stem}/${String(seq).padStart(3, '0')}`;
 }
 
 function newPortalGuid() {
@@ -159,7 +216,8 @@ async function createQuotation(payload, actor) {
   const todayStr = istToday();
   const quoteNo = await nextDocumentNumber(
     priced.settings.defaults.quote_no_prefix,
-    priced.settings.defaults.number_reset
+    priced.settings.defaults.number_reset,
+    { existing: await sheetsService.getAllQuotations(), field: 'Quote_No' }
   );
 
   const expiryDays = Number(payload.autoExpiryDays ?? priced.settings.defaults.auto_expiry_days);
@@ -228,6 +286,16 @@ async function createQuotation(payload, actor) {
   if (quotation.Task_ID) {
     await safeAdvanceTask(quotation.Task_ID, TASK_STAGE.DRAFT_QUOTATION, actor, `Quotation ${quoteNo} drafted`);
   }
+
+  await interactionLogger.logEvent({
+    tag: interactionLogger.EVENT_TAG.QUOTATION_GENERATED,
+    summary: `${quoteNo} | ${interactionLogger.formatAmount(quotation.Grand_Total)}`
+      + `${payload.subject ? ` | ${payload.subject}` : ''}`
+      + `${priced.approvalRequired ? ' | awaiting approval' : ''}`,
+    taskId: quotation.Task_ID,
+    customerId: customer.Customer_ID,
+    actor
+  });
 
   return quotation;
 }
@@ -447,6 +515,20 @@ async function markDispatched(quotationId, dispatchResults, actor) {
     await safeAdvanceTask(quotation.Task_ID, TASK_STAGE.QUOTATION_FLP, actor, `Quotation ${quotation.Quote_No_Display} dispatched`);
   }
 
+  // Feed the customer's price list, but only once the quotation has actually gone out — a draft's
+  // rates are still being argued about internally. Never allowed to fail the dispatch: the customer
+  // has the document either way, and a rate-memory miss is not worth reporting an error for.
+  if (anySent) {
+    try {
+      // Required lazily: priceListService depends on this module for last-quoted lookups, so a
+      // top-level require here would resolve to a half-initialised export object.
+      const priceListService = require('./priceListService');
+      await priceListService.recordFromQuotation(quotation, actor);
+    } catch (e) {
+      console.error(`Price list update from quotation ${quotationId} failed:`, e.message);
+    }
+  }
+
   return updated;
 }
 
@@ -508,8 +590,18 @@ async function applyCustomerAction(quotationId, actionKey, actionPayload = {}) {
 
   const updated = await sheetsService.updateRow('Quotation_Master', 'Quotation_ID', quotationId, updateData);
 
-  if (actionKey === 'ACCEPT' && quotation.Task_ID) {
-    await safeAdvanceTask(quotation.Task_ID, TASK_STAGE.ORDER_CONFIRMATION, null, `Quotation ${quotation.Quote_No_Display} accepted by customer`);
+  if (actionKey === 'ACCEPT') {
+    if (quotation.Task_ID) {
+      await safeAdvanceTask(quotation.Task_ID, TASK_STAGE.ORDER_CONFIRMATION, null, `Quotation ${quotation.Quote_No_Display} accepted by customer`);
+    }
+    // No actor — the customer did this on the public portal, so the entry reads as 'System'.
+    await interactionLogger.logEvent({
+      tag: interactionLogger.EVENT_TAG.ORDER_CONFIRMED,
+      summary: `${quotation.Quote_No_Display} accepted by customer | ${interactionLogger.formatAmount(quotation.Grand_Total)}`,
+      taskId: quotation.Task_ID,
+      customerId: quotation.Customer_ID,
+      actor: null
+    });
   }
 
   if (actionKey === 'REQUEST_REVISION' && actionPayload.autoCreateRevision) {
@@ -657,6 +749,10 @@ module.exports = {
   getLastQuotedRates,
   expireStaleQuotations,
   nextDocumentNumber,
+  // Exposed for the numbering checks; not part of the engine's public surface.
+  __composeNumberStem: composeNumberStem,
+  __highWaterMark: highWaterMark,
+  __periodLabel: periodLabel,
   newPortalGuid,
   buildCustomerSnapshot
 };

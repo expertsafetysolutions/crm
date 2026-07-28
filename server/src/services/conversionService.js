@@ -1,6 +1,7 @@
 const sheetsService = require('./sheetsService');
 const quotationEngine = require('./quotationEngine');
 const inventoryService = require('./inventoryService');
+const interactionLogger = require('./interactionLogger');
 
 /**
  * conversionService — Module G's 1-click Quotation -> PI -> Sales Invoice pipeline.
@@ -83,7 +84,8 @@ async function convertQuotationToPI(quotationId, actor) {
   const piId = `PI${nowMs.toString().slice(-6)}${Math.floor(Math.random() * 100).toString().padStart(2, '0')}`;
   const piNo = await quotationEngine.nextDocumentNumber(
     settings.defaults.pi_no_prefix,
-    settings.defaults.number_reset
+    settings.defaults.number_reset,
+    { existing: await sheetsService.getAllPIs(), field: 'PI_No' }
   );
   const todayStr = istToday();
   const termDays = await resolvePaymentTermDays(quotation.Payment_Terms_ID, settings);
@@ -115,6 +117,14 @@ async function convertQuotationToPI(quotationId, actor) {
     await quotationEngine.safeAdvanceTask(quotation.Task_ID, quotationEngine.TASK_STAGE.PI, actor, `Converted to PI ${piNo}`);
   }
 
+  await interactionLogger.logEvent({
+    tag: interactionLogger.EVENT_TAG.PI_GENERATED,
+    summary: `${piNo} | ${interactionLogger.formatAmount(pi.Grand_Total)} | from ${pi.Source_Quote_No}`,
+    taskId: quotation.Task_ID,
+    customerId: quotation.Customer_ID,
+    actor
+  });
+
   return pi;
 }
 
@@ -135,7 +145,8 @@ async function convertPIToInvoice(piId, actor) {
   const invoiceId = `SINV${nowMs.toString().slice(-6)}${Math.floor(Math.random() * 100).toString().padStart(2, '0')}`;
   const invoiceNo = await quotationEngine.nextDocumentNumber(
     settings.defaults.invoice_no_prefix,
-    settings.defaults.number_reset
+    settings.defaults.number_reset,
+    { existing: await sheetsService.getAllSalesInvoices(), field: 'Invoice_No' }
   );
   const todayStr = istToday();
   const termDays = await resolvePaymentTermDays(pi.Payment_Terms_ID, settings);
@@ -188,6 +199,23 @@ async function convertPIToInvoice(piId, actor) {
     await quotationEngine.safeAdvanceTask(pi.Task_ID, quotationEngine.TASK_STAGE.SALES_INVOICE, actor, `Sales Invoice ${invoiceNo} generated`);
   }
 
+  // The invoice rate is the figure actually agreed, so it outranks whatever was quoted and becomes
+  // this customer's remembered price. Never allowed to fail the invoice — it is the legal document.
+  try {
+    const priceListService = require('./priceListService');
+    await priceListService.recordFromInvoice(invoice, actor);
+  } catch (e) {
+    console.error(`Price list update from invoice ${invoiceId} failed:`, e.message);
+  }
+
+  await interactionLogger.logEvent({
+    tag: interactionLogger.EVENT_TAG.INVOICE_GENERATED,
+    summary: `${invoiceNo} | ${interactionLogger.formatAmount(invoice.Grand_Total)} | from ${pi.PI_No}`,
+    taskId: pi.Task_ID,
+    customerId: pi.Customer_ID,
+    actor
+  });
+
   return { invoice, inventoryResult };
 }
 
@@ -235,6 +263,17 @@ async function recordPayment(invoiceId, { amount, paymentMode, reference, paidOn
       `Payment received in full for invoice ${invoice.Invoice_No}`
     );
   }
+
+  const balance = Math.round((grandTotal - totalPaid) * 100) / 100;
+  await interactionLogger.logEvent({
+    tag: interactionLogger.EVENT_TAG.PAYMENT_RECEIVED,
+    summary: `${interactionLogger.formatAmount(increment)}${paymentMode ? ` by ${paymentMode}` : ''}`
+      + `${reference ? ` (${reference})` : ''} | ${invoice.Invoice_No} | `
+      + (isFullyPaid ? 'fully settled' : `balance ${interactionLogger.formatAmount(balance)}`),
+    taskId: invoice.Task_ID,
+    customerId: invoice.Customer_ID,
+    actor
+  });
 
   return updated;
 }

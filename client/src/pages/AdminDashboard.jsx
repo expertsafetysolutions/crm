@@ -100,12 +100,38 @@ const REMARK_TAGS = [
   'Certification'
 ];
 
-// Distinct badge colors for auto-generated task lifecycle remarks (see System_Generated remarks
-// inserted by the server on task create/status-change) — falls back to the caller's default style.
+// Distinct badge colors for auto-generated remarks — every System_Generated row the server writes:
+// task lifecycle, module events, and outbound email/WhatsApp. Anything unlisted (including the
+// hand-picked tags in REMARK_TAGS above) falls back to the caller's default style.
+// Keys must match interactionLogger.EVENT_TAG / TAG on the server.
 const SYSTEM_REMARK_BADGE_STYLES = {
+  // Task lifecycle
   'NEW TASK CREATED': 'bg-blue-100 text-blue-800 border border-blue-200',
   'TASK STATUS UPDATED': 'bg-amber-100 text-amber-800 border border-amber-200',
-  'TASK COMPLETED': 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+  'TASK COMPLETED': 'bg-emerald-100 text-emerald-800 border border-emerald-200',
+  // Outbound messages
+  'Email': 'bg-sky-100 text-sky-800 border border-sky-200',
+  'Whatsapp': 'bg-green-100 text-green-800 border border-green-200',
+  // Workshop
+  'Material Received': 'bg-orange-100 text-orange-800 border border-orange-200',
+  'Work In Progress': 'bg-amber-100 text-amber-800 border border-amber-200',
+  'Recheck Done': 'bg-yellow-100 text-yellow-800 border border-yellow-200',
+  'Standby Issued': 'bg-slate-100 text-slate-700 border border-slate-200',
+  'Standby Returned': 'bg-slate-100 text-slate-700 border border-slate-200',
+  'Service Complete': 'bg-emerald-100 text-emerald-800 border border-emerald-200',
+  // Dispatch
+  'Challan Generated': 'bg-indigo-100 text-indigo-800 border border-indigo-200',
+  'Challan Issued': 'bg-indigo-100 text-indigo-800 border border-indigo-200',
+  'Delivered': 'bg-violet-100 text-violet-800 border border-violet-200',
+  'Certificate Generated': 'bg-teal-100 text-teal-800 border border-teal-200',
+  // Sales
+  'Quotation Generated': 'bg-blue-100 text-blue-800 border border-blue-200',
+  'Order Confirmed': 'bg-cyan-100 text-cyan-800 border border-cyan-200',
+  'PI Generated': 'bg-purple-100 text-purple-800 border border-purple-200',
+  'Invoice Generated': 'bg-purple-100 text-purple-800 border border-purple-200',
+  'Payment Received': 'bg-emerald-100 text-emerald-800 border border-emerald-200',
+  // Needs attention
+  'Stock Short': 'bg-rose-100 text-rose-800 border border-rose-200'
 };
 const remarkBadgeClass = (type, fallback) => SYSTEM_REMARK_BADGE_STYLES[type] || fallback;
 
@@ -2886,6 +2912,20 @@ export default function AdminDashboard() {
           >
             <ReceiptIndianRupee className="w-4 h-4 text-emerald-100 shrink-0" />
             <span>Invoices &amp; Payments</span>
+          </button>
+          <button
+            onClick={() => navigate('/price-list')}
+            className="px-3.5 py-2 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5 transition shadow-sm shrink-0"
+          >
+            <ReceiptIndianRupee className="w-4 h-4 text-emerald-600 shrink-0" />
+            <span>Customer Prices</span>
+          </button>
+          <button
+            onClick={() => navigate('/challans')}
+            className="px-3.5 py-2 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5 transition shadow-sm shrink-0"
+          >
+            <ReceiptIndianRupee className="w-4 h-4 text-indigo-600 shrink-0" />
+            <span>Delivery Challans</span>
           </button>
           <button
             onClick={() => navigate('/inventory')}

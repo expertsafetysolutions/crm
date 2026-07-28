@@ -29,7 +29,11 @@ const TABS = [
 const EMAIL_TEMPLATES = [
   { key: 'quotation_email', label: 'Quotation Dispatch', hint: 'Sent when you dispatch a quotation to a customer.' },
   { key: 'followup_reminder', label: 'Quotation Follow-up Reminder', hint: 'Sent automatically at your configured follow-up interval while a quotation is still open.' },
-  { key: 'invoice_payment_due', label: 'Invoice Payment Due', hint: 'Sent around the invoice due date, per the reminder schedule under Approval & Defaults.' }
+  { key: 'invoice_payment_due', label: 'Invoice Payment Due', hint: 'Sent around the invoice due date, per the reminder schedule under Approval & Defaults.' },
+  { key: 'pi_email', label: 'Proforma Invoice Dispatch', hint: 'Sent when you press Send Email on a proforma invoice in Sales Documents. No {view_link} — the customer portal exists only for quotations.' },
+  { key: 'invoice_email', label: 'Tax Invoice Dispatch', hint: 'Sent when you press Send Email on a sales invoice in Sales Documents. No {view_link} — the customer portal exists only for quotations.' },
+  { key: 'challan_email', label: 'Delivery Challan Dispatch', hint: 'Sent when you press Send Email on an issued challan in the Challan register. Off by default.' },
+  { key: 'certificate_email', label: 'Certificate Dispatch', hint: 'Sent when you press Email to Customer on a saved certificate. Supports {certificate_type}, {certificate_no} and {verification_link} — the public QR verification page. Off by default.' }
 ];
 
 const WHATSAPP_TEMPLATES = [
@@ -37,6 +41,23 @@ const WHATSAPP_TEMPLATES = [
   { key: 'followup_reminder', label: 'Quotation Follow-up Reminder', hint: 'Shares the follow-up template body with email; the WhatsApp template name below is what Meta actually sends.' },
   { key: 'invoice_payment_due', label: 'Invoice Payment Due', hint: 'Shares the payment-reminder body with email; Meta sends via the approved template named below.' }
 ];
+
+/**
+ * The scheduled jobs whose send time an admin can move. Keys must match
+ * reminderScheduler.JOBS on the server, which is what reads reminder_schedule.
+ */
+const REMINDER_JOBS = [
+  { key: 'quotation_followup', label: 'Quotation follow-up', hint: 'Emails customers with an open quotation' },
+  { key: 'payment_due', label: 'Invoice payment due', hint: 'Emails customers with an unpaid invoice' },
+  { key: 'refilling_due', label: 'Refilling due', hint: 'Creates internal tasks — no customer email' },
+  { key: 'annual_prospect', label: 'Annual prospect leads', hint: 'Creates internal tasks — no customer email' }
+];
+
+/** 12-hour labels against the 0-23 value the server stores, so the office reads its own clock. */
+const HOUR_OPTIONS = Array.from({ length: 24 }, (_, h) => ({
+  value: h,
+  label: `${String(h).padStart(2, '0')}:00  (${h % 12 === 0 ? 12 : h % 12} ${h < 12 ? 'AM' : 'PM'})`
+}));
 
 /**
  * Variables available in message templates, grouped for the click-to-insert picker.
@@ -85,6 +106,15 @@ const TEMPLATE_VARIABLES = [
       { token: '{item_count}', label: 'Item Count' },
       { token: '{sales_person}', label: 'Sales Person' },
       { token: '{payment_status}', label: 'Payment Status' }
+    ]
+  },
+  {
+    // Only resolve on the Certificate Dispatch template; anywhere else they render as literal text.
+    group: 'Certificate only',
+    items: [
+      { token: '{certificate_type}', label: 'Certificate Type' },
+      { token: '{certificate_no}', label: 'Certificate No.' },
+      { token: '{verification_link}', label: 'QR Verification Link' }
     ]
   }
 ];
@@ -409,17 +439,35 @@ export default function QuotationSettingsPage() {
           <>
             <div className="bg-blue-50 border border-blue-200 text-blue-800 px-4 py-2.5 rounded-xl text-xs flex items-start gap-2">
               <Mail className="w-4 h-4 mt-0.5 shrink-0" />
-              <span>Email templates support a subject line and freeform text. Click any variable chip to insert it at your cursor.</span>
+              <span>
+                Each document type has its own on/off switch — turn one off and nothing of that type
+                is emailed, whether sent by hand or by a scheduled reminder. Templates below support a
+                subject line and freeform text; click any variable chip to insert it at your cursor.
+              </span>
             </div>
             {EMAIL_TEMPLATES.map(t => {
               const tpl = settings.draft_templates[t.key] || {};
+              // Absent === enabled, matching the server default: an install upgrading into this
+              // feature must not silently stop sending the documents it sends today.
+              const enabled = settings.email_enabled?.[t.key] !== false;
               return (
                 <Card key={t.key} title={t.label} hint={t.hint}>
-                  <TemplateField label="Subject" value={tpl.subject || ''}
-                    onChange={v => set(`draft_templates.${t.key}.subject`, v)} />
-                  <div className="mt-3">
-                    <TemplateField label="Message body" textarea rows={7} value={tpl.body || ''}
-                      onChange={v => set(`draft_templates.${t.key}.body`, v)} />
+                  <div className={`-mt-1 mb-3 px-3 py-2 rounded-lg border ${
+                    enabled ? 'bg-emerald-50 border-emerald-200' : 'bg-slate-50 border-slate-200'
+                  }`}>
+                    <Toggle
+                      label={enabled ? 'Email is ON for this document type' : 'Email is OFF — nothing of this type will be sent'}
+                      checked={enabled}
+                      onChange={v => set(`email_enabled.${t.key}`, v)}
+                    />
+                  </div>
+                  <div className={enabled ? '' : 'opacity-50'}>
+                    <TemplateField label="Subject" value={tpl.subject || ''}
+                      onChange={v => set(`draft_templates.${t.key}.subject`, v)} />
+                    <div className="mt-3">
+                      <TemplateField label="Message body" textarea rows={7} value={tpl.body || ''}
+                        onChange={v => set(`draft_templates.${t.key}.body`, v)} />
+                    </div>
                   </div>
                 </Card>
               );
@@ -475,6 +523,26 @@ export default function QuotationSettingsPage() {
 
         {tab === 'rules' && (
           <>
+            <Card
+              title="Delivery Challan"
+              hint="Rates are always recorded on a challan so it can be turned into an invoice in one click. This only controls whether they are PRINTED — and even when it is on, the Rate and Amount columns appear only if the items actually have a price on record."
+            >
+              <Toggle
+                label="Show prices on the printed challan"
+                checked={settings.challan_config?.show_price ?? false}
+                onChange={v => set('challan_config.show_price', v)}
+              />
+              <Toggle
+                label="Show HSN code column"
+                checked={settings.challan_config?.show_hsn ?? true}
+                onChange={v => set('challan_config.show_hsn', v)}
+              />
+              <Field label="Declaration line" value={settings.challan_config?.declaration || ''}
+                onChange={v => set('challan_config.declaration', v)} />
+              <Field label="Challan terms (optional)" textarea rows={2} value={settings.challan_config?.terms || ''}
+                onChange={v => set('challan_config.terms', v)} />
+            </Card>
+
             <Card title="Discount Approval Threshold" hint="A quotation exceeding either limit goes to Pending Approval and cannot be dispatched until an Admin approves it. Set to 0 to disable a check.">
               <Grid>
                 <Field label="Discount % trigger" type="number" value={settings.approval_threshold.discount_pct_trigger}
@@ -511,6 +579,39 @@ export default function QuotationSettingsPage() {
                 onChange={e => set('payment_reminder_offsets', e.target.value.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !Number.isNaN(n)))}
                 placeholder="-3, 0, 7"
                 className="qt-input" />
+            </Card>
+
+            <Card
+              title="Reminder Send Time"
+              hint="What time of day each automatic reminder goes out. All times are IST. The server checks once an hour, so a reminder is sent during the hour you pick — not at an exact minute."
+            >
+              <div className="space-y-2">
+                {REMINDER_JOBS.map(j => (
+                  <div key={j.key} className="flex items-center gap-3 py-2 border-b border-slate-100 last:border-0">
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-semibold text-slate-800">{j.label}</div>
+                      <div className="text-[11px] text-slate-500">{j.hint}</div>
+                    </div>
+                    <select
+                      value={settings.reminder_schedule?.[j.key] ?? ''}
+                      onChange={e => set(`reminder_schedule.${j.key}`, e.target.value === '' ? null : Number(e.target.value))}
+                      disabled={!isAdmin}
+                      className="qt-select w-[130px] shrink-0"
+                    >
+                      <option value="">Never run</option>
+                      {HOUR_OPTIONS.map(h => <option key={h.value} value={h.value}>{h.label}</option>)}
+                    </select>
+                  </div>
+                ))}
+              </div>
+              <div className="mt-3 bg-amber-50 border border-amber-200 text-amber-800 px-3 py-2 rounded-xl text-[11px] flex items-start gap-2">
+                <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                <span>
+                  Two jobs set to the same hour both run on that tick, one after the other.
+                  “Never run” stops the job completely — use the on/off switch under Email Templates
+                  instead if you only want to stop the email but keep the rest of the job working.
+                </span>
+              </div>
             </Card>
           </>
         )}

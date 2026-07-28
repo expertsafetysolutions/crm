@@ -27,6 +27,7 @@ import {
   RotateCcw,
   Filter,
   Trash2,
+  Loader2,
   AlertTriangle,
   Building2,
   History,
@@ -448,6 +449,7 @@ export default function CertificateComplianceGeneratorPage() {
   const [certFilters, setCertFilters] = useState({ company: '', fromDate: '', toDate: '', certType: '' });
   const [certFilterDraft, setCertFilterDraft] = useState({ company: '', fromDate: '', toDate: '', certType: '' });
   const [certPendingDelete, setCertPendingDelete] = useState(null); // the certificate object queued for delete confirmation
+  const [certDownloadingRef, setCertDownloadingRef] = useState(''); // Certificate_No currently rendering to PDF from the list
   const [isDeletingCert, setIsDeletingCert] = useState(false);
 
   // Recently Deleted (soft-delete recovery) — Admin only
@@ -600,7 +602,7 @@ export default function CertificateComplianceGeneratorPage() {
     });
   };
 
-  const handleLoadCertificateToEdit = (c) => {
+  const handleLoadCertificateToEdit = (c, { announce = true } = {}) => {
     const newCertNo = c.Certificate_No || c.certificateNo || '';
     const newRevision = (c.Revision || c.revision || 0);
     const loadedChallanDate = c.Challan_Date || c.challanDate || c.Issue_Date || c.issueDate || getLocalDateStr();
@@ -630,7 +632,42 @@ export default function CertificateComplianceGeneratorPage() {
     setCertSearchQuery(newCertNo);
     setShowCertSearchDropdown(false);
     setActiveMobileTab('preview');
-    alert(`Loaded Certificate ${newCertNo} (Ready to edit and re-save).`);
+    if (announce) alert(`Loaded Certificate ${newCertNo} (Ready to edit and re-save).`);
+  };
+
+  /**
+   * Downloads a certificate straight from the Issued Certificates list.
+   *
+   * The PDF is rendered by html2canvas from the live preview DOM, so the record has to be loaded
+   * into the form and painted before it can be captured — there is no server-side renderer to call.
+   * Hence: load, close the modal, wait for the preview to settle, then build. Nothing is re-saved,
+   * so downloading an old certificate cannot renumber it or alter what was issued.
+   */
+  const downloadCertificateFromList = async (c) => {
+    const refNo = c.Certificate_No || c.certificateNo || '';
+    try {
+      setCertDownloadingRef(refNo);
+      handleLoadCertificateToEdit(c, { announce: false });
+      setShowSearchModal(false);
+      setCertSearchQuery('');
+
+      // Two rAFs plus a beat: the first paints the newly-loaded form, the settle lets the preview's
+      // images (header/stamp/signature) finish decoding before html2canvas snapshots it.
+      await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+      await new Promise(r => setTimeout(r, 350));
+
+      const { pdf } = await buildCertificatePdf();
+      pdf.save(`${getDownloadFilename(
+        c.Certificate_No || c.certificateNo,
+        c.Customer_Name || c.customerName,
+        c.Issue_Date || c.issueDate
+      )}.pdf`);
+    } catch (err) {
+      console.error('Certificate download failed:', err);
+      alert('PDF error: ' + (err.message || 'Could not generate the certificate PDF.'));
+    } finally {
+      setCertDownloadingRef('');
+    }
   };
 
   const handleCertFormatChange = (newFormat) => {
@@ -3686,14 +3723,40 @@ export default function CertificateComplianceGeneratorPage() {
                         <span className="text-[10px] font-bold text-slate-600">
                           Ref No: <span className="text-slate-900">{refNo}</span>
                         </span>
-                        <button
-                          type="button"
-                          onClick={(e) => { e.stopPropagation(); setCertPendingDelete(c); }}
-                          className="p-1.5 rounded-lg text-rose-600 hover:bg-rose-100 transition"
-                          title="Delete Certificate"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleLoadCertificateToEdit(c);
+                              setShowSearchModal(false);
+                              setCertSearchQuery('');
+                            }}
+                            className="p-1.5 rounded-lg text-indigo-600 hover:bg-indigo-100 transition"
+                            title="View this certificate"
+                          >
+                            <Eye className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            disabled={certDownloadingRef === refNo}
+                            onClick={(e) => { e.stopPropagation(); downloadCertificateFromList(c); }}
+                            className="p-1.5 rounded-lg text-amber-700 hover:bg-amber-100 transition disabled:opacity-40"
+                            title="Download PDF"
+                          >
+                            {certDownloadingRef === refNo
+                              ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              : <Download className="w-3.5 h-3.5" />}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); setCertPendingDelete(c); }}
+                            className="p-1.5 rounded-lg text-rose-600 hover:bg-rose-100 transition"
+                            title="Delete Certificate"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
                       </div>
                     </div>
                   );

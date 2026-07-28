@@ -599,7 +599,7 @@ async function updateChallanDraft(challanId, patch, actor) {
  * belongs to the person holding it. The warning has to be acknowledged explicitly, though, so it
  * cannot be issued by accident.
  */
-async function issueChallan(challanId, { challanNo, challanDate, acknowledgeDuplicate } = {}, actor) {
+async function issueChallan(challanId, { challanNo, challanDate, acknowledgeDuplicate, acknowledgeStandby } = {}, actor) {
   const challan = await sheetsService.getChallanById(challanId);
   if (!challan) throw new Error(`Challan ${challanId} not found`);
   if (challan.Status === STATUS.ISSUED) {
@@ -608,6 +608,20 @@ async function issueChallan(challanId, { challanNo, challanDate, acknowledgeDupl
 
   const number = String(challanNo || '').trim();
   if (!number) throw new Error('A challan number is required — enter the number from your challan book');
+
+  // Warn about outstanding loaners here, in the office, rather than only at proof of delivery — by
+  // then the van is at the customer's gate and the collection is somebody else's problem. This one
+  // is advisory (acknowledgeable) because the driver will often collect the unit on arrival; the
+  // POD gate stays absolute. Advisory here, hard there.
+  if (challan.Job_Card_ID && !acknowledgeStandby) {
+    const pending = await jobCardService.getPendingStandby(challan.Job_Card_ID);
+    if (pending.length > 0) {
+      const err = new Error(`${pending.length} standby unit(s) are still with the customer — collect them on this trip or acknowledge to continue`);
+      err.pendingStandby = pending;
+      err.statusCode = 409;
+      throw err;
+    }
+  }
 
   const duplicate = (await sheetsService.getAllChallans()).find(c =>
     c.Challan_ID !== challanId &&

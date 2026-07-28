@@ -169,10 +169,24 @@ export default function ChallanBuilderPage() {
     }
   };
 
+  // Both of these must throw on failure: the modal marks the units resolved as soon as they return,
+  // so swallowing an error here would unlock the signature pad over a write that never happened.
   const returnStandby = async (euids) => {
-    await fetch(`/api/job-cards/${challan.Job_Card_ID}/standby/return`, {
+    const res = await fetch(`/api/job-cards/${challan.Job_Card_ID}/standby/return`, {
       method: 'POST', headers, body: JSON.stringify({ euids })
     });
+    if (!res.ok) {
+      throw new Error((await res.json().catch(() => ({}))).error || 'Could not record the standby return');
+    }
+  };
+
+  const retainStandby = async (euids, reason) => {
+    const res = await fetch(`/api/job-cards/${challan.Job_Card_ID}/standby/retain`, {
+      method: 'POST', headers, body: JSON.stringify({ euids, reason })
+    });
+    if (!res.ok) {
+      throw new Error((await res.json().catch(() => ({}))).error || 'Could not record the retention');
+    }
   };
 
   const savePod = async (payload) => {
@@ -550,6 +564,7 @@ export default function ChallanBuilderPage() {
           pendingStandby={pod.pendingStandby}
           onSubmit={savePod}
           onReturnStandby={returnStandby}
+          onRetainStandby={retainStandby}
           onClose={() => setPod(null)}
           busy={busy}
         />

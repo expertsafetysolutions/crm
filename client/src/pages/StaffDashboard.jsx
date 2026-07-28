@@ -102,6 +102,8 @@ const SYSTEM_REMARK_BADGE_STYLES = {
   'Recheck Done': 'bg-yellow-100 text-yellow-800 border border-yellow-200',
   'Standby Issued': 'bg-slate-100 text-slate-700 border border-slate-200',
   'Standby Returned': 'bg-slate-100 text-slate-700 border border-slate-200',
+  // Amber, not grey: company equipment is still on a customer's site and somebody should notice.
+  'Standby Retained': 'bg-amber-100 text-amber-800 border border-amber-200',
   'Service Complete': 'bg-emerald-100 text-emerald-800 border border-emerald-200',
   // Dispatch
   'Challan Generated': 'bg-indigo-100 text-indigo-800 border border-indigo-200',

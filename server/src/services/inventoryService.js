@@ -12,11 +12,19 @@ function istToday() {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
 }
 
+/**
+ * STANDBY_OUT / STANDBY_IN are their own types rather than reusing USAGE, because a loaner is not
+ * consumed — it comes back. getConsumptionReport() filters on USAGE and SALE_DEDUCTION, so putting
+ * loaners through USAGE would count every extinguisher lent out as material consumed and quietly
+ * corrupt the report. Separate types fall outside that filter for free.
+ */
 const TYPES = {
   INWARD: 'Inward',
   USAGE: 'Usage',
   SALE_DEDUCTION: 'Sale_Deduction',
-  ADJUSTMENT: 'Adjustment'
+  ADJUSTMENT: 'Adjustment',
+  STANDBY_OUT: 'Standby_Out',
+  STANDBY_IN: 'Standby_In'
 };
 
 async function ensureInventoryRow(itemId, unit) {
@@ -53,7 +61,8 @@ async function recordTransaction({ itemId, type, qty, unit, supplierName, suppli
   if (magnitude === 0) throw new Error('Quantity must be non-zero');
 
   const inventoryRow = await ensureInventoryRow(itemId, unit);
-  const isOutward = type === TYPES.USAGE || type === TYPES.SALE_DEDUCTION;
+  // STANDBY_IN is deliberately absent: it returns a loaner to the shelf and so adds, like INWARD.
+  const isOutward = type === TYPES.USAGE || type === TYPES.SALE_DEDUCTION || type === TYPES.STANDBY_OUT;
   const signedQty = type === TYPES.ADJUSTMENT ? raw : (isOutward ? -magnitude : magnitude);
   const balanceAfter = (Number(inventoryRow.Current_Qty) || 0) + signedQty;
 
@@ -95,6 +104,16 @@ async function recordUsage(payload) {
 
 async function recordAdjustment(payload) {
   return recordTransaction({ ...payload, type: TYPES.ADJUSTMENT });
+}
+
+/** A loaner leaving the shelf for a customer site. Reversed by recordStandbyIn when it comes back. */
+async function recordStandbyOut(payload) {
+  return recordTransaction({ ...payload, type: TYPES.STANDBY_OUT });
+}
+
+/** A loaner recovered from a customer site and back in stock. */
+async function recordStandbyIn(payload) {
+  return recordTransaction({ ...payload, type: TYPES.STANDBY_IN });
 }
 
 /**
@@ -223,6 +242,8 @@ module.exports = {
   recordInward,
   recordUsage,
   recordAdjustment,
+  recordStandbyOut,
+  recordStandbyIn,
   deductForInvoice,
   getBalances,
   getLowStock,

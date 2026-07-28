@@ -10,6 +10,8 @@ import {
 import JobCardInwardTab from '../components/jobcard/JobCardInwardTab';
 import JobCardServiceTab from '../components/jobcard/JobCardServiceTab';
 import FinalRecheckModal from '../components/jobcard/FinalRecheckModal';
+import StandbyIssueModal from '../components/jobcard/StandbyIssueModal';
+import CollapsibleSection from '../components/CollapsibleSection';
 
 /**
  * JobCardPage — the workshop's view of one task's equipment, from arrival to ready-for-delivery.
@@ -41,6 +43,8 @@ export default function JobCardPage() {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [recheck, setRecheck] = useState(null);
+  const [standby, setStandby] = useState([]);
+  const [issuingStandby, setIssuingStandby] = useState(false);
 
   const headers = useMemo(
     () => ({ 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }),
@@ -81,6 +85,7 @@ export default function JobCardPage() {
 
       const data = await res.json();
       setCard(data.card);
+      setStandby(Array.isArray(data.card?.Standby_Issued) ? data.card.Standby_Issued : []);
       setItems(data.items || []);
       if ((data.items || []).length > 0 && data.card?.Status !== 'Inward') setActiveTab('SERVICE');
     } catch (e) {
@@ -104,6 +109,25 @@ export default function JobCardPage() {
       })
       .catch(() => { /* the page still works with the built-in fallbacks */ });
   }, [headers, token]);
+
+  // A retained unit is not "out": someone has recorded that the customer is keeping it, so it is no
+  // longer an outstanding collection. Mirrors the server's getPendingStandby filter.
+  const standbyOut = standby.filter(u => !u.returned && !u.retained);
+
+  const issueStandby = async (units) => {
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/job-cards/${card.Job_Card_ID}/standby`, {
+        method: 'POST', headers, body: JSON.stringify({ units })
+      });
+      const saved = await res.json();
+      if (!res.ok) throw new Error(saved.error || 'Could not issue the standby units');
+      setStandby(Array.isArray(saved.Standby_Issued) ? saved.Standby_Issued : []);
+      setIssuingStandby(false);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   // ─── ITEM WRITES ────────────────────────────────────────────────────────────────────────────
 
@@ -367,16 +391,62 @@ export default function JobCardPage() {
             readOnly={isComplete}
           />
         ) : (
-          <JobCardServiceTab
-            items={items}
-            categories={categories}
-            columnsByCode={columnsByCode}
-            itemMaster={itemMaster}
-            onAddParts={addParts}
-            onRemovePart={removePart}
-            onUpdateItem={updateItem}
-            readOnly={isComplete}
-          />
+          <div className="space-y-3">
+            <JobCardServiceTab
+              items={items}
+              categories={categories}
+              columnsByCode={columnsByCode}
+              itemMaster={itemMaster}
+              onAddParts={addParts}
+              onRemovePart={removePart}
+              onUpdateItem={updateItem}
+              readOnly={isComplete}
+            />
+
+            {/* Folds itself away once every loaner is back — the open state is a to-do list. */}
+            <CollapsibleSection
+              isComplete={standbyOut.length === 0}
+              tone={standbyOut.length > 0 ? 'warning' : 'default'}
+              summary={
+                <div className="min-w-0">
+                  <div className="text-xs font-extrabold text-slate-700">Standby units</div>
+                  <div className="text-[10px] text-slate-400">
+                    {standbyOut.length > 0
+                      ? `${standbyOut.length} out with the customer`
+                      : standby.length > 0 ? 'All recovered' : 'None issued'}
+                  </div>
+                </div>
+              }
+            >
+              <div className="space-y-2">
+                {standby.map(u => (
+                  <div key={u.standbyId} className="flex items-center gap-2 text-[11px]">
+                    <span className={`px-1.5 py-0.5 rounded font-extrabold ${
+                      u.returned ? 'bg-emerald-100 text-emerald-700'
+                        : u.retained ? 'bg-amber-100 text-amber-800'
+                        : 'bg-rose-100 text-rose-700'
+                    }`}>
+                      {u.returned ? 'BACK' : u.retained ? 'KEPT' : 'OUT'}
+                    </span>
+                    <span className="font-bold text-slate-700 min-w-0 truncate">
+                      {u.EUID_No} {u.Equipment_Type} {u.Capacity}
+                      {u.gatePassNo && <span className="font-medium text-slate-400"> · GP {u.gatePassNo}</span>}
+                    </span>
+                  </div>
+                ))}
+                {standby.length === 0 && (
+                  <p className="text-[11px] text-slate-400">
+                    Lend the customer a working extinguisher so their site is never left unprotected.
+                  </p>
+                )}
+                {!isComplete && (
+                  <button onClick={() => setIssuingStandby(true)} className="jc-btn-ghost w-full border border-dashed border-slate-300 rounded-xl">
+                    Issue standby units
+                  </button>
+                )}
+              </div>
+            </CollapsibleSection>
+          </div>
         )}
       </main>
 
@@ -423,6 +493,15 @@ export default function JobCardPage() {
           itemMaster={itemMaster}
           onSubmit={submitRecheck}
           onClose={() => setRecheck(null)}
+          busy={busy}
+        />
+      )}
+
+      {issuingStandby && (
+        <StandbyIssueModal
+          categories={categories}
+          onIssue={issueStandby}
+          onClose={() => setIssuingStandby(false)}
           busy={busy}
         />
       )}

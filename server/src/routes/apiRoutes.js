@@ -3781,6 +3781,18 @@ router.post('/job-cards/:id/standby/return', requirePermission('jobcard','edit')
   }
 });
 
+// Records that the customer is keeping a loaner. The only way past the proof-of-delivery standby
+// block, so the service demands a written reason and logs it three ways.
+router.post('/job-cards/:id/standby/retain', requirePermission('jobcard','edit'), async (req, res) => {
+  try {
+    const { euids, reason } = req.body || {};
+    res.json(await jobCardService.retainStandby(req.params.id, euids, { reason }, req.user));
+  } catch (err) {
+    console.error('POST /job-cards/standby/retain error:', err);
+    res.status(400).json({ error: err.message || 'Failed to record standby retention' });
+  }
+});
+
 router.post('/job-cards/:id/generate-challan', requirePermission('jobcard','add'), async (req, res) => {
   try {
     const { itemIds, challanDate } = req.body || {};
@@ -3845,10 +3857,10 @@ router.post('/challans/:id/issue', requirePermission('jobcard','edit'), async (r
     res.json(await challanService.issueChallan(req.params.id, req.body, req.user));
   } catch (err) {
     console.error('POST /challans/:id/issue error:', err);
-    // A duplicate number is a warning the user can override, not a hard failure — 409 carries the
-    // conflicting document so the UI can show what it clashes with.
+    // A duplicate number and an outstanding loaner are both warnings the user can override, not
+    // hard failures — the 409 carries whichever applies so the UI can show what it clashed with.
     if (err.statusCode === 409) {
-      return res.status(409).json({ error: err.message, duplicateOf: err.duplicateOf });
+      return res.status(409).json({ error: err.message, duplicateOf: err.duplicateOf, pendingStandby: err.pendingStandby });
     }
     res.status(400).json({ error: err.message || 'Failed to issue challan' });
   }

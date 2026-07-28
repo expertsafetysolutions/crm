@@ -12,13 +12,16 @@ import { watermarkWithLocation } from '../utils/geoWatermark';
  * cylinder quietly becomes theirs. The server enforces the same rule, so this is a courtesy, not
  * the control.
  */
-export default function DeliveryPODModal({ challan, pendingStandby = [], onSubmit, onReturnStandby, onClose, busy = false }) {
+export default function DeliveryPODModal({ challan, pendingStandby = [], onSubmit, onReturnStandby, onRetainStandby, onClose, busy = false }) {
   const canvasRef = useRef(null);
   const drawing = useRef(false);
   const [hasSignature, setHasSignature] = useState(false);
   const [receivedBy, setReceivedBy] = useState('');
   const [photos, setPhotos] = useState([]);
   const [returned, setReturned] = useState(() => new Set());
+  const [picked, setPicked] = useState(() => new Set());
+  const [retaining, setRetaining] = useState(false);
+  const [retainReason, setRetainReason] = useState('');
   const [gps, setGps] = useState(null);
   const [capturing, setCapturing] = useState(false);
   const [error, setError] = useState('');
@@ -100,11 +103,49 @@ export default function DeliveryPODModal({ challan, pendingStandby = [], onSubmi
     }
   };
 
+  /**
+   * Collects the ticked units only. A driver often gets some loaners back and not others, and
+   * telling them "all or nothing" just teaches them to tick everything.
+   */
   const confirmReturns = async () => {
-    const euids = pendingStandby.map(u => u.EUID_No);
-    await onReturnStandby(euids);
-    setReturned(new Set(euids));
+    const euids = outstanding.filter(u => picked.has(u.EUID_No)).map(u => u.EUID_No);
+    if (euids.length === 0) return;
+    setError('');
+    try {
+      await onReturnStandby(euids);
+      // Only mark them collected once the server has actually said so — otherwise a failed write
+      // would unlock the signature pad and the loaner would be lost.
+      setReturned(prev => new Set([...prev, ...euids]));
+      setPicked(new Set());
+    } catch (e) {
+      setError(e.message || 'Could not record the return');
+    }
   };
+
+  /**
+   * The customer is keeping a unit. This is the only way past the block, so a reason is required —
+   * the server refuses without one and records the retention three separate ways.
+   */
+  const confirmRetention = async () => {
+    const euids = outstanding.filter(u => picked.has(u.EUID_No)).map(u => u.EUID_No);
+    if (euids.length === 0 || !retainReason.trim()) return;
+    setError('');
+    try {
+      await onRetainStandby(euids, retainReason.trim());
+      setReturned(prev => new Set([...prev, ...euids]));
+      setPicked(new Set());
+      setRetainReason('');
+      setRetaining(false);
+    } catch (e) {
+      setError(e.message || 'Could not record the retention');
+    }
+  };
+
+  const togglePick = (euid) => setPicked(prev => {
+    const next = new Set(prev);
+    next.has(euid) ? next.delete(euid) : next.add(euid);
+    return next;
+  });
 
   const submit = () => {
     if (locked) return;
@@ -144,22 +185,65 @@ export default function DeliveryPODModal({ challan, pendingStandby = [], onSubmi
                   <p className="text-[11px] text-rose-800 mt-0.5">
                     Collect them before closing this delivery, or they stay on site indefinitely.
                   </p>
-                  <ul className="mt-1.5 space-y-0.5">
-                    {outstanding.map(u => (
-                      <li key={u.standbyId} className="text-[11px] font-bold text-rose-900">
-                        · {u.EUID_No} {u.Equipment_Type} {u.Capacity}
-                      </li>
-                    ))}
-                  </ul>
                 </div>
               </div>
-              <button
-                onClick={confirmReturns}
-                disabled={busy}
-                className="mt-2 w-full min-h-[44px] rounded-xl bg-rose-600 text-white text-xs font-extrabold active:bg-rose-700 disabled:opacity-40"
-              >
-                Confirm all {outstanding.length} received back
-              </button>
+
+              {/* Tick what actually came back. Some loaners return and some do not, and forcing
+                  all-or-nothing only teaches drivers to tick everything. */}
+              <ul className="mt-2 space-y-1">
+                {outstanding.map(u => (
+                  <li key={u.standbyId}>
+                    <label className="flex items-center gap-2 min-h-[44px] px-2 rounded-lg bg-white/70 border border-rose-200 active:bg-white">
+                      <input
+                        type="checkbox"
+                        checked={picked.has(u.EUID_No)}
+                        onChange={() => togglePick(u.EUID_No)}
+                        className="w-4 h-4 shrink-0"
+                      />
+                      <span className="text-[11px] font-bold text-rose-900 min-w-0 truncate">
+                        {u.EUID_No} {u.Equipment_Type} {u.Capacity}
+                        {u.gatePassNo && <span className="font-medium text-rose-700"> · GP {u.gatePassNo}</span>}
+                      </span>
+                    </label>
+                  </li>
+                ))}
+              </ul>
+
+              {retaining ? (
+                <div className="mt-2 space-y-2">
+                  <textarea
+                    value={retainReason}
+                    onChange={e => setRetainReason(e.target.value)}
+                    rows={2}
+                    placeholder="Why is the customer keeping it? (required)"
+                    className="w-full rounded-xl border border-rose-300 px-2.5 py-2 text-xs"
+                  />
+                  <p className="text-[10px] text-rose-700">
+                    This is recorded against the customer and the unit stops counting as available stock.
+                  </p>
+                  <div className="flex gap-2">
+                    <button onClick={() => { setRetaining(false); setRetainReason(''); }} disabled={busy}
+                      className="flex-1 min-h-[44px] rounded-xl border border-slate-300 text-xs font-extrabold text-slate-600 active:bg-slate-50">
+                      Cancel
+                    </button>
+                    <button onClick={confirmRetention} disabled={busy || !retainReason.trim() || picked.size === 0}
+                      className="flex-1 min-h-[44px] rounded-xl bg-amber-600 text-white text-xs font-extrabold active:bg-amber-700 disabled:opacity-40">
+                      Confirm {picked.size || ''} kept
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="mt-2 space-y-2">
+                  <button onClick={confirmReturns} disabled={busy || picked.size === 0}
+                    className="w-full min-h-[44px] rounded-xl bg-rose-600 text-white text-xs font-extrabold active:bg-rose-700 disabled:opacity-40">
+                    {picked.size === 0 ? 'Tick the units you collected' : `Confirm ${picked.size} received back`}
+                  </button>
+                  <button onClick={() => setRetaining(true)} disabled={busy || picked.size === 0}
+                    className="w-full min-h-[44px] rounded-xl border border-amber-300 bg-amber-50 text-amber-800 text-xs font-extrabold active:bg-amber-100 disabled:opacity-40">
+                    Customer is keeping {picked.size > 1 ? 'these' : 'this'}
+                  </button>
+                </div>
+              )}
             </div>
           )}
 

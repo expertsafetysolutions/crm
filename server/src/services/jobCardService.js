@@ -727,7 +727,7 @@ async function issueStandby(jobCardId, units, actor) {
   if (!Array.isArray(units) || units.length === 0) throw new Error('At least one standby unit is required');
 
   const existing = Array.isArray(card.Standby_Issued) ? card.Standby_Issued : [];
-  const seen = new Set(existing.filter(u => !u.returned).map(u => norm(u.EUID_No)));
+  const seen = new Set(existing.filter(u => !u.returned && !u.retained).map(u => norm(u.EUID_No)));
 
   const added = [];
   for (const u of units) {
@@ -740,13 +740,43 @@ async function issueStandby(jobCardId, units, actor) {
       EUID_No: euid,
       Equipment_Type: u.Equipment_Type || '',
       Capacity: u.Capacity ? normalizeCapacity(u.Capacity) : '',
-      gatePassNo: String(u.gatePassNo || '').trim(),
+      // The customer signs for the unit against this number, so one is always minted rather than
+      // left blank. A number typed by the office wins — they may be copying a paper gate-pass book.
+      gatePassNo: String(u.gatePassNo || '').trim()
+        || `GP${Date.now().toString().slice(-6)}${Math.floor(Math.random() * 100).toString().padStart(2, '0')}`,
+      Item_ID: String(u.Item_ID || '').trim(),
+      Stock_Txn_ID: '',
+      Inventory_Error: '',
       issuedAt: new Date().toISOString(),
       issuedBy: actor?.staffId || 'SYSTEM',
       returned: false,
       returnedAt: '',
-      returnedBy: ''
+      returnedBy: '',
+      // Set when a customer keeps the loaner rather than returning it — see retainStandby().
+      retained: false,
+      retentionReason: '',
+      retainedAt: '',
+      retainedBy: ''
     });
+  }
+
+  // Take the loaner off the shelf where it maps to a catalogue item. Best-effort on purpose: a
+  // missing Item_ID must not stop a unit going out, or an incomplete catalogue would leave a
+  // customer's site unprotected. Same reasoning as deductForInvoice's refusal to block.
+  for (const unit of added) {
+    if (!unit.Item_ID) continue;
+    try {
+      const { transaction } = await inventoryService.recordStandbyOut({
+        itemId: unit.Item_ID,
+        qty: 1,
+        clientId: card.Customer_ID,
+        notes: `Standby ${unit.EUID_No} issued on job card ${jobCardId} (gate pass ${unit.gatePassNo})`,
+        recordedBy: actor?.staffId || 'SYSTEM'
+      });
+      unit.Stock_Txn_ID = transaction.Transaction_ID;
+    } catch (e) {
+      unit.Inventory_Error = e.message;
+    }
   }
 
   const saved = await sheetsService.updateRow('Job_Card_Master', 'Job_Card_ID', jobCardId, {
@@ -765,11 +795,18 @@ async function issueStandby(jobCardId, units, actor) {
   return saved;
 }
 
-/** Standby units still out on a job card. Empty means the loaner loop is closed. */
+/**
+ * Standby units still out on a job card. Empty means the loaner loop is closed.
+ *
+ * A RETAINED unit is excluded. It is still physically on the customer's site, but somebody has
+ * recorded in writing that the customer is keeping it, so it is no longer an outstanding collection
+ * blocking the delivery. Without this the POD gate is unpassable whenever a customer legitimately
+ * keeps a loaner — the driver cannot collect it and cannot close the delivery either.
+ */
 async function getPendingStandby(jobCardId) {
   const card = await sheetsService.getJobCardById(jobCardId);
   if (!card) throw new Error(`Job card ${jobCardId} not found`);
-  return (card.Standby_Issued || []).filter(u => !u.returned);
+  return (card.Standby_Issued || []).filter(u => !u.returned && !u.retained);
 }
 
 /** Marks loaners as recovered. Matching is on EUID, case-insensitively. */
@@ -782,13 +819,32 @@ async function returnStandby(jobCardId, euids, actor) {
 
   const now = new Date().toISOString();
   let matched = 0;
+  const recovered = [];
   const updated = (card.Standby_Issued || []).map(u => {
-    if (u.returned || !wanted.has(norm(u.EUID_No))) return u;
+    if (u.returned || u.retained || !wanted.has(norm(u.EUID_No))) return u;
     matched += 1;
+    recovered.push(u);
     return { ...u, returned: true, returnedAt: now, returnedBy: actor?.staffId || 'SYSTEM' };
   });
 
   if (matched === 0) throw new Error('None of those EUID numbers are currently out on this job card');
+
+  // Put each recovered loaner back on the shelf, mirroring the STANDBY_OUT written at issue. Only
+  // units that actually moved stock on the way out are reversed, so the ledger stays balanced.
+  for (const unit of recovered) {
+    if (!unit.Item_ID || !unit.Stock_Txn_ID) continue;
+    try {
+      await inventoryService.recordStandbyIn({
+        itemId: unit.Item_ID,
+        qty: 1,
+        clientId: card.Customer_ID,
+        notes: `Standby ${unit.EUID_No} recovered from job card ${jobCardId}`,
+        recordedBy: actor?.staffId || 'SYSTEM'
+      });
+    } catch (e) {
+      console.error(`Standby return stock write failed for ${unit.EUID_No}:`, e.message);
+    }
+  }
 
   const saved = await sheetsService.updateRow('Job_Card_Master', 'Job_Card_ID', jobCardId, {
     Standby_Issued: updated,
@@ -799,6 +855,71 @@ async function returnStandby(jobCardId, euids, actor) {
   await interactionLogger.logEvent({
     tag: interactionLogger.EVENT_TAG.STANDBY_RETURNED,
     summary: `${matched} unit(s) collected${stillOut ? `, ${stillOut} still out` : ' — all recovered'} | Job Card ${jobCardId}`,
+    taskId: card.Task_ID,
+    customerId: card.Customer_ID,
+    actor
+  });
+
+  return saved;
+}
+
+/**
+ * Records that the customer is keeping a loaner rather than returning it.
+ *
+ * This is the one way past the proof-of-delivery standby block, so it is deliberately expensive to
+ * use: a written reason is mandatory, and every retention leaves three separate traces — an
+ * Activity_Logs row, a customer-timeline event, and a permanent stock movement. The unit has left
+ * the company for good, so the STANDBY_OUT written at issue is never reversed and the loaner simply
+ * stops being counted as available.
+ *
+ * The alternative was leaving the gate absolute, which sounds safer and is not: a driver who cannot
+ * close a delivery will get it closed some other way, and the truth stops being recorded at all.
+ */
+async function retainStandby(jobCardId, euids, { reason } = {}, actor) {
+  const card = await sheetsService.getJobCardById(jobCardId);
+  if (!card) throw new Error(`Job card ${jobCardId} not found`);
+
+  const text = String(reason || '').trim();
+  if (!text) throw new Error('A reason is required when the customer keeps a standby unit');
+
+  const wanted = new Set((Array.isArray(euids) ? euids : []).map(norm));
+  if (wanted.size === 0) throw new Error('No standby units specified');
+
+  const now = new Date().toISOString();
+  let matched = 0;
+  const kept = [];
+  const updated = (card.Standby_Issued || []).map(u => {
+    if (u.returned || u.retained || !wanted.has(norm(u.EUID_No))) return u;
+    matched += 1;
+    kept.push(u);
+    return { ...u, retained: true, retentionReason: text, retainedAt: now, retainedBy: actor?.staffId || 'SYSTEM' };
+  });
+
+  if (matched === 0) throw new Error('None of those EUID numbers are currently out on this job card');
+
+  const saved = await sheetsService.updateRow('Job_Card_Master', 'Job_Card_ID', jobCardId, {
+    Standby_Issued: updated,
+    Updated_At: new Date().toISOString()
+  });
+
+  // Written to the activity log as well as the timeline so it survives independently of the job
+  // card row — the same reasoning as a refused recheck.
+  for (const unit of kept) {
+    await sheetsService.insertRow('Activity_Logs', {
+      Log_ID: `LOG${Date.now()}${Math.floor(Math.random() * 100).toString().padStart(2, '0')}`,
+      Task_ID: card.Task_ID,
+      Staff_ID: actor?.staffId || 'SYSTEM',
+      Action_Taken: `Customer retained standby unit ${unit.EUID_No} (gate pass ${unit.gatePassNo || 'n/a'}, Job Card ${jobCardId})`,
+      Lat_Long_Location: '0.0000, 0.0000',
+      Remarks: text,
+      Timestamp: now,
+      Image_URL: ''
+    });
+  }
+
+  await interactionLogger.logEvent({
+    tag: interactionLogger.EVENT_TAG.STANDBY_RETAINED,
+    summary: `${matched} unit(s) kept by customer (${kept.map(u => u.EUID_No).join(', ')}) | ${text}`,
     taskId: card.Task_ID,
     customerId: card.Customer_ID,
     actor
@@ -829,5 +950,6 @@ module.exports = {
   completeService,
   issueStandby,
   getPendingStandby,
-  returnStandby
+  returnStandby,
+  retainStandby
 };

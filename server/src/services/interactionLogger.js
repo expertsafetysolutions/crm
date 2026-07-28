@@ -32,6 +32,9 @@ const EVENT_TAG = {
   RECHECK_DONE: 'Recheck Done',
   STANDBY_ISSUED: 'Standby Issued',
   STANDBY_RETURNED: 'Standby Returned',
+  // The customer kept a loaner instead of returning it. Its own tag because this is the exception
+  // that lets a delivery close with company equipment still on site — it must be findable later.
+  STANDBY_RETAINED: 'Standby Retained',
   SERVICE_COMPLETE: 'Service Complete',
   CHALLAN_GENERATED: 'Challan Generated',
   CHALLAN_ISSUED: 'Challan Issued',

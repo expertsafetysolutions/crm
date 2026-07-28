@@ -427,7 +427,10 @@ app.get('/api/verify-certificate/:guid', async (req, res) => {
 // Public Customer Quotation Portal (Module C) — no auth by design: the link is opened cold from an
 // email/WhatsApp message by a customer who has no login. The unguessable Portal_Guid in the URL is
 // the credential, same model as the certificate verification link above.
-app.get('/api/quote-portal/:guid', async (req, res) => {
+// /q/:guid is the short customer-facing form; /api/quote-portal/:guid stays registered so links
+// already mailed under the old shape keep working. :guid accepts either a Portal_Code or a
+// legacy Portal_Guid — getQuotationByPortalGuid matches both.
+app.get(['/api/quote-portal/:guid', '/q/:guid'], async (req, res) => {
   const quotePortalView = require('./services/quotePortalView');
   try {
     const quotation = await sheetsService.getQuotationByPortalGuid(req.params.guid);
@@ -472,7 +475,7 @@ app.get('/api/quote-portal/:guid', async (req, res) => {
   }
 });
 
-app.post('/api/quote-portal/:guid/action', async (req, res) => {
+app.post(['/api/quote-portal/:guid/action', '/q/:guid/action'], async (req, res) => {
   try {
     const quotePortalView = require('./services/quotePortalView');
     const quotationEngine = require('./services/quotationEngine');

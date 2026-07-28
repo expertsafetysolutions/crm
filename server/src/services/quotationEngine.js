@@ -136,6 +136,18 @@ function newPortalGuid() {
   return crypto.randomBytes(24).toString('hex');
 }
 
+// Short code for the customer-facing /q/ link. Crockford-style alphabet with no I/L/O/U, so a code
+// read aloud over the phone or retyped off a printout cannot collapse into a different one.
+// 8 chars over 32 symbols is ~1.1e12 combinations — the code IS the credential (same model as
+// Portal_Guid), so it must stay unguessable. Do not shorten it.
+const PORTAL_CODE_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+function newPortalCode() {
+  const bytes = crypto.randomBytes(8);
+  let out = '';
+  for (let i = 0; i < 8; i++) out += PORTAL_CODE_ALPHABET[bytes[i] % 32];
+  return out;
+}
+
 /** Snapshot of buyer identity at issue time so historical documents never shift under edits. */
 function buildCustomerSnapshot(customer) {
   const gstin = gstUtils.normalizeGstin(customer.GSTIN || customer.Gst_No);
@@ -271,6 +283,7 @@ async function createQuotation(payload, actor) {
     Created_At_Ms: nowMs,
 
     Portal_Guid: newPortalGuid(),
+    Portal_Code: newPortalCode(),
     Portal_Last_Viewed_At: '',
     Dispatch_Log: [],
     Customer_Action_Log: [],
@@ -452,6 +465,7 @@ async function createRevision(quotationId, payload, actor) {
 
     // Each revision is independently dispatchable and gets its own portal link/history.
     Portal_Guid: newPortalGuid(),
+    Portal_Code: newPortalCode(),
     Portal_Last_Viewed_At: '',
     Dispatch_Log: [],
     Customer_Action_Log: [],

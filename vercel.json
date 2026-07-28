@@ -12,6 +12,10 @@
       "destination": "/api/index.js"
     },
     {
+      "source": "/q/(.*)",
+      "destination": "/api/index.js"
+    },
+    {
       "source": "/(.*)",
       "destination": "/index.html"
     }

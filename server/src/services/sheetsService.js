@@ -408,11 +408,16 @@ class MongoService {
     const quotes = await this.getAllQuotations();
     return quotes.find(q => q.Quotation_ID === quotationId) || null;
   }
+  // Matches either the long legacy Portal_Guid or the short Portal_Code, so links mailed before
+  // short codes existed keep resolving forever. One lookup serves both URL shapes.
   async getQuotationByPortalGuid(guid) {
     if (!guid) return null;
     const quotes = await this.getAllQuotations();
     const target = String(guid).trim().toLowerCase();
-    return quotes.find(q => String(q.Portal_Guid || '').toLowerCase() === target) || null;
+    return quotes.find(q =>
+      String(q.Portal_Guid || '').toLowerCase() === target ||
+      String(q.Portal_Code || '').toLowerCase() === target
+    ) || null;
   }
   // All revisions of one quotation share a Root_Quotation_ID (R0's own ID), so the whole
   // version history is one filter rather than a recursive walk up Parent_Quotation_ID.

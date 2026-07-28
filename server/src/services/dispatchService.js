@@ -33,8 +33,10 @@ function portalBaseUrl() {
   return `http://localhost:${process.env.PORT || 5000}`;
 }
 
+// Short /q/ path keeps the customer-facing link readable. Quotations issued before Portal_Code
+// existed fall back to their long GUID, which the same route still resolves.
 function quotePortalLink(quotation) {
-  return `${portalBaseUrl()}/api/quote-portal/${quotation.Portal_Guid}`;
+  return `${portalBaseUrl()}/q/${quotation.Portal_Code || quotation.Portal_Guid}`;
 }
 
 async function getSettings() {

@@ -865,6 +865,36 @@ export default function CertificateComplianceGeneratorPage() {
     } catch (err) { alert(err.message); }
   };
 
+  /**
+   * Asks the server for the next number for a prefix, from the atomic Counter_Master sequence.
+   *
+   * Falls back to the local scan only when offline — see getLatestSequenceNumber. The returned
+   * number is provisional either way: POST /api/certificates re-checks uniqueness and reports any
+   * reassignment, which saveCertificateRecord adopts.
+   *
+   * Declared before the useEffects below (rather than near the other handlers further down) because
+   * this component has early returns (isPageLoading / loadError) partway through its body — a plain
+   * `const` declared after those returns is never initialized on the render that registers an effect
+   * closing over it, and calling it later throws "Cannot access before initialization".
+   */
+  const allocateCertNumber = async (letters, certsForFallback = allCertificates) => {
+    const stem = `${(certForm.certPrefix || 'Expert/')}${(certForm.certPeriod || '26-27')}`;
+    const prefixLetter = String(letters || '').toUpperCase();
+    try {
+      const res = await fetch(
+        `/api/certificates/next-number?stem=${encodeURIComponent(stem)}&letters=${encodeURIComponent(prefixLetter)}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (!res.ok) throw new Error('allocator unavailable');
+      const json = await res.json();
+      return { certificateNo: json.number, certSequence: json.sequence, provisional: false };
+    } catch {
+      const nextSeq = getLatestSequenceNumber(certsForFallback, prefixLetter) + 1;
+      const sequence = `${prefixLetter}${nextSeq}`;
+      return { certificateNo: `${stem}/${sequence}`, certSequence: sequence, provisional: true };
+    }
+  };
+
   // Load customers, equipment master, and (if opened from a task) the task itself
   useEffect(() => {
     let cancelled = false;
@@ -1333,31 +1363,6 @@ export default function CertificateComplianceGeneratorPage() {
         : [...prev, json.certificate]);
     }
     return { ...json, isExisting };
-  };
-
-  /**
-   * Asks the server for the next number for a prefix, from the atomic Counter_Master sequence.
-   *
-   * Falls back to the local scan only when offline — see getLatestSequenceNumber. The returned
-   * number is provisional either way: POST /api/certificates re-checks uniqueness and reports any
-   * reassignment, which saveCertificateRecord adopts.
-   */
-  const allocateCertNumber = async (letters, certsForFallback = allCertificates) => {
-    const stem = `${(certForm.certPrefix || 'Expert/')}${(certForm.certPeriod || '26-27')}`;
-    const prefixLetter = String(letters || '').toUpperCase();
-    try {
-      const res = await fetch(
-        `/api/certificates/next-number?stem=${encodeURIComponent(stem)}&letters=${encodeURIComponent(prefixLetter)}`,
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      if (!res.ok) throw new Error('allocator unavailable');
-      const json = await res.json();
-      return { certificateNo: json.number, certSequence: json.sequence, provisional: false };
-    } catch {
-      const nextSeq = getLatestSequenceNumber(certsForFallback, prefixLetter) + 1;
-      const sequence = `${prefixLetter}${nextSeq}`;
-      return { certificateNo: `${stem}/${sequence}`, certSequence: sequence, provisional: true };
-    }
   };
 
   // Bumps the in-memory certificate number to the next unused sequence for the current format —

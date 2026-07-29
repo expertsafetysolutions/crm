@@ -8,7 +8,8 @@
     "dev:client": "npm --prefix client run dev",
     "build": "npm --prefix client install && npm --prefix client run build",
     "build:client": "npm --prefix client run build",
-    "test:workflow": "npm --prefix server run test:workflow"
+    "test:workflow": "npm --prefix server run test:workflow",
+    "verify": "node server/tests/verifyPhases.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

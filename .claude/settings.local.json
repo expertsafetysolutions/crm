@@ -39,7 +39,11 @@
       "Bash(node --check server/src/services/challanService.js)",
       "Bash(node --check server/src/services/conversionService.js)",
       "Bash(npx vercel *)",
-      "Bash(node --check server/src/routes/apiRoutes.js)"
+      "Bash(node --check server/src/routes/apiRoutes.js)",
+      "Bash(node --check server/src/utils/piiMask.js)",
+      "Bash(node --check server/tests/verifyEncryption.js)",
+      "Bash(timeout 200 npm run verify:encryption)",
+      "Bash(timeout 180 npm run verify)"
     ]
   }
 }

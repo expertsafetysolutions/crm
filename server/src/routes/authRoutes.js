@@ -2,8 +2,9 @@ const express = require('express');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const sheetsService = require('../services/sheetsService');
-const { verifyStaffPassword, validatePasswordPolicy } = require('../utils/passwordUtils');
+const { verifyStaffPassword, validatePasswordPolicy, needsRehash } = require('../utils/passwordUtils');
 const { resolvePermissions } = require('../utils/permissions');
+const { loginLimiter, passwordChangeLimiter } = require('../middleware/security');
 
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -12,7 +13,7 @@ if (!JWT_SECRET) {
 }
 
 // POST /api/auth/login
-router.post('/login', async (req, res) => {
+router.post('/login', loginLimiter, async (req, res) => {
   try {
     const { staffId, password } = req.body;
     if (!staffId || !password) {
@@ -33,6 +34,19 @@ router.post('/login', async (req, res) => {
 
     if (!isMatch) {
       return res.status(401).json({ error: 'Invalid Staff ID or Password' });
+    }
+
+    // Opportunistic upgrade of a legacy plaintext row, using the password just proven correct.
+    // Best-effort on purpose: a write failure here must never turn a valid login into an error,
+    // so it is logged and swallowed rather than awaited into the response path.
+    if (needsRehash(staff)) {
+      try {
+        await sheetsService.updateRow('Staff_Master', 'Staff_ID', staff.Staff_ID, {
+          Password: bcrypt.hashSync(password, 8)
+        });
+      } catch (rehashErr) {
+        console.error(`Password rehash failed for ${staff.Staff_ID}:`, rehashErr.message);
+      }
     }
 
     // Generate JWT
@@ -101,7 +115,7 @@ router.get('/me', authenticateToken, async (req, res) => {
 // PUT /api/auth/change-password — self-service password change for the logged-in user
 // (Admin or Staff). Requires the current password; resetting SOMEONE ELSE's password as
 // an Admin override goes through PUT /api/staff/:id/set-password instead.
-router.put('/change-password', authenticateToken, async (req, res) => {
+router.put('/change-password', authenticateToken, passwordChangeLimiter, async (req, res) => {
   try {
     const { oldPassword, newPassword, confirmPassword } = req.body;
     if (!oldPassword || !newPassword || !confirmPassword) {

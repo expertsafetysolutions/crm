@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
+const { encryptRow, decryptRows, decryptRow } = require('../utils/cryptoMiddleware');
 
 // Flexible Schemas mapping to the old "Tabs"
 const createModel = (name) => {
@@ -131,8 +132,12 @@ class MongoService {
       if (doc.id === undefined && fallbackId) doc.id = fallbackId;
       return doc;
     });
-    this.cache[sheetName] = { timestamp: now, data: cleanData };
-    return cleanData;
+    // Decrypt BEFORE caching, so the cached array holds plaintext and a second reader inside the
+    // 3s TTL never re-decrypts an already-decrypted value. decryptRows returns new objects and
+    // leaves `cleanData` untouched, matching the read-only contract this cache relies on.
+    const decrypted = decryptRows(sheetName, cleanData);
+    this.cache[sheetName] = { timestamp: now, data: decrypted };
+    return decrypted;
   }
 
   async insertRow(sheetName, data) {
@@ -140,7 +145,9 @@ class MongoService {
     await this.connect();
     const Model = models[sheetName];
     if (!Model) throw new Error(`Collection ${sheetName} not found`);
-    const doc = new Model(data);
+    // Encrypt on the way in. The caller gets its ORIGINAL plaintext object back, not the encrypted
+    // one — several routes return the inserted row straight to the client as the API response.
+    const doc = new Model(encryptRow(sheetName, data));
     await doc.save();
     return data;
   }
@@ -176,7 +183,13 @@ class MongoService {
       }
     }
 
-    const updated = await Model.findOneAndUpdate(query, { $set: updateData }, { new: true, returnDocument: 'after' }).lean();
+    // $set only the fields the caller supplied, encrypted. encryptRow never materialises a key
+    // that was absent, so an update touching one field cannot blank out the others.
+    const updated = await Model.findOneAndUpdate(
+      query,
+      { $set: encryptRow(sheetName, updateData) },
+      { new: true, returnDocument: 'after' }
+    ).lean();
     if (updated) {
       delete updated._id;
       delete updated.__v;
@@ -253,13 +266,19 @@ class MongoService {
         }
       }
 
-      return updated;
+      // Decrypt on the way out: `updated` came back from Mongo and holds ciphertext, but callers
+      // (and the routes that return this straight to the client) expect plaintext.
+      return decryptRow(sheetName, updated);
     }
     const allDocs = await this.getTab(sheetName);
     const existing = allDocs.find(d => String(d[idColumn]).trim().toLowerCase() === String(idValue).trim().toLowerCase());
     if (existing) {
       delete this.cache[sheetName];
-      await Model.updateOne({ [idColumn]: existing[idColumn] }, { $set: updateData });
+      // Second write path — must encrypt too, or an update routed through here would silently
+      // store plaintext into a collection whose other rows are encrypted.
+      await Model.updateOne({ [idColumn]: existing[idColumn] }, { $set: encryptRow(sheetName, updateData) });
+      // `existing` came from getTab and is already decrypted, so merging the plaintext update
+      // over it yields the plaintext row the caller expects.
       return { ...existing, ...updateData };
     }
     return null;

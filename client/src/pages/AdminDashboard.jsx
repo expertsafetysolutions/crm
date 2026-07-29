@@ -8177,9 +8177,10 @@ export default function AdminDashboard() {
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">Login Password *</label>
                   <input
-                    type="text"
+                    type="password"
                     required
-                    placeholder="Default: staff123"
+                    autoComplete="new-password"
+                    placeholder="Min 8 chars, letter + number + symbol"
                     value={newStaffForm.password}
                     onChange={e => setNewStaffForm({ ...newStaffForm, password: e.target.value })}
                     className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500"

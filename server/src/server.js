@@ -12,6 +12,21 @@ const PORT = process.env.PORT || 5000;
 // the request log starts, so the banner is the first thing in the output rather than buried.
 require('./services/safeMode').announceOnBoot();
 
+const {
+  applySecurityHeaders,
+  loginLimiter,
+  passwordChangeLimiter,
+  apiLimiter,
+  publicVerifyLimiter
+} = require('./middleware/security');
+
+// Vercel puts the real client IP in X-Forwarded-For. Without this every request looks like it
+// comes from the proxy, so ONE tripped rate limit would lock out every user at once. Trust one
+// hop only — trusting the whole chain would let a client spoof the header and dodge the limits.
+app.set('trust proxy', 1);
+
+applySecurityHeaders(app);
+
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
@@ -23,6 +38,7 @@ app.use((req, res, next) => {
 
 const path = require('path');
 const sheetsService = require('./services/sheetsService');
+const { escapeHtml } = require('./utils/htmlEscape');
 
 // Serve static assets (Header, Footer, Stamp images) from the root assets directory
 app.use('/assets', express.static(path.join(__dirname, '../../assets')));
@@ -48,7 +64,7 @@ app.get('/api/media/:id', async (req, res) => {
 });
 
 // Public Certificate Verification API (No Auth Required for QR Code Verification)
-app.get('/api/verify-certificate/:guid', async (req, res) => {
+app.get('/api/verify-certificate/:guid', publicVerifyLimiter, async (req, res) => {
   try {
     const guid = req.params.guid;
 
@@ -62,8 +78,8 @@ app.get('/api/verify-certificate/:guid', async (req, res) => {
         const r = m.toObject ? m.toObject() : m;
         const g = r.Verification_GUID || r.verificationGuid || '';
         return `<li><a href="/api/verify-certificate/${encodeURIComponent(g)}">
-          <b>${r.Customer_Name || r.customerName || 'Unknown customer'}</b>
-          <span>${r.Issue_Date || r.issueDate || ''} — ${r.Format_Type || r.formatType || 'Certificate'}</span>
+          <b>${escapeHtml(r.Customer_Name || r.customerName || 'Unknown customer')}</b>
+          <span>${escapeHtml(r.Issue_Date || r.issueDate || '')} — ${escapeHtml(r.Format_Type || r.formatType || 'Certificate')}</span>
         </a></li>`;
       }).join('');
       return res.status(300).send(`
@@ -82,7 +98,7 @@ app.get('/api/verify-certificate/:guid', async (req, res) => {
           span { display:block; color:#64748b; font-size:11.5px; font-weight:600; margin-top:2px; }
         </style></head><body><div class="card">
           <h1>More than one certificate</h1>
-          <p>Reference <b style="display:inline">${guid}</b> matches ${matches.length} certificates. Choose the one you are verifying, or scan the QR code on the document for a direct result.</p>
+          <p>Reference <b style="display:inline">${escapeHtml(guid)}</b> matches ${matches.length} certificates. Choose the one you are verifying, or scan the QR code on the document for a direct result.</p>
           <ul>${rows}</ul>
         </div></body></html>
       `);
@@ -121,7 +137,7 @@ app.get('/api/verify-certificate/:guid', async (req, res) => {
             <div class="card">
               <div class="icon">⚠️</div>
               <h1>Certificate Revoked</h1>
-              <p>Certificate <span class="ref">${rawCert.Certificate_No || rawCert.certificateNo || guid}</span> has been withdrawn from our active registry by Expert Safety Solutions and is no longer valid. If you believe this is an error, or need a reissued copy, please contact us directly.</p>
+              <p>Certificate <span class="ref">${escapeHtml(rawCert.Certificate_No || rawCert.certificateNo || guid)}</span> has been withdrawn from our active registry by Expert Safety Solutions and is no longer valid. If you believe this is an error, or need a reissued copy, please contact us directly.</p>
               <a href="/" class="btn">Back to Portal</a>
             </div>
           </body>
@@ -283,21 +299,21 @@ app.get('/api/verify-certificate/:guid', async (req, res) => {
             </div>
             <div class="content">
               <div class="expired-icon">🔔</div>
-              <h2 class="doc-title">${details.title}</h2>
+              <h2 class="doc-title">${escapeHtml(details.title)}</h2>
               <p class="msg">Your certificate <b>expired on ${formatDate(details.validity)}</b>. This does <b>not</b> mean it is invalid or fraudulent — it simply means the validity period is over and it's time to renew. Please renew now to stay compliant and protected.</p>
 
               <div class="info-grid">
                 <div class="info-box">
                   <div class="info-label">Document No</div>
-                  <div class="info-val">${details.number}</div>
+                  <div class="info-val">${escapeHtml(details.number)}</div>
                 </div>
                 <div class="info-box">
                   <div class="info-label">Client Name</div>
-                  <div class="info-val">${maskCustomerName(details.client)}</div>
+                  <div class="info-val">${escapeHtml(maskCustomerName(details.client))}</div>
                 </div>
                 <div class="info-box">
                   <div class="info-label">Document Type</div>
-                  <div class="info-val">${details.type}</div>
+                  <div class="info-val">${escapeHtml(details.type)}</div>
                 </div>
                 <div class="info-box">
                   <div class="info-label">Expired On</div>
@@ -370,18 +386,18 @@ app.get('/api/verify-certificate/:guid', async (req, res) => {
           </div>
           <div class="content">
             <div class="title-area">
-              <h2 class="doc-title">${details.title}</h2>
-              <p class="doc-subtitle">${details.equipmentDetails}</p>
+              <h2 class="doc-title">${escapeHtml(details.title)}</h2>
+              <p class="doc-subtitle">${escapeHtml(details.equipmentDetails)}</p>
             </div>
             
             <div class="info-grid">
               <div class="info-box">
                 <div class="info-label">Document No</div>
-                <div class="info-val">${details.number}</div>
+                <div class="info-val">${escapeHtml(details.number)}</div>
               </div>
               <div class="info-box">
                 <div class="info-label">Client Name</div>
-                <div class="info-val">${maskCustomerName(details.client)}</div>
+                <div class="info-val">${escapeHtml(maskCustomerName(details.client))}</div>
               </div>
               <div class="info-box" style="grid-column: span 1;">
                 <div class="info-label">Premises Address</div>
@@ -389,7 +405,7 @@ app.get('/api/verify-certificate/:guid', async (req, res) => {
               </div>
               <div class="info-box">
                 <div class="info-label">Document Type</div>
-                <div class="info-val" style="color: #047857;">${details.type}</div>
+                <div class="info-val" style="color: #047857;">${escapeHtml(details.type)}</div>
               </div>
               <div class="info-box">
                 <div class="info-label">Issue Date</div>
@@ -421,10 +437,10 @@ app.get('/api/verify-certificate/:guid', async (req, res) => {
                     ${items.map((it, idx) => `
                       <tr>
                         <td style="text-align: center; color: #64748b;">${idx + 1}</td>
-                        <td style="font-weight: 800; color: #1e293b;">${it.itemName || it.Item_Name || '—'}</td>
+                        <td style="font-weight: 800; color: #1e293b;">${escapeHtml(it.itemName || it.Item_Name || '—')}</td>
                         ${details.type !== 'Training Certificate' ? `
-                          <td>${it.capacity || it.Capacity || '—'}</td>
-                          <td style="text-align: center; font-weight: 800; color: #1e3a8a;">${it.qty || it.quantity || it.Qty || '1 Nos.'}</td>
+                          <td>${escapeHtml(it.capacity || it.Capacity || '—')}</td>
+                          <td style="text-align: center; font-weight: 800; color: #1e3a8a;">${escapeHtml(it.qty || it.quantity || it.Qty || '1 Nos.')}</td>
                           <td style="font-weight: 700; color: #b91c1c;">${formatDate(it.nextDate || it.Next_Date || it.validUntil)}</td>
                         ` : ''}
                         ${(details.customColumns || []).map(c => `<td>${(it.customValues || it.Custom_Values)?.[c.id] || it[c.id] || '—'}</td>`).join('')}
@@ -437,13 +453,13 @@ app.get('/api/verify-certificate/:guid', async (req, res) => {
 
             ${(details.customCertifyLines || []).filter(l => l && l.trim()).length > 0 ? `
               <div class="custom-lines">
-                ${details.customCertifyLines.filter(l => l && l.trim()).map(line => `<p style="margin: 4px 0;">● ${line}</p>`).join('')}
+                ${details.customCertifyLines.filter(l => l && l.trim()).map(line => `<p style="margin: 4px 0;">● ${escapeHtml(line)}</p>`).join('')}
               </div>
             ` : ''}
 
             ${(details.customEquipmentNotes || []).filter(l => l && l.trim()).length > 0 ? `
               <div class="custom-lines" style="border-top: 1px dashed #e2e8f0; margin-top: 15px; padding-top: 10px; font-style: italic; color: #64748b;">
-                ${details.customEquipmentNotes.filter(l => l && l.trim()).map(line => `<p style="margin: 4px 0;">${line}</p>`).join('')}
+                ${details.customEquipmentNotes.filter(l => l && l.trim()).map(line => `<p style="margin: 4px 0;">${escapeHtml(line)}</p>`).join('')}
               </div>
             ` : ''}
           </div>
@@ -710,11 +726,15 @@ app.get('/api/health', (req, res) => {
 });
 
 // Routes
+//
+// Rate limiting is attached at the mount points rather than globally, so /api/health above stays
+// uncounted — an uptime monitor polling every 30s must never be what exhausts the budget.
+// authRouter carries its own tighter per-endpoint limiters internally (login, change-password).
 app.use('/api/auth', authRouter);
 // Procurement lives in its own router to keep ~500 lines out of apiRoutes.js. Mounted first only
 // because every path it owns is new — nothing here can shadow an existing route either way.
-app.use('/api', purchaseRouter);
-app.use('/api', apiRouter);
+app.use('/api', apiLimiter, purchaseRouter);
+app.use('/api', apiLimiter, apiRouter);
 
 const attendanceService = require('./services/attendanceService');
 

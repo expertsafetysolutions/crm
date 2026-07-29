@@ -18,6 +18,7 @@ const challanService = require('../services/challanService');
 const priceListService = require('../services/priceListService');
 const interactionLogger = require('../services/interactionLogger');
 const moneyMask = require('../utils/moneyMask');
+const piiMask = require('../utils/piiMask');
 
 const router = express.Router();
 
@@ -28,6 +29,15 @@ router.use(authenticateToken);
 // carry pricing. It only touches the outbound JSON: service-to-service data (invoice conversion,
 // stock deduction, challan pricing) never passes through it and is unaffected.
 router.use(moneyMask.middleware());
+
+// Partially masks customer email/address for `staff` and `delivery` (phone is exempted for both
+// roles — task-card Call/WhatsApp buttons need the real number; see PHONE_EXEMPT_ROLES in
+// piiMask.js). Mounted AFTER moneyMask so it wraps res.json second and therefore runs FIRST at
+// send time; the two touch disjoint field sets, so the order affects nothing but is fixed here
+// rather than left to chance. Deliberately not route-scoped — contact details surface on tasks,
+// challans, job cards and /sync/all alike, and an allow-list would leak through whichever route
+// was forgotten.
+router.use(piiMask.middleware());
 
 // Auto-injects a system-generated entry into the company's remark timeline (Customer_Interactions)
 // on task lifecycle events (created / status changed / completed). Delegates to interactionLogger,
@@ -858,6 +868,15 @@ router.post('/staff', async (req, res) => {
     const { name, email, mobile, role, department, dailySalaryRate, permissions, password } = req.body;
     if (!name) return res.status(400).json({ error: 'Staff name is required' });
 
+    // New accounts used to default to 'staff123' when no password was supplied. Combined with the
+    // login bypass that has since been removed, that made every new hire's account guessable from
+    // their staff ID alone. An explicit password meeting the standard policy is now required.
+    if (!password) {
+      return res.status(400).json({ error: 'An initial password is required when creating staff.' });
+    }
+    const policyError = validatePasswordPolicy(password);
+    if (policyError) return res.status(400).json({ error: policyError });
+
     const allStaff = await sheetsService.getAllStaff();
     const nextIdNum = allStaff.length + 1;
     const newStaff = {
@@ -865,7 +884,7 @@ router.post('/staff', async (req, res) => {
       Name: name,
       Mobile: mobile ? (mobile.startsWith('+') ? mobile : `+91 ${mobile}`) : '+91 90000 00000',
       Email: email || `${name.toLowerCase().replace(/\s+/g, '.')}@expertsafety.in`,
-      Password: bcrypt.hashSync(password || 'staff123', 8),
+      Password: bcrypt.hashSync(password, 8),
       Role: role || 'Staff',
       Department: department || 'Field Operations',
       Status: 'Active',

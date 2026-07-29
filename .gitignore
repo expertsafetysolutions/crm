@@ -6,3 +6,10 @@ node_modules
 dist
 client/dist
 *.log
+
+# Database dumps from scripts/backup-db.js — full customer, staff and pricing records in
+# plaintext JSON. Committing one would put the entire database into git history, where it
+# survives every later deletion.
+backups/
+*.bson
+*.gz

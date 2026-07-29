@@ -133,7 +133,6 @@ export default function SmartSearchSelect({
           <input
             type="text"
             className="jc-input pl-9"
-            style={{ minHeight: '48px' }}
             value={query}
             placeholder={placeholder}
             disabled={disabled}

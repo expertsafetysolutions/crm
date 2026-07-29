@@ -197,10 +197,19 @@ for that first and the desktop takes care of itself.
 **Mobile-first, not mobile-also.** Lay out for 320–480px and let it scale up. A screen that only
 works once it is wide is a broken screen.
 
-**Touch targets: 48px minimum for anything new**, with spacing enough that a gloved thumb cannot hit
-two things at once. The existing `.jc-input` / `.jc-btn-ghost` sit at 44px and stay there — they are
-already deployed across every workshop form, and churning them buys nothing. 48px is the floor for
-new controls; never go below 44px anywhere.
+**Touch targets are sized by ROLE, not by one global number.** A blanket "48px everywhere" fills the
+screen and makes things worse — eight 48px icons need 384px of width on a 360px phone.
+
+| Control | Size | Why |
+|---|---|---|
+| Primary action (Save, Submit, Issue, Post) | **48px** | One per screen, thumb-reached, expensive to mis-tap |
+| Form input / row you type into | **44px** (`.jc-input`) | Filled one-handed at a workbench, often in gloves |
+| Full-width list row you pick from | **48px** | The whole row is the target, so width is free |
+| Icon button in a toolbar row (call, WhatsApp, map, delete) | **32px** (`w-8 h-8`) | Six to eight sit side by side; enlarging them pushes the row off screen or wraps it. Spacing and separation carry the accuracy here, not size. |
+
+The existing sizes are already right — the task card's action strip at 32px, `.jc-input` at 44px, the
+sticky Save at 48px. **Do not "upgrade" them.** Match the role, and only reach for a bigger target
+when a control is genuinely alone on its line.
 
 **Primary actions live in a sticky bottom bar**, thumb-reachable, padded clear of the home indicator
 with `env(safe-area-inset-bottom)`. Headers stay sticky too so context is never lost mid-scroll.

@@ -795,7 +795,7 @@ function RfqForm({ form, setForm, vendors, items, busy, onCancel, onSubmit }) {
           {/* A filter rather than a dropdown: this is multi-select, and hiding the ticks behind a
               popover would mean losing sight of who is already chosen. */}
           {vendors.length > 6 && (
-            <input className="jc-input mb-1" style={{ minHeight: '48px' }} value={vendorQuery}
+            <input className="jc-input mb-1" value={vendorQuery}
               placeholder="Filter vendors" onChange={e => setVendorQuery(e.target.value)} />
           )}
           <div className="space-y-1 max-h-64 overflow-y-auto">

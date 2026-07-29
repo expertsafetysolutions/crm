@@ -2,7 +2,8 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, Plus, Trash2, Loader2, AlertTriangle, CheckCircle2,
-  Building2, FileQuestion, ShoppingCart, PackageCheck, Star, TrendingDown
+  Building2, FileQuestion, ShoppingCart, PackageCheck, Star, TrendingDown,
+  IndianRupee, ArrowRight
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
@@ -20,6 +21,7 @@ import { useAuth } from '../context/AuthContext';
 const TABS = [
   { id: 'ORDERS', label: 'Orders', icon: ShoppingCart },
   { id: 'RECEIVE', label: 'Receive', icon: PackageCheck },
+  { id: 'PAYMENTS', label: 'Payments', icon: IndianRupee, needsMoney: true },
   { id: 'RFQ', label: 'Enquiries', icon: FileQuestion },
   { id: 'VENDORS', label: 'Vendors', icon: Building2 }
 ];
@@ -44,6 +46,9 @@ export default function PurchasePage() {
   const [rfqForm, setRfqForm] = useState(null);
   const [compare, setCompare] = useState(null);
   const [receiving, setReceiving] = useState(null);
+  const [payments, setPayments] = useState([]);
+  const [match, setMatch] = useState(null);
+  const [margin, setMargin] = useState(null);
 
   const headers = useMemo(
     () => ({ 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }),
@@ -54,18 +59,20 @@ export default function PurchasePage() {
   const loadAll = useCallback(async () => {
     setLoading(true);
     try {
-      const [v, r, o, i, l] = await Promise.all([
+      const [v, r, o, i, l, p] = await Promise.all([
         fetch('/api/vendors', { headers }).then(x => (x.ok ? x.json() : [])),
         fetch('/api/rfqs', { headers }).then(x => (x.ok ? x.json() : [])),
         fetch('/api/purchase-orders', { headers }).then(x => (x.ok ? x.json() : [])),
         fetch('/api/items', { headers }).then(x => (x.ok ? x.json() : [])),
-        fetch('/api/purchase-orders/reorder-suggestions', { headers }).then(x => (x.ok ? x.json() : []))
+        fetch('/api/purchase-orders/reorder-suggestions', { headers }).then(x => (x.ok ? x.json() : [])),
+        fetch('/api/purchase-orders/pending-payment', { headers }).then(x => (x.ok ? x.json() : []))
       ]);
       setVendors(Array.isArray(v) ? v : []);
       setRfqs(Array.isArray(r) ? r : []);
       setOrders(Array.isArray(o) ? o : []);
       setItems(Array.isArray(i) ? i : []);
       setLowStock(Array.isArray(l) ? l : []);
+      setPayments(Array.isArray(p) ? p : []);
     } catch {
       flash('Could not load purchase data', 'err');
     } finally { setLoading(false); }
@@ -94,6 +101,45 @@ export default function PurchasePage() {
       const res = await fetch(`/api/rfqs/${rfq.RFQ_ID}/compare`, { headers });
       if (!res.ok) throw new Error('Could not load the comparison');
       setCompare(await res.json());
+    } catch (e) { flash(e.message, 'err'); } finally { setBusy(false); }
+  };
+
+  const openMatch = async (poId) => {
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/purchase-orders/${poId}/match`, { headers });
+      if (!res.ok) throw new Error('Could not build the match');
+      setMatch(await res.json());
+    } catch (e) { flash(e.message, 'err'); } finally { setBusy(false); }
+  };
+
+  const release = async (poId, note) => {
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/purchase-orders/${poId}/release-payment`, {
+        method: 'POST', headers, body: JSON.stringify({ note })
+      });
+      const data = await res.json();
+      // 409 means it does not match and no reason was given — the screen asks for one.
+      if (res.status === 409) { flash(data.error, 'err'); return false; }
+      if (!res.ok) throw new Error(data.error || 'Could not release payment');
+      flash('Payment released.');
+      setMatch(null);
+      await loadAll();
+      return true;
+    } catch (e) { flash(e.message, 'err'); return false; } finally { setBusy(false); }
+  };
+
+  /** Prices a vendor quote for onward sale so the buyer can see the margin before quoting. */
+  const priceForCustomer = async (quote, marginPct, roundTo) => {
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/rfqs/quotes/${quote.PQ_ID}/price-for-customer`, {
+        method: 'POST', headers, body: JSON.stringify({ marginPct, roundTo })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Could not price the quote');
+      setMargin({ ...data, marginPct, roundTo });
     } catch (e) { flash(e.message, 'err'); } finally { setBusy(false); }
   };
 
@@ -135,7 +181,9 @@ export default function PurchasePage() {
           </div>
         </div>
         <div className="max-w-4xl mx-auto px-3 pb-2 flex gap-1 overflow-x-auto scrollbar-none">
-          {TABS.map(t => {
+          {/* Payments is a money screen end to end — there is nothing on it for someone who
+              cannot see amounts, so the tab itself is hidden rather than shown empty. */}
+          {TABS.filter(t => !t.needsMoney || canSeeMoney).map(t => {
             const Icon = t.icon;
             return (
               <button key={t.id} onClick={() => setTab(t.id)}
@@ -234,11 +282,50 @@ export default function PurchasePage() {
           ) : <Empty text="Pick an order from the Orders tab to receive against it." />
         )}
 
+        {/* ── PAYMENTS: 3-way match before release ── */}
+        {tab === 'PAYMENTS' && canSeeMoney && (
+          match ? (
+            <MatchView data={match} busy={busy} onClose={() => setMatch(null)} onRelease={release} />
+          ) : payments.length === 0 ? (
+            <Empty text="Nothing awaiting payment. Orders appear here once goods have been received against them." />
+          ) : (
+            <>
+              <p className="text-[11px] text-slate-500 px-1">
+                Ordered, received and billed — compared before anyone pays.
+              </p>
+              {payments.map(p => (
+                <button key={p.PO_ID} onClick={() => openMatch(p.PO_ID)} disabled={busy}
+                  className="w-full text-left bg-white border border-slate-200 rounded-xl p-3 active:bg-slate-50 disabled:opacity-50">
+                  <div className="flex items-start gap-2">
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs font-extrabold text-slate-900 truncate">{p.PO_No}</p>
+                      <p className="text-[11px] text-slate-500 truncate">{p.Vendor_Name} · {p.PO_Date}</p>
+                    </div>
+                    <MatchChip status={p.Match_Status} />
+                  </div>
+                  <div className="mt-1.5 flex items-center justify-between">
+                    <span className="text-[11px] text-slate-500">
+                      Billed <b className="text-slate-700">{money(p.Vendor_Invoice_Total)}</b>
+                      {' vs '}<b className="text-slate-700">{money(p.Expected_Total)}</b> received
+                    </span>
+                    {Math.abs(p.Invoice_Variance) > 0 && (
+                      <span className={`text-[11px] font-extrabold ${p.Invoice_Variance > 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
+                        {p.Invoice_Variance > 0 ? '+' : ''}{money(p.Invoice_Variance)}
+                      </span>
+                    )}
+                  </div>
+                </button>
+              ))}
+            </>
+          )
+        )}
+
         {/* ── ENQUIRIES ── */}
         {tab === 'RFQ' && (
           compare ? (
             <CompareView data={compare} canSeeMoney={canSeeMoney} busy={busy}
-              onClose={() => setCompare(null)} onOrder={orderFromQuote} />
+              onClose={() => { setCompare(null); setMargin(null); }} onOrder={orderFromQuote}
+              margin={margin} onPrice={priceForCustomer} onClearMargin={() => setMargin(null)} />
           ) : rfqForm ? (
             <RfqForm form={rfqForm} setForm={setRfqForm} vendors={vendors} items={items} busy={busy}
               onCancel={() => setRfqForm(null)}
@@ -328,6 +415,126 @@ function Empty({ text }) {
   return <div className="bg-white border border-slate-200 rounded-xl py-12 text-center text-sm text-slate-400 px-6">{text}</div>;
 }
 
+function MatchChip({ status }) {
+  const tone = status === 'Matched' ? 'bg-emerald-100 text-emerald-700'
+    : status === 'Over Billed' ? 'bg-rose-100 text-rose-700'
+    : /Awaiting/.test(status) ? 'bg-slate-100 text-slate-500'
+    : 'bg-amber-100 text-amber-800';
+  return <span className={`px-2 py-0.5 rounded text-[10px] font-extrabold shrink-0 ${tone}`}>{status}</span>;
+}
+
+/**
+ * The 3-way match: ordered vs received vs billed, line by line.
+ *
+ * A mismatch does not block the release — Accounts often knows something the rule cannot, like a
+ * part-shipment everyone agreed to. It does demand a written reason, so the decision is recorded
+ * rather than argued about later.
+ */
+function MatchView({ data, busy, onClose, onRelease }) {
+  const { purchaseOrder: po, lines, summary, receipts } = data;
+  const [note, setNote] = useState('');
+
+  return (
+    <div className="space-y-3">
+      <div className="bg-white border border-slate-200 rounded-xl p-3 flex items-center gap-2">
+        <div className="flex-1 min-w-0">
+          <p className="text-xs font-extrabold text-slate-900 truncate">{po.PO_No}</p>
+          <p className="text-[11px] text-slate-500 truncate">{po.Vendor_Name}</p>
+        </div>
+        <MatchChip status={summary.Match_Status} />
+        <button onClick={onClose} className="px-3 min-h-[40px] rounded-xl border border-slate-300 text-[11px] font-extrabold text-slate-600 shrink-0">Back</button>
+      </div>
+
+      <div className="bg-white border border-slate-200 rounded-xl p-3 overflow-x-auto">
+        <table className="w-full text-[11px]">
+          <thead>
+            <tr className="text-slate-400">
+              <th className="text-left font-bold pb-1">Item</th>
+              <th className="text-right font-bold pb-1 px-1">Ordered</th>
+              <th className="text-right font-bold pb-1 px-1">Received</th>
+              <th className="text-right font-bold pb-1 px-1">Billed</th>
+            </tr>
+          </thead>
+          <tbody>
+            {lines.map(l => (
+              <tr key={l.lineId} className="border-t border-slate-100">
+                <td className="py-1.5 pr-2">
+                  <span className="font-medium text-slate-700">{l.Item_Name}</span>
+                  {l.Status !== 'Matched' && (
+                    <span className="block text-[10px] font-bold text-amber-700">{l.Status}</span>
+                  )}
+                </td>
+                <td className="py-1.5 px-1 text-right text-slate-600 whitespace-nowrap">{l.Ordered_Qty}</td>
+                <td className={`py-1.5 px-1 text-right whitespace-nowrap font-bold ${
+                  l.Qty_Variance === 0 ? 'text-slate-600' : l.Qty_Variance < 0 ? 'text-amber-700' : 'text-blue-700'
+                }`}>
+                  {l.Received_Qty}{l.Qty_Variance !== 0 && <span className="font-medium"> ({l.Qty_Variance > 0 ? '+' : ''}{l.Qty_Variance})</span>}
+                </td>
+                <td className={`py-1.5 px-1 text-right whitespace-nowrap ${Math.abs(l.Value_Variance) > 0.01 ? 'font-extrabold text-rose-600' : 'text-slate-600'}`}>
+                  {money(l.Received_Value)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="bg-white border border-slate-200 rounded-xl p-3 space-y-1 text-[11px]">
+        <Row label="Value of goods received" value={money(summary.Expected_Total)} />
+        <Row label="Vendor invoice" value={money(summary.Vendor_Invoice_Total)} />
+        <div className="border-t border-slate-100 pt-1">
+          <Row
+            label={summary.Invoice_Variance > 0 ? 'Billed ABOVE goods received' : summary.Invoice_Variance < 0 ? 'Billed below goods received' : 'Difference'}
+            value={money(summary.Invoice_Variance)}
+            strong
+            tone={summary.Invoice_Variance > 0 ? 'text-rose-600' : summary.Invoice_Variance < 0 ? 'text-emerald-600' : ''}
+          />
+        </div>
+        {receipts.length > 0 && (
+          <p className="text-[10px] text-slate-400 pt-1">
+            {receipts.length} receipt(s): {receipts.map(r => r.Vendor_Invoice_No || r.GRN_No).join(', ')}
+          </p>
+        )}
+      </div>
+
+      {po.Payment_Released ? (
+        <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-[11px] text-emerald-900">
+          <b>Payment released.</b>{po.Payment_Release_Note && <> Reason: {po.Payment_Release_Note}</>}
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {!summary.Is_Matched && (
+            <>
+              <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-[11px] text-amber-900">
+                This order does not match. You can still pay it — say why, so the difference is on record.
+              </div>
+              <textarea rows={2} value={note} onChange={e => setNote(e.target.value)}
+                placeholder="Why is this being paid despite the difference?"
+                className="w-full rounded-xl border border-slate-300 px-2.5 py-2 text-xs" />
+            </>
+          )}
+          <button onClick={() => onRelease(po.PO_ID, note)}
+            disabled={busy || (!summary.Is_Matched && !note.trim())}
+            className={`w-full min-h-[48px] rounded-xl text-sm font-extrabold disabled:opacity-40 ${
+              summary.Is_Matched ? 'bg-emerald-600 text-white active:bg-emerald-700' : 'bg-amber-600 text-white active:bg-amber-700'
+            }`}>
+            {summary.Is_Matched ? 'Release payment' : 'Release anyway'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Row({ label, value, strong, tone = '' }) {
+  return (
+    <div className="flex items-center justify-between">
+      <span className={strong ? 'font-bold text-slate-700' : 'text-slate-500'}>{label}</span>
+      <span className={`${strong ? 'font-extrabold' : 'font-bold'} ${tone || 'text-slate-800'}`}>{value}</span>
+    </div>
+  );
+}
+
 function StatusChip({ status }) {
   const tone = /Received$/.test(status) ? 'bg-emerald-100 text-emerald-700'
     : /Partial/.test(status) ? 'bg-amber-100 text-amber-800'
@@ -411,8 +618,85 @@ function ReceiveForm({ state, setState, canSeeMoney, busy, onCancel, onSubmit })
 }
 
 /** L1/L2/L3 side by side. The lowest total wins the badge; the lowest per line is marked too. */
-function CompareView({ data, canSeeMoney, busy, onClose, onOrder }) {
+function CompareView({ data, canSeeMoney, busy, onClose, onOrder, margin, onPrice, onClearMargin }) {
   const { rfq, quotes, lineComparison } = data;
+  const [marginPct, setMarginPct] = useState(20);
+  const [roundTo, setRoundTo] = useState(0);
+
+  // Pricing a vendor quote for onward sale is inherently a money screen.
+  if (margin && canSeeMoney) {
+    return (
+      <div className="space-y-3">
+        <div className="bg-white border border-slate-200 rounded-xl p-3 flex items-center gap-2">
+          <div className="flex-1 min-w-0">
+            <p className="text-xs font-extrabold text-slate-900 truncate">Quoting on from {margin.source.Vendor_Name}</p>
+            <p className="text-[11px] text-slate-500">Their rate plus your margin</p>
+          </div>
+          <button onClick={onClearMargin} className="px-3 min-h-[40px] rounded-xl border border-slate-300 text-[11px] font-extrabold text-slate-600 shrink-0">Back</button>
+        </div>
+
+        <div className="bg-white border border-slate-200 rounded-xl p-3 grid grid-cols-2 gap-2">
+          <label className="block">
+            <span className="block text-[10px] font-extrabold uppercase tracking-wide text-slate-400 mb-0.5">Margin %</span>
+            <input type="number" inputMode="decimal" className="jc-input" value={marginPct}
+              onChange={e => setMarginPct(e.target.value)}
+              onBlur={() => onPrice(margin.source, marginPct, roundTo)} />
+          </label>
+          <label className="block">
+            <span className="block text-[10px] font-extrabold uppercase tracking-wide text-slate-400 mb-0.5">Round up to</span>
+            <select className="jc-input" value={roundTo}
+              onChange={e => { setRoundTo(e.target.value); onPrice(margin.source, marginPct, e.target.value); }}>
+              <option value="0">No rounding</option>
+              <option value="1">₹1</option>
+              <option value="5">₹5</option>
+              <option value="10">₹10</option>
+              <option value="50">₹50</option>
+            </select>
+          </label>
+        </div>
+
+        <div className="bg-white border border-slate-200 rounded-xl p-3 overflow-x-auto">
+          <table className="w-full text-[11px]">
+            <thead>
+              <tr className="text-slate-400">
+                <th className="text-left font-bold pb-1">Item</th>
+                <th className="text-right font-bold pb-1 px-1">Cost</th>
+                <th className="text-right font-bold pb-1 px-1">Sell</th>
+                <th className="text-right font-bold pb-1 px-1">Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              {margin.lines.map((l, i) => (
+                <tr key={i} className="border-t border-slate-100">
+                  <td className="py-1.5 pr-2 font-medium text-slate-700">{l.Item_Name}<span className="text-slate-400"> ×{l.Qty}</span></td>
+                  <td className="py-1.5 px-1 text-right text-slate-500 whitespace-nowrap">{money(l.Purchase_Rate)}</td>
+                  <td className="py-1.5 px-1 text-right font-extrabold text-slate-800 whitespace-nowrap">{money(l.Rate)}</td>
+                  <td className="py-1.5 px-1 text-right text-slate-600 whitespace-nowrap">{money(l.Line_Total)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="bg-white border border-slate-200 rounded-xl p-3 space-y-1 text-[11px]">
+          <Row label="Total cost" value={money(margin.summary.Cost_Total)} />
+          <Row label="Selling total" value={money(margin.summary.Selling_Total)} strong />
+          <Row label="Your margin" value={`${money(margin.summary.Margin_Amount)} · ${margin.summary.Effective_Margin_Pct}%`}
+            tone="text-emerald-600" strong />
+          {margin.summary.Effective_Margin_Pct !== margin.summary.Requested_Margin_Pct && (
+            <p className="text-[10px] text-slate-400 pt-1">
+              Rounding moved the margin from {margin.summary.Requested_Margin_Pct}% to {margin.summary.Effective_Margin_Pct}%.
+            </p>
+          )}
+        </div>
+
+        <p className="text-[10px] text-slate-400 px-1">
+          Take these rates into a new quotation — the builder adds the customer, GST and terms.
+        </p>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-3">
       <div className="bg-white border border-slate-200 rounded-xl p-3 flex items-center gap-2">
@@ -441,12 +725,20 @@ function CompareView({ data, canSeeMoney, busy, onClose, onOrder }) {
                   </p>
                 </div>
               </div>
-              <button onClick={() => onOrder(q)} disabled={busy}
-                className={`mt-2 w-full min-h-[44px] rounded-xl text-xs font-extrabold disabled:opacity-40 ${
-                  q.Is_Lowest ? 'bg-emerald-600 text-white active:bg-emerald-700' : 'border border-slate-300 text-slate-700 active:bg-slate-50'
-                }`}>
-                Raise order on {q.Vendor_Name}
-              </button>
+              <div className="mt-2 flex gap-2">
+                <button onClick={() => onOrder(q)} disabled={busy}
+                  className={`flex-1 min-h-[44px] rounded-xl text-xs font-extrabold disabled:opacity-40 ${
+                    q.Is_Lowest ? 'bg-emerald-600 text-white active:bg-emerald-700' : 'border border-slate-300 text-slate-700 active:bg-slate-50'
+                  }`}>
+                  Raise order
+                </button>
+                {canSeeMoney && (
+                  <button onClick={() => onPrice(q, 20, 0)} disabled={busy}
+                    className="flex-1 min-h-[44px] rounded-xl border border-indigo-300 bg-indigo-50 text-indigo-800 text-xs font-extrabold active:bg-indigo-100 disabled:opacity-40 flex items-center justify-center gap-1">
+                    Quote on <ArrowRight className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
             </div>
           ))}
 

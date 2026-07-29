@@ -147,6 +147,52 @@ order, so someone who cannot see a price cannot set one.
 
 ---
 
+## 7. Payment checks (3-way match)
+
+**Purchase → Payments.** The tab only exists for people who can see money.
+
+An order appears here once goods have arrived against it. Open one to see ordered vs received vs
+billed, line by line.
+
+Try each case:
+
+| Do this | Expect |
+|---|---|
+| Receive everything, bill the full amount | **Matched** — release with no note needed |
+| Receive less than ordered, bill only for what came | **Short Delivery** — a note is required |
+| Receive less, but bill for the full order | **Over Billed** — the case this exists to catch |
+| Receive nothing yet | **Awaiting Goods** — not in the queue at all |
+| Receive goods, leave the invoice number blank | **Awaiting Invoice** |
+
+On a mismatch, the release button stays disabled until you type a reason. That is the point: a
+mismatch never blocks payment — Accounts often knows something the rule cannot, like a part-shipment
+everyone agreed to — but the reason gets recorded rather than argued about later.
+
+Two deliveries against one order should **add up**, not read as two short deliveries. Receive half,
+check it says Short, receive the rest, check it flips to Matched.
+
+Paise-level differences are ignored (₹1 tolerance). A vendor computing line by line while we compute
+on the total will disagree by rounding on any large order, and flagging that every time would train
+people to ignore the flag.
+
+---
+
+## 8. Quoting a vendor's price on to a customer
+
+**Purchase → Enquiries → Compare quotes → Quote on.**
+
+- Default margin is 20%, so a ₹100 vendor rate becomes **₹120**
+- That is a **mark-up on cost**, not a margin on the sale — ₹125 would be the other reading, and it
+  under-prices every line
+- Change the margin and the table updates
+- "Round up to ₹10" lifts ₹113.28 to **₹120** — never below cost plus margin
+- If rounding moves the real margin, the panel says so rather than repeating the number you asked for
+
+The screen gives you rates, not a quotation. Take them into the quotation builder, which owns the
+customer, GST, terms and numbering — there is no second quotation engine.
+
+---
+
 ## Known, and fine
 
 - **Four items show negative stock.** Pre-existing. `deductForInvoice` deliberately allows it rather

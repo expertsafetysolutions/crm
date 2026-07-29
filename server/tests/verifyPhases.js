@@ -255,6 +255,26 @@ async function verifyPurchase() {
     if (short.length > 0) meh(`${short.length} receipt(s) had a short or excess delivery`, 'expected if vendors under-delivered');
     else ok('no delivery discrepancies recorded');
   }
+
+  // 3-way match over whatever real orders exist.
+  const purchaseService = require('../src/services/purchaseService');
+  const matched = [], problems = [], paidWithoutNote = [];
+  for (const po of pos) {
+    if (po.Status === purchaseService.PO_STATUS.CANCELLED) continue;
+    try {
+      const m = await purchaseService.getThreeWayMatch(po.PO_ID);
+      if (m.summary.Is_Matched) matched.push(po.PO_No);
+      else if (!/Awaiting/.test(m.summary.Match_Status)) problems.push(`${po.PO_No}: ${m.summary.Match_Status}`);
+      // Paying an order that does not match without recording why is the thing this guards against.
+      if (po.Payment_Released && !m.summary.Is_Matched && !String(po.Payment_Release_Note || '').trim()) {
+        paidWithoutNote.push(po.PO_No);
+      }
+    } catch (e) { bad(`3-way match failed for ${po.PO_No}`, e.message); }
+  }
+  if (matched.length > 0) ok(`${matched.length} order(s) reconcile cleanly`);
+  if (problems.length > 0) meh(`${problems.length} order(s) do not match`, problems.slice(0, 3).join(' · '));
+  if (paidWithoutNote.length === 0) ok('no mismatched order was paid without a written reason');
+  else bad('paid despite a mismatch with no reason recorded', paidWithoutNote.join(', '));
 }
 
 async function verifyOfflineContract() {

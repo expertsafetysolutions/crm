@@ -59,6 +59,19 @@ router.post('/rfqs', requirePermission('purchase', 'add'), async (req, res) => {
   } catch (err) { fail(res, err, 'Failed to create enquiry', 'POST /rfqs error:'); }
 });
 
+/**
+ * Prices a vendor quote for onward sale: vendor rate + margin % = selling rate.
+ *
+ * LITERAL "quotes" segment, so it must sit above /rfqs/:id or that route claims it. A GET would be
+ * tidier, but margin and rounding are inputs the buyer changes repeatedly while watching the
+ * result, so they belong in a body.
+ */
+router.post('/rfqs/quotes/:quoteId/price-for-customer', requirePermission('purchase', 'view'), async (req, res) => {
+  try {
+    res.json(await purchaseService.priceQuoteForCustomer(req.params.quoteId, req.body));
+  } catch (err) { fail(res, err, 'Failed to price the quote', 'POST /price-for-customer error:'); }
+});
+
 // Literal segments before /:id — /rfqs/:id would otherwise swallow these.
 router.get('/rfqs/:id/compare', requirePermission('purchase', 'view'), async (req, res) => {
   try {
@@ -88,11 +101,18 @@ router.get('/purchase-orders', requirePermission('purchase', 'view'), async (req
   } catch (err) { fail(res, err, 'Failed to load purchase orders', 'GET /purchase-orders error:'); }
 });
 
-// LITERAL — must stay ahead of /purchase-orders/:id.
+// LITERAL — must stay ahead of /purchase-orders/:id, or ":id" swallows the word.
 router.get('/purchase-orders/reorder-suggestions', requirePermission('purchase', 'view'), async (req, res) => {
   try {
     res.json(await purchaseService.getReorderSuggestions());
   } catch (err) { fail(res, err, 'Failed to load reorder suggestions', 'GET /reorder-suggestions error:'); }
+});
+
+// LITERAL — same rule. The Accounts payment queue.
+router.get('/purchase-orders/pending-payment', requirePermission('purchase', 'view'), async (req, res) => {
+  try {
+    res.json(await purchaseService.getPendingPayments());
+  } catch (err) { fail(res, err, 'Failed to load pending payments', 'GET /pending-payment error:'); }
 });
 
 router.post('/purchase-orders', requirePermission('purchase', 'add'), async (req, res) => {
@@ -113,6 +133,29 @@ router.get('/purchase-orders/:id', requirePermission('purchase', 'view'), async 
     if (!po) return res.status(404).json({ error: 'Purchase order not found' });
     res.json(po);
   } catch (err) { fail(res, err, 'Failed to load purchase order', 'GET /purchase-orders/:id error:'); }
+});
+
+// ─── 3-WAY MATCH AND PAYMENT ───────────────────────────────────────────────────────────────────
+
+router.get('/purchase-orders/:id/match', requirePermission('purchase', 'view'), async (req, res) => {
+  try {
+    res.json(await purchaseService.getThreeWayMatch(req.params.id));
+  } catch (err) { fail(res, err, 'Failed to build the match', 'GET /purchase-orders/match error:'); }
+});
+
+/**
+ * Releases payment. Gated on `edit` rather than `view` because it is a financial decision, and the
+ * 409 carries the match summary so the screen can say exactly what disagrees.
+ */
+router.post('/purchase-orders/:id/release-payment', requirePermission('purchase', 'edit'), async (req, res) => {
+  try {
+    res.json(await purchaseService.releasePayment(req.params.id, req.body, req.user));
+  } catch (err) {
+    if (err.statusCode === 409) {
+      return res.status(409).json({ error: err.message, match: err.match });
+    }
+    fail(res, err, 'Failed to release payment', 'POST /release-payment error:');
+  }
 });
 
 // ─── GOODS RECEIPT ─────────────────────────────────────────────────────────────────────────────

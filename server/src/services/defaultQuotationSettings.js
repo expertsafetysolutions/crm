@@ -169,6 +169,10 @@ const DEFAULT_QUOTATION_SETTINGS = {
     // A purchase order goes to a vendor, so it draws from the same atomic counter as the outward
     // documents — a repeated PO number lets the same delivery be claimed for payment twice.
     po_no_prefix: 'EXP/PO',
+    // Mark-up applied to a vendor's rate when quoting it on to a customer: cost + this % = selling
+    // price. A mark-up on cost, not a margin on the sale — "cost plus twenty" is how the office
+    // quotes, and reading it the other way would under-price every line.
+    default_margin_pct: 20,
     // 'financial' resets the running number each April (Indian FY); 'calendar' resets in January.
     number_reset: 'financial'
   },

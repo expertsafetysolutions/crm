@@ -504,6 +504,268 @@ async function getGoodsReceipts() {
   return [...rows].sort((a, b) => String(b.Created_At || '').localeCompare(String(a.Created_At || '')));
 }
 
+// ─── 3-WAY MATCH ───────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Compares what was ORDERED, what ARRIVED, and what the vendor BILLED, before anyone pays.
+ *
+ * These three should agree and frequently do not: a vendor ships forty of the fifty ordered and
+ * invoices for fifty, or quietly bills a higher rate than the order carried. Catching that after
+ * payment means asking for money back, which rarely works. So the check runs before release, and a
+ * mismatch does not block payment — it just refuses to call itself matched, because Accounts may
+ * have a perfectly good reason (an agreed part-shipment, a renegotiated rate) that no rule knows.
+ *
+ * Tolerance exists because rounding differs between systems: a vendor's invoice computed line by
+ * line and ours computed on the total will disagree by paise on a large order, and flagging that as
+ * a discrepancy every time would train people to ignore the flag.
+ */
+const MATCH_TOLERANCE = 1.00;   // rupees — below this, treat amounts as agreeing
+
+const MATCH_STATUS = {
+  MATCHED: 'Matched',
+  SHORT_DELIVERY: 'Short Delivery',
+  OVER_DELIVERY: 'Over Delivery',
+  PRICE_VARIANCE: 'Price Variance',
+  OVER_BILLED: 'Over Billed',
+  AWAITING_INVOICE: 'Awaiting Invoice',
+  AWAITING_GOODS: 'Awaiting Goods'
+};
+
+/**
+ * Builds the match for one purchase order across every receipt against it.
+ *
+ * Aggregates receipts rather than matching one at a time: a two-delivery order is complete when the
+ * quantities add up, and matching each delivery in isolation would report both as short.
+ */
+async function getThreeWayMatch(poId) {
+  const po = await getPurchaseOrderById(poId);
+  if (!po) throw new Error(`Purchase order ${poId} not found`);
+
+  const grns = (await sheetsService.getTab('Goods_Receipt')).filter(g => g.PO_ID === poId);
+
+  // Roll every receipt up per order line.
+  const receivedByLine = {};
+  const billedByLine = {};
+  for (const grn of grns) {
+    for (const l of (grn.Lines || [])) {
+      receivedByLine[l.lineId] = round2((receivedByLine[l.lineId] || 0) + (Number(l.Received_Qty) || 0));
+      billedByLine[l.lineId] = round2((billedByLine[l.lineId] || 0) + (Number(l.Line_Total) || 0));
+    }
+  }
+
+  const lines = (po.Lines || []).map(l => {
+    const orderedQty = Number(l.Qty) || 0;
+    const receivedQty = receivedByLine[l.lineId] || 0;
+    const orderedValue = Number(l.Line_Total) || 0;
+    const receivedValue = billedByLine[l.lineId] || 0;
+
+    // What the goods actually received SHOULD cost at the agreed rate. Comparing the vendor's bill
+    // against this rather than against the whole order is what separates a short delivery (fine,
+    // pay for what came) from over-billing (not fine).
+    const expectedValue = round2(receivedQty * (Number(l.Rate) || 0));
+
+    const qtyVariance = round2(receivedQty - orderedQty);
+    const valueVariance = round2(receivedValue - expectedValue);
+
+    let status = MATCH_STATUS.MATCHED;
+    if (receivedQty === 0) status = MATCH_STATUS.AWAITING_GOODS;
+    else if (Math.abs(valueVariance) > MATCH_TOLERANCE) status = MATCH_STATUS.PRICE_VARIANCE;
+    else if (qtyVariance < 0) status = MATCH_STATUS.SHORT_DELIVERY;
+    else if (qtyVariance > 0) status = MATCH_STATUS.OVER_DELIVERY;
+
+    return {
+      lineId: l.lineId,
+      Item_ID: l.Item_ID,
+      Item_Name: l.Item_Name,
+      Unit: l.Unit,
+      Ordered_Qty: orderedQty,
+      Received_Qty: receivedQty,
+      Qty_Variance: qtyVariance,
+      Rate: Number(l.Rate) || 0,
+      Ordered_Value: orderedValue,
+      Expected_Value: expectedValue,
+      Received_Value: receivedValue,
+      Value_Variance: valueVariance,
+      Status: status
+    };
+  });
+
+  // The vendor's own invoice figure, when the receiving clerk captured one.
+  const vendorInvoiceTotal = round2(grns.reduce((s, g) => s + (Number(g.Vendor_Invoice_Amount) || 0), 0));
+  const expectedTotal = round2(lines.reduce((s, l) => s + l.Expected_Value, 0));
+  const invoiceVariance = vendorInvoiceTotal > 0 ? round2(vendorInvoiceTotal - expectedTotal) : 0;
+
+  const problems = lines.filter(l => l.Status !== MATCH_STATUS.MATCHED);
+  let overall = MATCH_STATUS.MATCHED;
+  if (grns.length === 0) overall = MATCH_STATUS.AWAITING_GOODS;
+  else if (vendorInvoiceTotal === 0) overall = MATCH_STATUS.AWAITING_INVOICE;
+  else if (invoiceVariance > MATCH_TOLERANCE) overall = MATCH_STATUS.OVER_BILLED;
+  else if (problems.length > 0) overall = problems[0].Status;
+
+  return {
+    purchaseOrder: {
+      PO_ID: po.PO_ID, PO_No: po.PO_No, PO_Date: po.PO_Date,
+      Vendor_ID: po.Vendor_ID, Vendor_Name: po.Vendor_Name,
+      Subtotal: po.Subtotal, Status: po.Status,
+      Payment_Released: Boolean(po.Payment_Released),
+      Payment_Released_At: po.Payment_Released_At || '',
+      Payment_Release_Note: po.Payment_Release_Note || ''
+    },
+    receipts: grns.map(g => ({
+      GRN_ID: g.GRN_ID, GRN_No: g.GRN_No, GRN_Date: g.GRN_Date,
+      Vendor_Invoice_No: g.Vendor_Invoice_No,
+      Vendor_Invoice_Amount: g.Vendor_Invoice_Amount,
+      Has_Discrepancy: g.Has_Discrepancy
+    })),
+    lines,
+    summary: {
+      Ordered_Total: round2(lines.reduce((s, l) => s + l.Ordered_Value, 0)),
+      Expected_Total: expectedTotal,
+      Vendor_Invoice_Total: vendorInvoiceTotal,
+      Invoice_Variance: invoiceVariance,
+      Match_Status: overall,
+      Is_Matched: overall === MATCH_STATUS.MATCHED,
+      Problem_Count: problems.length,
+      Tolerance: MATCH_TOLERANCE
+    }
+  };
+}
+
+/** Every order that has been received but not yet paid — the Accounts queue. */
+async function getPendingPayments() {
+  const pos = await getPurchaseOrders();
+  const open = pos.filter(p =>
+    p.Status !== PO_STATUS.CANCELLED && p.Status !== PO_STATUS.DRAFT && !p.Payment_Released);
+
+  const out = [];
+  for (const po of open) {
+    const match = await getThreeWayMatch(po.PO_ID);
+    // Nothing has arrived yet, so there is nothing to pay for.
+    if (match.summary.Match_Status === MATCH_STATUS.AWAITING_GOODS) continue;
+    out.push({
+      PO_ID: po.PO_ID, PO_No: po.PO_No, Vendor_Name: po.Vendor_Name, PO_Date: po.PO_Date,
+      ...match.summary
+    });
+  }
+  return out;
+}
+
+/**
+ * Records that Accounts has released payment.
+ *
+ * A mismatch does not block the release, but it does force a written note. Accounts often has a good
+ * reason the rule cannot know — a part-shipment everyone agreed to, a rate renegotiated by phone —
+ * and refusing the release would just move the payment off the system entirely. Recording WHY is
+ * worth more than preventing it.
+ */
+async function releasePayment(poId, { note, paidAmount } = {}, actor) {
+  const match = await getThreeWayMatch(poId);
+  const text = String(note || '').trim();
+
+  if (!match.summary.Is_Matched && !text) {
+    const err = new Error(`This order does not match (${match.summary.Match_Status}) — add a note explaining why it is being paid`);
+    err.statusCode = 409;
+    err.match = match.summary;
+    throw err;
+  }
+
+  return sheetsService.updateRow('Purchase_Order', 'PO_ID', poId, {
+    Payment_Released: true,
+    Payment_Released_At: new Date().toISOString(),
+    Payment_Released_By: actor?.staffId || 'SYSTEM',
+    Payment_Release_Note: text,
+    Payment_Released_Amount: round2(Number(paidAmount) || match.summary.Expected_Total),
+    Payment_Match_Status: match.summary.Match_Status,
+    Updated_At: new Date().toISOString()
+  });
+}
+
+// ─── VENDOR QUOTE → CUSTOMER QUOTATION ─────────────────────────────────────────────────────────
+
+/**
+ * Prices a vendor's quote for onward sale: vendor rate + margin % = selling rate.
+ *
+ * Margin here is a MARK-UP on cost, not a margin on the selling price — 20% on a ₹100 buy gives
+ * ₹120, not ₹125. That is how the office actually quotes ("cost plus twenty"), and picking the other
+ * reading would silently under-price every line by a few percent.
+ *
+ * Returns priced lines for the quotation builder rather than creating a quotation outright: the
+ * customer, subject and terms still have to be chosen, and the builder already owns all of that
+ * along with GST, discounts and numbering. This is the pricing step, not a second quotation engine.
+ */
+function buildMarginPricing({ lines, marginPct, roundTo }) {
+  const margin = Number(marginPct) || 0;
+  const rounding = Number(roundTo) || 0;
+
+  const priced = (Array.isArray(lines) ? lines : []).map(l => {
+    const cost = Number(l.Rate ?? l.rate) || 0;
+    const raw = round2(cost * (1 + margin / 100));
+    // Optional rounding to a tidy figure — a quotation reading ₹1,180 looks considered where
+    // ₹1,176.47 looks like a spreadsheet leaked onto the page.
+    const sellingRate = rounding > 0 ? Math.ceil(raw / rounding) * rounding : raw;
+    const qty = Number(l.Qty ?? l.qty) || 0;
+    return {
+      Item_ID: l.Item_ID || l.itemId || '',
+      Item_Name: l.Item_Name || l.itemName || '',
+      Qty: qty,
+      Unit: l.Unit || l.unit || 'Nos',
+      GST_Rate: Number(l.GST_Rate ?? l.gstRate) || 0,
+      Purchase_Rate: cost,
+      Rate: sellingRate,
+      Line_Total: round2(qty * sellingRate),
+      Margin_Pct: margin,
+      Margin_Amount: round2((sellingRate - cost) * qty)
+    };
+  });
+
+  const costTotal = round2(priced.reduce((s, l) => s + l.Purchase_Rate * l.Qty, 0));
+  const sellTotal = round2(priced.reduce((s, l) => s + l.Line_Total, 0));
+
+  return {
+    lines: priced,
+    summary: {
+      Cost_Total: costTotal,
+      Selling_Total: sellTotal,
+      Margin_Amount: round2(sellTotal - costTotal),
+      // Realised margin can drift from the requested one once rounding is applied, so it is
+      // reported rather than assumed.
+      Effective_Margin_Pct: costTotal > 0 ? round2(((sellTotal - costTotal) / costTotal) * 100) : 0,
+      Requested_Margin_Pct: margin
+    }
+  };
+}
+
+/** Prices a stored vendor quote for onward sale. */
+async function priceQuoteForCustomer(quoteId, { marginPct, roundTo } = {}) {
+  const quotes = await sheetsService.getTab('Purchase_Quote');
+  const quote = quotes.find(q => q.PQ_ID === quoteId);
+  if (!quote) throw new Error(`Vendor quote ${quoteId} not found`);
+
+  const rfq = await getRfqById(quote.RFQ_ID);
+  const settings = await quotationEngine.getSettings();
+  const margin = marginPct !== undefined && marginPct !== null && marginPct !== ''
+    ? Number(marginPct)
+    : Number(settings.defaults?.default_margin_pct ?? 20);
+
+  // Carry the enquiry's item ids and units across — a vendor quote only echoes back what it was
+  // asked, and the quotation builder needs the catalogue link for HSN and stock.
+  const enriched = (quote.Lines || []).map(l => {
+    const rfqLine = (rfq?.Lines || []).find(x => x.lineId === l.lineId) || {};
+    return { ...l, Item_ID: rfqLine.Item_ID || '', Unit: rfqLine.Unit || 'Nos' };
+  });
+
+  const priced = buildMarginPricing({ lines: enriched, marginPct: margin, roundTo });
+  return {
+    ...priced,
+    source: {
+      PQ_ID: quote.PQ_ID, RFQ_ID: quote.RFQ_ID,
+      Vendor_ID: quote.Vendor_ID, Vendor_Name: quote.Vendor_Name,
+      Quote_Total: quote.Quote_Total,
+      Lead_Time_Days: quote.Lead_Time_Days
+    }
+  };
+}
+
 /** Items at or below their reorder level, with the vendor last bought from as a starting point. */
 async function getReorderSuggestions() {
   const [lowStock, items, vendors] = await Promise.all([
@@ -534,6 +796,13 @@ async function getReorderSuggestions() {
 module.exports = {
   RFQ_STATUS,
   PO_STATUS,
+  MATCH_STATUS,
+  MATCH_TOLERANCE,
+  getThreeWayMatch,
+  getPendingPayments,
+  releasePayment,
+  buildMarginPricing,
+  priceQuoteForCustomer,
   getVendors,
   createVendor,
   updateVendor,

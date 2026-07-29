@@ -6,6 +6,8 @@ import {
   IndianRupee, ArrowRight
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import SmartSearchSelect from '../components/SmartSearchSelect';
+import { filterByQuery } from '../utils/searchUtils';
 
 /**
  * PurchasePage — vendors, enquiries, orders and goods receipt in one tabbed screen.
@@ -774,6 +776,7 @@ function CompareView({ data, canSeeMoney, busy, onClose, onOrder, margin, onPric
 }
 
 function RfqForm({ form, setForm, vendors, items, busy, onCancel, onSubmit }) {
+  const [vendorQuery, setVendorQuery] = useState('');
   const setLine = (i, patch) => setForm(f => ({
     ...f, lines: f.lines.map((l, n) => (n === i ? { ...l, ...patch } : l))
   }));
@@ -786,10 +789,18 @@ function RfqForm({ form, setForm, vendors, items, busy, onCancel, onSubmit }) {
             onChange={e => setForm(f => ({ ...f, title: e.target.value }))} />
         </label>
         <div>
-          <span className="block text-[10px] font-extrabold uppercase tracking-wide text-slate-400 mb-1">Ask these vendors</span>
-          <div className="space-y-1">
-            {vendors.map(v => (
-              <label key={v.Vendor_ID} className="flex items-center gap-2 min-h-[40px] px-2 rounded-lg border border-slate-200 active:bg-slate-50">
+          <span className="block text-[10px] font-extrabold uppercase tracking-wide text-slate-400 mb-1">
+            Ask these vendors {form.vendorIds.length > 0 && <span className="text-slate-600">· {form.vendorIds.length} selected</span>}
+          </span>
+          {/* A filter rather than a dropdown: this is multi-select, and hiding the ticks behind a
+              popover would mean losing sight of who is already chosen. */}
+          {vendors.length > 6 && (
+            <input className="jc-input mb-1" style={{ minHeight: '48px' }} value={vendorQuery}
+              placeholder="Filter vendors" onChange={e => setVendorQuery(e.target.value)} />
+          )}
+          <div className="space-y-1 max-h-64 overflow-y-auto">
+            {filterByQuery(vendors, vendorQuery, v => [v.Vendor_Name, v.GSTIN, v.Contact_Person]).map(v => (
+              <label key={v.Vendor_ID} className="flex items-center gap-2 min-h-[48px] px-2 rounded-lg border border-slate-200 active:bg-slate-50">
                 <input type="checkbox" className="w-4 h-4"
                   checked={form.vendorIds.includes(v.Vendor_ID)}
                   onChange={() => setForm(f => ({
@@ -817,14 +828,23 @@ function RfqForm({ form, setForm, vendors, items, busy, onCancel, onSubmit }) {
               </button>
             )}
           </div>
-          <input className="jc-input" placeholder="Item name" value={l.itemName || ''} list={`items-${i}`}
-            onChange={e => {
-              const match = items.find(it => it.Item_Name === e.target.value);
-              setLine(i, { itemName: e.target.value, itemId: match?.Item_ID || '', unit: match?.Unit || l.unit });
-            }} />
-          <datalist id={`items-${i}`}>
-            {items.map(it => <option key={it.Item_ID} value={it.Item_Name} />)}
-          </datalist>
+          {/* allowFreeText because an enquiry often precedes the catalogue — you ask for a part
+              before anyone has created an item row for it, and blocking that would be backwards. */}
+          <SmartSearchSelect
+            options={items}
+            value={l.itemName ? (items.find(it => it.Item_ID === l.itemId) || l.itemName) : null}
+            onChange={sel => {
+              if (!sel) return setLine(i, { itemName: '', itemId: '' });
+              if (typeof sel === 'string') return setLine(i, { itemName: sel, itemId: '' });
+              setLine(i, { itemName: sel.Item_Name, itemId: sel.Item_ID, unit: sel.Unit || l.unit });
+            }}
+            getLabel={it => (typeof it === 'string' ? it : it.Item_Name)}
+            getSubtitle={it => (typeof it === 'string' ? '' : [it.Category, it.HSN_Code].filter(Boolean).join(' · '))}
+            getKey={it => (typeof it === 'string' ? it : it.Item_ID)}
+            getSearchable={it => (typeof it === 'string' ? [it] : [it.Item_Name, it.Category, it.HSN_Code, ...(it.Aliases || [])])}
+            placeholder="Search or type an item"
+            allowFreeText
+          />
           <div className="grid grid-cols-2 gap-2">
             <input type="number" inputMode="decimal" className="jc-input" placeholder="Qty"
               value={l.qty ?? ''} onChange={e => setLine(i, { qty: e.target.value })} />

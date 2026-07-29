@@ -186,8 +186,58 @@ demands a written reason.
 - **Comment the *why*, not the *what*.** The existing comments explain non-obvious decisions and past bugs — match that. Do not narrate code that speaks for itself.
 - Errors: every route wraps in try/catch and returns `res.status(xxx).json({error})`. `409` carries actionable payloads (`pendingRechecks`, `pendingStandby`, `duplicateOf`, `unpricedLines`).
 - **Calendar dates go through IST**, never `toISOString()`: `new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Kolkata'}).format(new Date())` — the deployment clock may not be IST.
-- Mobile controls are **minimum 44–48px tall** (`.jc-input`, `.jc-btn-ghost` in `index.css`). These forms are filled one-handed at a workbench.
 - Client dashboards are large single-file tab-switched components; new tabs follow the existing `activeTab === 'X'` pattern. New *modules* get their own lazy-loaded route instead.
+
+## UI Standard — read this BEFORE designing any screen
+
+Binding for every new form, list, screen and workflow. The people using this app are standing at a
+workbench or a customer's gate, one-handed, often in gloves, frequently on a bad connection. Design
+for that first and the desktop takes care of itself.
+
+**Mobile-first, not mobile-also.** Lay out for 320–480px and let it scale up. A screen that only
+works once it is wide is a broken screen.
+
+**Touch targets: 48px minimum for anything new**, with spacing enough that a gloved thumb cannot hit
+two things at once. The existing `.jc-input` / `.jc-btn-ghost` sit at 44px and stay there — they are
+already deployed across every workshop form, and churning them buys nothing. 48px is the floor for
+new controls; never go below 44px anywhere.
+
+**Primary actions live in a sticky bottom bar**, thumb-reachable, padded clear of the home indicator
+with `env(safe-area-inset-bottom)`. Headers stay sticky too so context is never lost mid-scroll.
+`JobCardPage` and `ChallanBuilderPage` are the reference implementations.
+
+**Progressive disclosure is mandatory.** Never render 20+ open fields at once. Use
+`components/CollapsibleSection.jsx` — do not write another accordion:
+
+- it folds on the `false → true` edge of `isComplete` only, never on every render, so a section
+  cannot slam shut while someone is still correcting a field inside it
+- the collapsed row shows identity facts and a status badge ("ABC 6kg · 5 units · checked"),
+  enough to know whether to reopen it
+- tapping the row reopens it for editing; `tone` colours the left rail (`warning` / `danger`)
+- `InventoryPage.jsx` declares a LOCAL `CollapsibleSection` near the bottom of the file that shadows
+  the import and has none of this. Import the shared one; do not copy that variant.
+
+**Search must match anywhere, in any word order.** Use `matchesQuery()` from `utils/searchUtils.js`
+for every filter and typeahead: it splits the query on spaces and requires each token to appear
+somewhere in the record, so "Expert Vadodara" finds "Expert Safety Solutions Vadodara" and so does
+"Vadodara Expert". The older hand-rolled `field.toLowerCase().includes(q)` chains treat the whole
+query as ONE token and fail both — migrate them when touching that code. For pickers use
+`components/SmartSearchSelect.jsx` (filtered dropdown, highlighted matches, arrow keys + 48px touch
+rows) rather than a bare `<datalist>`, which can only prefix-match and cannot show a subtitle.
+
+Filtering stays **client-side** for these lists — they are hundreds of rows, already in memory from
+`/sync/all` or a lazy fetch, and a round trip per keystroke would be slower and useless offline. If a
+collection ever outgrows that, add a server-side `?q=` that applies the same token-AND rule (a
+`$and` of `$regex` terms, or a text index) so both sides agree on what "matches" means. Deliberately
+NOT fuzzy/edit-distance: on a cylinder number or GSTIN, "close enough" returns the wrong record, and
+picking the wrong customer is worse than finding none.
+
+**Reduce typing.** Carry the previous row's values into a new one, prefill from the customer's
+register, offer typeahead over free text. `JobCardInwardTab` inheriting type/capacity from the row
+above is the pattern to copy.
+
+**Feedback is immediate.** A completed section shows its green check and folds; a failure says what
+to do next. Respect `prefers-reduced-motion` — `.animate-fadeIn` already does.
 
 ## Commands
 

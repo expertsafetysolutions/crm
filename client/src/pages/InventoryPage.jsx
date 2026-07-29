@@ -6,6 +6,7 @@ import {
   Search, X, ImagePlus, ChevronDown, ChevronRight
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { matchesQuery, filterByQuery } from '../utils/searchUtils';
 import { formatMoney, formatDate, todayISO } from '../utils/quotationUtils';
 import LazyImage from '../components/LazyImage';
 
@@ -285,7 +286,7 @@ export default function InventoryPage() {
     if (!search.trim()) return true;
     const q = search.trim().toLowerCase();
     const aliases = Array.isArray(i.Aliases) ? i.Aliases.join(' ') : '';
-    return `${i.Item_Name || ''} ${aliases} ${i.HSN_Code || ''} ${i.Category || ''}`.toLowerCase().includes(q);
+    return matchesQuery(q, [i.Item_Name, aliases, i.HSN_Code, i.Category]);
   });
 
   const submitMovement = async () => {
@@ -871,6 +872,13 @@ function Modal({ title, children, onClose, onSave }) {
  * Keeps data entry short: the essentials stay visible and everything optional folds away, with a
  * one-line summary so the user can see at a glance whether anything is set inside. Auto-opens when
  * it already has content, so existing data is never hidden from an editor.
+ */
+/**
+ * Deliberately NOT components/CollapsibleSection.jsx. That one is the workshop auto-hide primitive:
+ * it folds on the false->true completeness edge and has no `title`, because a job-card section is
+ * identified by its summary row. This is a plain optional-fields disclosure with a heading, opened
+ * by choice rather than by completion. Same name, different job — merging them would either lose the
+ * title here or bolt an unused completeness prop onto the shared one.
  */
 function CollapsibleSection({ title, summary, defaultOpen = false, children }) {
   const [open, setOpen] = React.useState(defaultOpen);

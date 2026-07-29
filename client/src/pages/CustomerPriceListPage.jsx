@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ArrowLeft, Search, Lock, Unlock, Trash2 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { matchesQuery, filterByQuery } from '../utils/searchUtils';
 
 /**
  * CustomerPriceListPage — what we charge each customer, and where that figure came from.
@@ -81,7 +82,7 @@ export default function CustomerPriceListPage() {
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return rows;
-    return rows.filter(r => String(r.Item_Name || '').toLowerCase().includes(q));
+    return rows.filter(r => matchesQuery(q, [r.Item_Name]));
   }, [rows, query]);
 
   return (

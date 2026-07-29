@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { Search, X } from 'lucide-react';
+import { matchesQuery } from '../../utils/searchUtils';
 import CollapsibleSection from '../CollapsibleSection';
 import PartsFittedEditor from './PartsFittedEditor';
 import { SERVICE_STATUS, itemLabel, notOkCheckpoints } from '../../utils/jobCardSchema';
@@ -18,12 +19,8 @@ export default function JobCardServiceTab({
   const [openId, setOpenId] = useState(null);
 
   const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return items;
-    return items.filter(it =>
-      [it.Cylinder_No, it.Serial_No, it.EUID_No, it.Client_ID_No, String(it.Sr_No), it.Capacity]
-        .some(v => String(v || '').toLowerCase().includes(q))
-    );
+    return items.filter(it => matchesQuery(query,
+      [it.Cylinder_No, it.Serial_No, it.EUID_No, it.Client_ID_No, String(it.Sr_No), it.Capacity]));
   }, [items, query]);
 
   const categoryFor = (code) => categories.find(c => String(c.Code).toUpperCase() === String(code).toUpperCase());

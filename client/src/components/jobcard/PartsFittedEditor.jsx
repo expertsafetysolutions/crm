@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { Plus, X } from 'lucide-react';
+import { matchesQuery } from '../../utils/searchUtils';
 import { newLineId } from '../../utils/jobCardSchema';
 
 /**
@@ -22,7 +23,7 @@ export default function PartsFittedEditor({ item, issues = [], itemMaster = [], 
     const q = query.trim().toLowerCase();
     if (!q) return itemMaster.slice(0, 8);
     return itemMaster
-      .filter(i => String(i.Item_Name || '').toLowerCase().includes(q))
+      .filter(i => matchesQuery(q, [i.Item_Name]))
       .slice(0, 8);
   }, [query, itemMaster]);
 

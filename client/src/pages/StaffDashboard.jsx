@@ -68,6 +68,7 @@ import {
 } from 'lucide-react';
 
 import { WORKFLOW_STAGES, PRODUCTION_STAGES_WITH_JOB_CARD } from '../utils/workflowStages';
+import { matchesQuery } from '../utils/searchUtils';
 
 const REMARK_TAGS = [
   'Call',
@@ -1760,15 +1761,12 @@ export default function StaffDashboard() {
       if (!activeTagFilters.some(id => taskTags.includes(id))) return false;
     }
     if (searchQuery.trim() !== '') {
-      const q = searchQuery.toLowerCase().trim();
-      const matchesId = t.Task_ID?.toLowerCase().includes(q);
-      const matchesCustomer = t.Customer_Name?.toLowerCase().includes(q);
-      const matchesDesc = t.Description?.toLowerCase().includes(q);
-      const matchesType = t.Type?.toLowerCase().includes(q);
-      const matchesMobile = (t.Customer_Contact || t.Contact || '')?.toLowerCase().includes(q);
-      const matchesPerson = (t.Customer_Auth_Person || t.Auth_Person || '')?.toLowerCase().includes(q);
-      const matchesAddress = (t.Customer_Address || t.Address || '')?.toLowerCase().includes(q);
-      return matchesId || matchesCustomer || matchesDesc || matchesType || matchesMobile || matchesPerson || matchesAddress;
+      return matchesQuery(searchQuery, [
+        t.Task_ID, t.Customer_Name, t.Description, t.Type,
+        t.Customer_Contact || t.Contact,
+        t.Customer_Auth_Person || t.Auth_Person,
+        t.Customer_Address || t.Address
+      ]);
     }
     return true;
   }), [tasks, user, staffList, filterSelectedUsers, filterStage, filterStatus, filterSelectedDates, filterStartDate, filterEndDate, activeTagFilters, searchQuery]);
@@ -2392,7 +2390,7 @@ export default function StaffDashboard() {
                     <div className="max-h-52 overflow-y-auto space-y-1 pr-0.5">
                       {(() => {
                         const query = (tagSearchQuery || '').trim().toLowerCase();
-                        const filtered = tags.filter(tag => (tag.name || '').toLowerCase().includes(query));
+                        const filtered = tags.filter(tag => matchesQuery(query, [tag.name]));
                         const isExactMatch = tags.some(tag => (tag.name || '').toLowerCase() === query);
                         
                         return (
@@ -3519,7 +3517,7 @@ export default function StaffDashboard() {
                             </div>
                           </div>
                           <div className="max-h-48 overflow-y-auto space-y-1 pr-1">
-                            {remarkTagsList.filter(t => !tagSearch.trim() || t.toLowerCase().includes(tagSearch.toLowerCase())).map(tag => {
+                            {remarkTagsList.filter(t => matchesQuery(tagSearch, [t])).map(tag => {
                               const isCustom = customRemarkTags.includes(tag) && !REMARK_TAGS.includes(tag);
                               return (
                                 <div
@@ -3558,7 +3556,7 @@ export default function StaffDashboard() {
                                 </div>
                               );
                             })}
-                            {remarkTagsList.filter(t => !tagSearch.trim() || t.toLowerCase().includes(tagSearch.toLowerCase())).length === 0 && (
+                            {remarkTagsList.filter(t => matchesQuery(tagSearch, [t])).length === 0 && (
                               <div className="p-4 text-center space-y-2">
                                 <p className="text-xs text-slate-400 font-medium">No matching tag found.</p>
                                 <button
@@ -3717,14 +3715,8 @@ export default function StaffDashboard() {
                         const staffLabel = item.Staff_Name || item.Staff_ID || 'Unknown Staff';
                         if (staffLabel !== masterRemarksStaffFilter) return false;
                       }
-                      if (!masterRemarksSearchQuery.trim()) return true;
-                      const q = masterRemarksSearchQuery.toLowerCase();
-                      return (
-                        (item.Remarks && item.Remarks.toLowerCase().includes(q)) ||
-                        (item.Type && item.Type.toLowerCase().includes(q)) ||
-                        (item.Staff_Name && item.Staff_Name.toLowerCase().includes(q)) ||
-                        (item.Staff_ID && item.Staff_ID.toLowerCase().includes(q))
-                      );
+                      return matchesQuery(masterRemarksSearchQuery,
+                        [item.Remarks, item.Type, item.Staff_Name, item.Staff_ID]);
                     });
 
                     return (
@@ -3813,12 +3805,7 @@ export default function StaffDashboard() {
                 (() => {
                   const history = myCustomerInteractions.filter(
                     i => (i.Customer_ID === remarkTask.Customer_ID || (remarkTask.Task_ID && i.Task_ID === remarkTask.Task_ID)) &&
-                         (!historySearchText.trim() ||
-                          (i.Remarks && i.Remarks.toLowerCase().includes(historySearchText.toLowerCase())) ||
-                          (i.Type && i.Type.toLowerCase().includes(historySearchText.toLowerCase())) ||
-                          (i.Staff_Name && i.Staff_Name.toLowerCase().includes(historySearchText.toLowerCase())) ||
-                          (i.Staff_ID && i.Staff_ID.toLowerCase().includes(historySearchText.toLowerCase()))
-                         )
+                         matchesQuery(historySearchText, [i.Remarks, i.Type, i.Staff_Name, i.Staff_ID])
                   );
                   if (history.length === 0) {
                     return (
@@ -4642,10 +4629,7 @@ export default function StaffDashboard() {
                     ) : customerSearchQuery.trim().length > 0 ? (
                       <div className="max-h-36 overflow-y-auto space-y-1.5 border border-slate-200 rounded-xl p-1.5 bg-white">
                         {customersList
-                          .filter(c =>
-                            c.Company_Name?.toLowerCase().includes(customerSearchQuery.toLowerCase()) ||
-                            c.Contact?.includes(customerSearchQuery)
-                          )
+                          .filter(c => matchesQuery(customerSearchQuery, [c.Company_Name, c.Contact, c.Auth_Person, c.Address]))
                           .slice(0, 5)
                           .map(c => (
                             <div

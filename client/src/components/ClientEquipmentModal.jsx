@@ -14,6 +14,7 @@ import {
   Calendar,
   MapPin
 } from 'lucide-react';
+import { matchesQuery } from '../utils/searchUtils';
 
 export default function ClientEquipmentModal({
   isOpen,
@@ -226,16 +227,9 @@ export default function ClientEquipmentModal({
                 <tbody className="divide-y divide-slate-100">
                   {equipmentList
                     .filter(it => {
-                      if (!searchQuery.trim()) return true;
-                      const q = searchQuery.toLowerCase();
-                      return (
-                        (it.clientIdNo || '').toLowerCase().includes(q) ||
-                        (it.itemName || '').toLowerCase().includes(q) ||
-                        (it.location || '').toLowerCase().includes(q) ||
-                        (it.serialNo || '').toLowerCase().includes(q) ||
-                        (it.mfgName || '').toLowerCase().includes(q) ||
-                        (it.cylinderNo || '').toLowerCase().includes(q)
-                      );
+                      return matchesQuery(searchQuery, [
+                        it.clientIdNo, it.itemName, it.location, it.serialNo, it.mfgName, it.cylinderNo
+                      ]);
                     })
                     .map((it, idx) => (
                       <tr key={it.id || idx} className="hover:bg-amber-50/70 transition text-center font-medium">

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Plus, Search, FileText, Loader2, ArrowLeft, Filter, TrendingDown } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { matchesQuery } from '../utils/searchUtils';
 import { formatMoney, formatDate, statusMeta } from '../utils/quotationUtils';
 
 /** Quotation register — one row per thread (superseded revisions hidden by default). */
@@ -57,7 +58,7 @@ export default function QuotationListPage() {
     return rows.filter(r => {
       if (statusFilter && r.Status !== statusFilter) return false;
       if (!q) return true;
-      return `${r.Quote_No_Display} ${r.Customer_Name_Snapshot} ${r.Subject || ''}`.toLowerCase().includes(q);
+      return matchesQuery(q, [r.Quote_No_Display, r.Customer_Name_Snapshot, r.Subject]);
     });
   }, [rows, search, statusFilter]);
 

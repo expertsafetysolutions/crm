@@ -58,6 +58,7 @@ import {
   FolderDown
 } from 'lucide-react';
 import { QRCodeCanvas } from 'qrcode.react';
+import { matchesQuery } from '../utils/searchUtils';
 // html2canvas/jspdf are loaded on demand inside handleDownloadPDF — ~590KB, only needed when
 // the user actually downloads, not to open the page.
 
@@ -1286,7 +1287,7 @@ export default function CertificateGeneratorPage() {
                         {showClientDropdown && (
                           <div className="absolute z-50 left-0 right-0 mt-1 max-h-48 overflow-y-auto bg-white border border-amber-400 rounded-xl shadow-2xl divide-y divide-slate-100">
                             {customers
-                              .filter(c => !clientSearch.trim() || (c.Company_Name || c.Customer_Name || '').toLowerCase().includes(clientSearch.toLowerCase()))
+                              .filter(c => matchesQuery(clientSearch, [c.Company_Name || c.Customer_Name, c.Contact, c.Address]))
                               .slice(0, 30)
                               .map(c => (
                                 <div

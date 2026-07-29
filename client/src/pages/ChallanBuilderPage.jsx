@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom';
 import { ArrowLeft, Plus, Trash2, AlertTriangle, Check, Link2, FileText, Download, MapPin } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { matchesQuery, filterByQuery } from '../utils/searchUtils';
 import QuotationPdfTemplate from '../components/QuotationPdfTemplate';
 import DeliveryPODModal from '../components/DeliveryPODModal';
 import { downloadPdfFromElement, safeFileName } from '../utils/pdfGenerator';
@@ -41,6 +42,9 @@ export default function ChallanBuilderPage() {
   const [challanNo, setChallanNo] = useState('');
   const [suggestion, setSuggestion] = useState('');
   const [duplicate, setDuplicate] = useState(null);
+  // Post-issue certificate offer. Null = not asked. Dismissing is always safe: the challan is
+  // already issued by the time this appears, and the Cert button below remains the later route in.
+  const [certPrompt, setCertPrompt] = useState(null);
   const [mapping, setMapping] = useState(null);
   const [pod, setPod] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -358,6 +362,16 @@ export default function ChallanBuilderPage() {
       }
       setDuplicate(null);
       setChallan(data);
+
+      // Offer the certificate while the delivery is still in hand — the prefill endpoint is already
+      // there, it just had nothing calling it, so certificates were raised days later from memory.
+      // Only for lines that actually certify: an accessory-only delivery must not be asked.
+      const certifiable = (data.Line_Items || []).filter(l => l.Line_Type === 'SERVICE' && l.Service_Type);
+      if (certifiable.length > 0) {
+        // Refilling and HP testing are separate certificates; offer whichever this challan carries.
+        const hasHp = certifiable.some(l => /hp/i.test(l.Service_Type));
+        setCertPrompt({ formatType: hasHp ? 'HP Testing' : 'Refilling', count: certifiable.length });
+      }
     } catch (e) {
       setError(e.message);
     } finally {
@@ -741,6 +755,37 @@ export default function ChallanBuilderPage() {
         />
       )}
 
+      {certPrompt && (
+        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white border border-slate-200 rounded-2xl max-w-sm w-full p-5 shadow-2xl space-y-3">
+            <div className="flex items-start gap-2.5">
+              <FileText className="w-5 h-5 text-indigo-600 shrink-0 mt-0.5" />
+              <div className="min-w-0">
+                <p className="text-sm font-extrabold text-slate-900">Raise the certificate now?</p>
+                <p className="text-[11px] text-slate-500 mt-1">
+                  Challan {challan.Challan_No} is issued. {certPrompt.count} line{certPrompt.count > 1 ? 's' : ''}{' '}
+                  need a {certPrompt.formatType} certificate — the details carry over automatically.
+                </p>
+              </div>
+            </div>
+            <div className="flex gap-2 pt-1">
+              <button
+                onClick={() => setCertPrompt(null)}
+                className="jc-btn-ghost flex-1 border border-slate-200 rounded-xl"
+              >
+                Later
+              </button>
+              <button
+                onClick={() => navigate(`/certificate-compliance/new?challanId=${challan.Challan_ID}&formatType=${encodeURIComponent(certPrompt.formatType)}`)}
+                className="flex-1 min-h-[48px] rounded-xl bg-indigo-600 text-white text-xs font-extrabold active:bg-indigo-700"
+              >
+                Create certificate
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Off-screen A4 capture node. Parked far off-canvas rather than display:none, because
           html2canvas cannot measure a node with no layout box. Same template as the invoice, with
           docType CHALLAN gating the money columns. */}
@@ -763,7 +808,7 @@ function ItemPicker({ items, onPick, onClose }) {
     const q = query.trim().toLowerCase();
     const active = items.filter(i => i.Active !== false && !i.Is_Deleted);
     if (!q) return active.slice(0, 8);
-    return active.filter(i => String(i.Item_Name || '').toLowerCase().includes(q)).slice(0, 8);
+    return active.filter(i => matchesQuery(q, [i.Item_Name])).slice(0, 8);
   }, [query, items]);
 
   return (

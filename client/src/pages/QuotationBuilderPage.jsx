@@ -6,6 +6,7 @@ import {
   Image as ImageIcon, Mail, MessageCircle, Paperclip, Trophy
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { matchesQuery, filterByQuery } from '../utils/searchUtils';
 import { useDocSettings } from '../context/DocSettingsContext';
 import QuotationPdfTemplate from '../components/QuotationPdfTemplate';
 import GstinInput from '../components/GstinInput';
@@ -679,7 +680,7 @@ export default function QuotationBuilderPage() {
   };
 
   const filteredCustomers = customerSearch
-    ? customers.filter(c => `${c.Company_Name} ${c.Auth_Person || ''}`.toLowerCase().includes(customerSearch.toLowerCase())).slice(0, 40)
+    ? customers.filter(c => matchesQuery(customerSearch, [c.Company_Name, c.Auth_Person, c.Contact, c.Address])).slice(0, 40)
     : customers.slice(0, 40);
 
   // POST /api/items is gated on inventory.add, so hide the inline creator rather than let it 403.
@@ -1555,7 +1556,7 @@ function SubjectCombo({ value, onChange, options, disabled }) {
   // An exact match means the user has already picked; show the whole list again rather than a
   // single redundant row.
   const filtered = query && !list.some(t => t.toLowerCase() === query)
-    ? list.filter(t => t.toLowerCase().includes(query))
+    ? list.filter(t => matchesQuery(query, [t]))
     : list;
 
   useEffect(() => () => clearTimeout(closeTimer.current), []);

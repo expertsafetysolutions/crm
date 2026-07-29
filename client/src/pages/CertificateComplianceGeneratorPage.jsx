@@ -35,6 +35,7 @@ import {
   Mail
 } from 'lucide-react';
 import { QRCodeCanvas } from 'qrcode.react';
+import { matchesQuery, filterByQuery } from '../utils/searchUtils';
 // html2canvas/jspdf are loaded on demand (see generateCertificateCanvas/buildCertificatePdf) —
 // they're ~590KB and only needed when the user actually downloads/prints/shares, not to open the page.
 
@@ -2057,7 +2058,7 @@ export default function CertificateComplianceGeneratorPage() {
                     {showCertCustDropdown && (
                       <div className="absolute z-50 left-0 right-0 mt-1 max-h-52 overflow-y-auto bg-white border border-amber-400 rounded-xl shadow-2xl divide-y divide-slate-100">
                         {customers
-                          .filter(c => !certCustomerSearch.trim() || (c.Company_Name||c.Customer_Name||'').toLowerCase().includes(certCustomerSearch.toLowerCase()) || (c.Address||'').toLowerCase().includes(certCustomerSearch.toLowerCase()))
+                          .filter(c => matchesQuery(certCustomerSearch, [c.Company_Name || c.Customer_Name, c.Address]))
                           .slice(0, 50).map(c => (
                           <div key={c.Customer_ID}
                             onMouseDown={() => {
@@ -2086,7 +2087,7 @@ export default function CertificateComplianceGeneratorPage() {
                             <span className="text-[9px] bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded font-bold ml-2 shrink-0">SELECT</span>
                           </div>
                         ))}
-                        {customers.filter(c => !certCustomerSearch.trim() || (c.Company_Name||c.Customer_Name||'').toLowerCase().includes(certCustomerSearch.toLowerCase())||(c.Address||'').toLowerCase().includes(certCustomerSearch.toLowerCase())).length === 0 && (
+                        {customers.filter(c => matchesQuery(certCustomerSearch, [c.Company_Name || c.Customer_Name, c.Address])).length === 0 && (
                           <div className="px-3 py-3 text-xs text-slate-400 text-center">No match — type company name manually</div>
                         )}
                       </div>
@@ -2194,7 +2195,7 @@ export default function CertificateComplianceGeneratorPage() {
                             {showNewItemDropdown && (
                               <div className="absolute z-50 left-0 right-0 mt-1 max-h-56 overflow-y-auto bg-white border border-amber-400 rounded-xl shadow-2xl divide-y divide-slate-100">
                                 {masterListToUse
-                                  .filter(eq => !newItemSearch.trim() || (eq.type || eq.itemName || '').toLowerCase().includes(newItemSearch.toLowerCase()))
+                                  .filter(eq => matchesQuery(newItemSearch, [eq.type || eq.itemName]))
                                   .map(eq => {
                                     const name = eq.type || eq.itemName || '';
                                     const caps = (eq.capacities || []).join(', ');
@@ -2221,7 +2222,7 @@ export default function CertificateComplianceGeneratorPage() {
                                       </div>
                                     );
                                   })}
-                                {masterListToUse.filter(eq => !newItemSearch.trim() || (eq.type || eq.itemName || '').toLowerCase().includes(newItemSearch.toLowerCase())).length === 0 && (
+                                {masterListToUse.filter(eq => matchesQuery(newItemSearch, [eq.type || eq.itemName])).length === 0 && (
                                   <div className="px-3 py-3 text-xs text-slate-400 text-center">No matching item found — custom name allowed</div>
                                 )}
                               </div>

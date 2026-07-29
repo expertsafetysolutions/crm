@@ -4,6 +4,7 @@ import {
   ArrowLeft, Search, FileText, Loader2, ReceiptIndianRupee, AlertTriangle, CheckCircle2, Mail
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { matchesQuery } from '../utils/searchUtils';
 import RecordPaymentModal from '../components/RecordPaymentModal';
 import {
   formatMoney, formatDate, docStatusMeta, paymentStatusMeta,
@@ -88,8 +89,7 @@ export default function SalesDocumentsPage() {
       if (filter === 'paid' && String(r.Payment_Status || '').toLowerCase() !== 'paid') return false;
       if (filter === 'pending' && r.Linked_Invoice_ID) return false;
       if (!q) return true;
-      return `${r[active.noKey] || ''} ${r.Customer_Name_Snapshot || ''} ${r.Subject || ''} ${r.Source_Quote_No || ''}`
-        .toLowerCase().includes(q);
+      return matchesQuery(q, [r[active.noKey], r.Customer_Name_Snapshot, r.Subject, r.Source_Quote_No]);
     });
   }, [rows, search, filter, active.noKey]);
 

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { matchesQuery, filterByQuery } from '../utils/searchUtils';
 import { useDocSettings } from '../context/DocSettingsContext';
 import { ChevronLeft, Search, Building2, CheckCircle2, Loader2 } from 'lucide-react';
 import FieldVisitInspector from '../components/servicereport/FieldVisitInspector';
@@ -223,7 +224,7 @@ export default function FieldVisitPage() {
               {showDropdown && (
                 <div className="absolute z-10 mt-1 w-full max-h-64 overflow-y-auto bg-white border border-slate-200 rounded-xl shadow-lg">
                   {customers
-                    .filter(c => !customerSearch.trim() || (c.Company_Name || c.Customer_Name || '').toLowerCase().includes(customerSearch.toLowerCase()))
+                    .filter(c => matchesQuery(customerSearch, [c.Company_Name || c.Customer_Name, c.Contact, c.Address]))
                     .slice(0, 30)
                     .map(c => (
                       <button

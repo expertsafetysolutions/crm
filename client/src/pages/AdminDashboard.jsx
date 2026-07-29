@@ -87,6 +87,7 @@ import {
 import { QRCodeCanvas } from 'qrcode.react';
 import GstinInput from '../components/GstinInput';
 import { WORKFLOW_STAGES, PRODUCTION_STAGES_WITH_JOB_CARD, departmentForStage } from '../utils/workflowStages';
+import { matchesQuery, filterByQuery } from '../utils/searchUtils';
 
 const REMARK_TAGS = [
   'Call',
@@ -487,13 +488,8 @@ export default function AdminDashboard() {
         if (attStatusFilter === 'ON_TIME' && lateMins > 0) return false;
         if (attStatusFilter === 'LATE' && lateMins <= 0) return false;
         if (attSearchQuery.trim()) {
-          const q = attSearchQuery.toLowerCase();
           const staffObj = staffList.find(st => st.Staff_ID === log.Staff_ID);
-          const matchId = (log.Staff_ID || '').toLowerCase().includes(q);
-          const matchName = (staffObj?.Name || '').toLowerCase().includes(q);
-          const matchDate = (log.Date || '').toLowerCase().includes(q);
-          const matchIp = (log.IP_Address || '').toLowerCase().includes(q);
-          if (!matchId && !matchName && !matchDate && !matchIp) return false;
+          if (!matchesQuery(attSearchQuery, [log.Staff_ID, staffObj?.Name, log.Date, log.IP_Address])) return false;
         }
         return true;
       })
@@ -2244,15 +2240,17 @@ export default function AdminDashboard() {
         if (createdAtDate > filterEndDate) return false;
       }
       if (!searchQuery.trim()) return true;
-      const q = searchQuery.toLowerCase().trim();
       const cust = findCustomerForTask(t);
-      const matchCompany = (t.Customer_Name || cust.Company_Name || '').toLowerCase().includes(q);
-      const matchMobile = (cust.Contact || t.Contact || t.Customer_Contact || '').toLowerCase().includes(q);
-      const matchPerson = (cust.Auth_Person || t.Auth_Person || t.Customer_Auth_Person || '').toLowerCase().includes(q);
-      const matchAddress = (cust.Address || t.Address || t.Customer_Address || '').toLowerCase().includes(q);
-      const matchId = (t.Task_ID || '').toLowerCase().includes(q);
-      const matchDesc = (t.Description || '').toLowerCase().includes(q);
-      return matchCompany || matchMobile || matchPerson || matchAddress || matchId || matchDesc;
+      // Same fields as before, but tokenised: "Solutions Vadodara" now matches a company whose name
+      // and address each hold one of the words.
+      return matchesQuery(searchQuery, [
+        t.Customer_Name || cust.Company_Name,
+        cust.Contact || t.Contact || t.Customer_Contact,
+        cust.Auth_Person || t.Auth_Person || t.Customer_Auth_Person,
+        cust.Address || t.Address || t.Customer_Address,
+        t.Task_ID,
+        t.Description
+      ]);
     });
 
     if (filterSelectedUsers.length === 1) {
@@ -2273,45 +2271,29 @@ export default function AdminDashboard() {
     return list;
   }, [tasks, filterStatus, activeTagFilters, filterSelectedUsers, filterSelectedDates, filterStartDate, filterEndDate, searchQuery, customersById, customersByName, staffList]);
 
-  const filteredCustomers = useMemo(() => customers.filter(c => {
-    if (!searchQuery.trim()) return true;
-    const q = searchQuery.toLowerCase().trim();
-    const matchCompany = (c.Company_Name || '').toLowerCase().includes(q);
-    const matchMobile = (c.Contact || '').toLowerCase().includes(q);
-    const matchPerson = (c.Auth_Person || '').toLowerCase().includes(q);
-    const matchAddress = (c.Address || '').toLowerCase().includes(q);
-    const matchId = (c.Customer_ID || '').toLowerCase().includes(q);
-    return matchCompany || matchMobile || matchPerson || matchAddress || matchId;
-  }), [customers, searchQuery]);
+  const filteredCustomers = useMemo(() => customers.filter(c =>
+    matchesQuery(searchQuery, [c.Company_Name, c.Contact, c.Auth_Person, c.Address, c.Customer_ID])
+  ), [customers, searchQuery]);
 
   const getGroupedSuggestions = () => {
     if (!searchQuery || !searchQuery.trim()) return { customers: [], staff: [], tasks: [] };
-    const q = searchQuery.toLowerCase().trim();
+    // Field lists and the 5-row caps are unchanged; only the matcher is tokenised.
+    const matchedCustomers = filterByQuery(customers, searchQuery,
+      c => [c.Company_Name, c.Contact, c.Auth_Person, c.Address, c.Customer_ID]).slice(0, 5);
 
-    const matchedCustomers = customers.filter(c => {
-      return (c.Company_Name || '').toLowerCase().includes(q) ||
-             (c.Contact || '').toLowerCase().includes(q) ||
-             (c.Auth_Person || '').toLowerCase().includes(q) ||
-             (c.Address || '').toLowerCase().includes(q) ||
-             (c.Customer_ID || '').toLowerCase().includes(q);
-    }).slice(0, 5);
+    const matchedStaff = filterByQuery(staffList, searchQuery,
+      s => [s.Name, s.Mobile, s.Role, s.Department, s.Staff_ID]).slice(0, 5);
 
-    const matchedStaff = staffList.filter(s => {
-      return (s.Name || '').toLowerCase().includes(q) ||
-             (s.Mobile || '').toLowerCase().includes(q) ||
-             (s.Role || '').toLowerCase().includes(q) ||
-             (s.Department || '').toLowerCase().includes(q) ||
-             (s.Staff_ID || '').toLowerCase().includes(q);
-    }).slice(0, 5);
-
-    const matchedTasks = tasks.filter(t => {
+    const matchedTasks = filterByQuery(tasks, searchQuery, t => {
       const cust = findCustomerForTask(t);
-      return (t.Task_ID || '').toLowerCase().includes(q) ||
-             (t.Description || '').toLowerCase().includes(q) ||
-             (t.Customer_Name || cust.Company_Name || '').toLowerCase().includes(q) ||
-             (cust.Contact || t.Contact || t.Customer_Contact || '').toLowerCase().includes(q) ||
-             (cust.Auth_Person || t.Auth_Person || t.Customer_Auth_Person || '').toLowerCase().includes(q) ||
-             (cust.Address || t.Address || t.Customer_Address || '').toLowerCase().includes(q);
+      return [
+        t.Task_ID,
+        t.Description,
+        t.Customer_Name || cust.Company_Name,
+        cust.Contact || t.Contact || t.Customer_Contact,
+        cust.Auth_Person || t.Auth_Person || t.Customer_Auth_Person,
+        cust.Address || t.Address || t.Customer_Address
+      ];
     }).slice(0, 5);
 
     return {
@@ -3908,7 +3890,7 @@ export default function AdminDashboard() {
                               <div className="max-h-52 overflow-y-auto space-y-1 pr-0.5">
                                 {(() => {
                                   const query = (tagSearchQuery || '').trim().toLowerCase();
-                                  const filtered = tags.filter(tag => (tag.name || '').toLowerCase().includes(query));
+                                  const filtered = tags.filter(tag => matchesQuery(query, [tag.name]));
                                   const isExactMatch = tags.some(tag => (tag.name || '').toLowerCase() === query);
                                   
                                   return (
@@ -5019,7 +5001,7 @@ export default function AdminDashboard() {
                                 </div>
                               </div>
                               <div className="max-h-48 overflow-y-auto space-y-1 pr-1">
-                                {remarkTagsList.filter(t => !tagSearch.trim() || t.toLowerCase().includes(tagSearch.toLowerCase())).map(tag => {
+                                {remarkTagsList.filter(t => matchesQuery(tagSearch, [t])).map(tag => {
                                   const isCustom = customRemarkTags.includes(tag) && !REMARK_TAGS.includes(tag);
                                   return (
                                     <div
@@ -5058,7 +5040,7 @@ export default function AdminDashboard() {
                                     </div>
                                   );
                                 })}
-                                {remarkTagsList.filter(t => !tagSearch.trim() || t.toLowerCase().includes(tagSearch.toLowerCase())).length === 0 && (
+                                {remarkTagsList.filter(t => matchesQuery(tagSearch, [t])).length === 0 && (
                                   <div className="p-4 text-center space-y-2">
                                     <p className="text-xs text-slate-400 font-medium">No matching tag found.</p>
                                     <button
@@ -5220,14 +5202,8 @@ export default function AdminDashboard() {
                                 const staffLabel = item.Staff_Name || item.Staff_ID || 'Unknown Staff';
                                 if (staffLabel !== masterRemarksStaffFilter) return false;
                               }
-                              if (!masterRemarksSearchQuery.trim()) return true;
-                              const q = masterRemarksSearchQuery.toLowerCase();
-                              return (
-                                (item.Remarks && item.Remarks.toLowerCase().includes(q)) ||
-                                (item.Type && item.Type.toLowerCase().includes(q)) ||
-                                (item.Staff_Name && item.Staff_Name.toLowerCase().includes(q)) ||
-                                (item.Staff_ID && item.Staff_ID.toLowerCase().includes(q))
-                              );
+                              return matchesQuery(masterRemarksSearchQuery,
+                                [item.Remarks, item.Type, item.Staff_Name, item.Staff_ID]);
                             });
 
                             return (
@@ -5316,12 +5292,7 @@ export default function AdminDashboard() {
                     (() => {
                       const history = customerInteractions.filter(
                         i => (i.Customer_ID === remarkTask.Customer_ID || (remarkTask.Task_ID && i.Task_ID === remarkTask.Task_ID)) &&
-                             (!historySearchText.trim() ||
-                              (i.Remarks && i.Remarks.toLowerCase().includes(historySearchText.toLowerCase())) ||
-                              (i.Type && i.Type.toLowerCase().includes(historySearchText.toLowerCase())) ||
-                              (i.Staff_Name && i.Staff_Name.toLowerCase().includes(historySearchText.toLowerCase())) ||
-                              (i.Staff_ID && i.Staff_ID.toLowerCase().includes(historySearchText.toLowerCase()))
-                             )
+                             matchesQuery(historySearchText, [i.Remarks, i.Type, i.Staff_Name, i.Staff_ID])
                       );
                       if (history.length === 0) {
                         return (
@@ -5449,7 +5420,7 @@ export default function AdminDashboard() {
                                   </div>
                                 </div>
                                 <div className="max-h-48 overflow-y-auto space-y-1 pr-1">
-                                  {remarkTagsList.filter(t => !tagSearch.trim() || t.toLowerCase().includes(tagSearch.toLowerCase())).map(tag => {
+                                  {remarkTagsList.filter(t => matchesQuery(tagSearch, [t])).map(tag => {
                                     const isCustom = customRemarkTags.includes(tag) && !REMARK_TAGS.includes(tag);
                                     return (
                                       <div
@@ -5494,7 +5465,7 @@ export default function AdminDashboard() {
                                       </div>
                                     );
                                   })}
-                                  {remarkTagsList.filter(t => !tagSearch.trim() || t.toLowerCase().includes(tagSearch.toLowerCase())).length === 0 && (
+                                  {remarkTagsList.filter(t => matchesQuery(tagSearch, [t])).length === 0 && (
                                     <div className="p-4 text-center space-y-2">
                                       <p className="text-xs text-slate-400 font-medium">No matching tag found.</p>
                                       <button
@@ -7894,7 +7865,7 @@ export default function AdminDashboard() {
                     ) : customerSearchQuery.trim().length > 0 ? (
                       <div className="max-h-32 overflow-y-auto space-y-1 bg-white border border-slate-200 rounded-xl p-1">
                         {customers
-                          .filter(c => c.Company_Name?.toLowerCase().includes(customerSearchQuery.toLowerCase()))
+                          .filter(c => matchesQuery(customerSearchQuery, [c.Company_Name, c.Contact, c.Auth_Person, c.Address, c.Customer_ID]))
                           .slice(0, 5)
                           .map(c => (
                             <div

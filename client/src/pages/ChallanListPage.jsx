@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ArrowLeft, Search, FileText, Mail, Loader2 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { matchesQuery } from '../utils/searchUtils';
 
 /**
  * ChallanListPage — the delivery challan register.
@@ -85,8 +86,7 @@ export default function ChallanListPage() {
     return rows.filter(r => {
       if (filter !== 'ALL' && r.Status !== filter) return false;
       if (!q) return true;
-      return [r.Challan_No, r.Customer_Name_Snapshot, r.Challan_ID]
-        .some(v => String(v || '').toLowerCase().includes(q));
+      return matchesQuery(q, [r.Challan_No, r.Customer_Name_Snapshot, r.Challan_ID]);
     });
   }, [rows, filter, query]);
 

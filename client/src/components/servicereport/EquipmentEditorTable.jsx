@@ -1,5 +1,6 @@
 import React from 'react';
 import { Trash2, Check } from 'lucide-react';
+import { matchesQuery } from '../../utils/searchUtils';
 import { COLUMN_TYPES, CHECKPOINT_OK, CHECKPOINT_NOT_OK } from '../../utils/reportTypeSchemas';
 
 /**
@@ -62,15 +63,8 @@ export default function EquipmentEditorTable({
   onRemoveCustomColumn,
   onDeleteRow
 }) {
-  const q = searchQuery.trim().toLowerCase();
-  const visibleItems = !q
-    ? items
-    : items.filter(it =>
-        (it.clientIdNo || '').toLowerCase().includes(q) ||
-        (it.itemName || '').toLowerCase().includes(q) ||
-        (it.location || '').toLowerCase().includes(q) ||
-        (it.remarks || '').toLowerCase().includes(q)
-      );
+  const visibleItems = items.filter(it =>
+    matchesQuery(searchQuery, [it.clientIdNo, it.itemName, it.location, it.remarks]));
 
   return (
     <>

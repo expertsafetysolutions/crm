@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, Plus, Trash2, Loader2, AlertTriangle, CheckCircle2,
   Building2, FileQuestion, ShoppingCart, PackageCheck, Star, TrendingDown,
-  IndianRupee, ArrowRight
+  IndianRupee, ArrowRight, Search
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import SmartSearchSelect from '../components/SmartSearchSelect';
@@ -35,6 +35,7 @@ export default function PurchasePage() {
   const { token, canSeeMoney } = useAuth();
 
   const [tab, setTab] = useState('ORDERS');
+  const [poQuery, setPoQuery] = useState('');
   const [vendors, setVendors] = useState([]);
   const [rfqs, setRfqs] = useState([]);
   const [orders, setOrders] = useState([]);
@@ -57,6 +58,15 @@ export default function PurchasePage() {
     [token]
   );
   const flash = (text, kind = 'ok') => { setMsg({ text, kind }); setTimeout(() => setMsg(null), 6000); };
+
+  // Line item names are searchable too, so "R9870 valve" finds the order that carried the part.
+  const visibleOrders = useMemo(
+    () => filterByQuery(orders, poQuery, po => [
+      po.PO_No, po.Vendor_Name, po.Status, po.PO_Date,
+      ...(po.Lines || []).map(l => l.Item_Name)
+    ]),
+    [orders, poQuery]
+  );
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -230,9 +240,24 @@ export default function PurchasePage() {
               </div>
             )}
 
+            {orders.length > 0 && (
+              <div className="relative">
+                <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  value={poQuery}
+                  onChange={e => setPoQuery(e.target.value)}
+                  placeholder="Search PO no, vendor or item…"
+                  className="w-full pl-9 pr-3 min-h-[44px] bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-900 focus:ring-2 focus:ring-slate-400 focus:outline-none"
+                />
+              </div>
+            )}
+
             {orders.length === 0 ? (
               <Empty text="No purchase orders yet. Compare quotes on an enquiry to raise one." />
-            ) : orders.map(po => (
+            ) : visibleOrders.length === 0 ? (
+              <Empty text="No purchase order matches that search." />
+            ) : visibleOrders.map(po => (
               <div key={po.PO_ID} className="bg-white border border-slate-200 rounded-xl p-3">
                 <div className="flex items-start gap-2">
                   <div className="flex-1 min-w-0">

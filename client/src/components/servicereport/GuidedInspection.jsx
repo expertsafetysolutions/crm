@@ -1,5 +1,6 @@
 import React from 'react';
 import { Search, ChevronLeft, Check, ArrowRight, CircleDot, CheckCircle2 } from 'lucide-react';
+import { matchesQuery } from '../../utils/searchUtils';
 import { COLUMN_TYPES, CHECKPOINT_OK } from '../../utils/reportTypeSchemas';
 
 /**
@@ -103,13 +104,21 @@ function FocusedItem({ item, columns, customColumns, onCellChange, onToggleCheck
         </div>
       )}
 
-      <button
-        type="button"
-        onClick={() => onSaveNext(item.id)}
-        className="w-full py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-black text-sm flex items-center justify-center gap-2 shadow-sm active:scale-[0.99]"
+      {/* Pinned: this is tapped once per cylinder while standing at the equipment, so it must stay
+          under the thumb instead of retreating below a long checklist. Safe-area inset keeps it
+          clear of the iOS home indicator. */}
+      <div
+        className="sticky bottom-0 -mx-3 px-3 pt-2 pb-3 bg-white/95 backdrop-blur-md border-t border-slate-200"
+        style={{ paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom))' }}
       >
-        <Check className="w-5 h-5" /> Save &amp; Next <ArrowRight className="w-4 h-4" />
-      </button>
+        <button
+          type="button"
+          onClick={() => onSaveNext(item.id)}
+          className="w-full min-h-[52px] py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-black text-sm flex items-center justify-center gap-2 shadow-sm active:scale-[0.99]"
+        >
+          <Check className="w-5 h-5" /> Save &amp; Next <ArrowRight className="w-4 h-4" />
+        </button>
+      </div>
     </div>
   );
 }
@@ -150,13 +159,9 @@ export default function GuidedInspection({
   const q = search.trim().toLowerCase();
   const matches = it => {
     if (!q) return true;
-    const idx = String((items.indexOf(it) + 1));
-    return (
-      (it.clientIdNo || '').toLowerCase().includes(q) ||
-      (it.location || '').toLowerCase().includes(q) ||
-      (it.itemName || '').toLowerCase().includes(q) ||
-      idx === q
-    );
+    // Row number stays an exact match: typing "3" should open item 3, not every item containing a 3.
+    if (String(items.indexOf(it) + 1) === q) return true;
+    return matchesQuery(search, [it.clientIdNo, it.location, it.itemName]);
   };
   const filtered = items.filter(matches);
   const pending = filtered.filter(it => !it.serviced);

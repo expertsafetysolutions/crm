@@ -13,6 +13,8 @@
     "keygen": "node scripts/generate-key.js",
     "encrypt:data": "node scripts/encrypt-existing-data.js",
     "verify:encryption": "node server/tests/verifyEncryption.js",
+    "verify:backup": "node scripts/verify-backup.js",
+    "reset:auth": "node scripts/reset-auth.js",
     "backup": "node scripts/backup-db.js",
     "backup:secure": "node scripts/backup-db.js --gzip --encrypt",
     "backup:gzip": "node scripts/backup-db.js --gzip",

@@ -43,7 +43,9 @@
       "Bash(node --check server/src/utils/piiMask.js)",
       "Bash(node --check server/tests/verifyEncryption.js)",
       "Bash(timeout 200 npm run verify:encryption)",
-      "Bash(timeout 180 npm run verify)"
+      "Bash(timeout 180 npm run verify)",
+      "Bash(node --check server/src/utils/passwordUtils.js)",
+      "Bash(node --check server/src/routes/authRoutes.js)"
     ]
   }
 }

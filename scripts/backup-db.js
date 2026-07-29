@@ -130,7 +130,12 @@ async function main() {
       fs.writeFileSync(file, payload);
 
       const bytes = fs.statSync(file).size;
-      manifest.collections[name] = { documents: docs.length, bytes };
+      // SHA-256 of the bytes actually written to disk (after gzip/encrypt), so verification can
+      // detect silent corruption — a truncated write, a bad disk sector, a half-finished cloud
+      // sync. A document count alone cannot: a file can hold the right number of records and
+      // still be damaged.
+      const sha256 = crypto.createHash('sha256').update(payload).digest('hex');
+      manifest.collections[name] = { documents: docs.length, bytes, sha256 };
       manifest.totalDocuments += docs.length;
       console.log(`  ${name.padEnd(32)} ${String(docs.length).padStart(6)} docs  ${(bytes / 1024).toFixed(1)} KB`);
     } catch (err) {

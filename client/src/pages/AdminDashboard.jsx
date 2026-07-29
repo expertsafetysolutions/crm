@@ -1099,6 +1099,8 @@ export default function AdminDashboard() {
   const [changePasswordSubmitting, setChangePasswordSubmitting] = useState(false);
   const [showStaffAccessModal, setShowStaffAccessModal] = useState(false);
   const [creatingStaff, setCreatingStaff] = useState(false);
+  const [newStaffError, setNewStaffError] = useState('');
+  const [backupStatus, setBackupStatus] = useState(null);
   const [newStaffForm, setNewStaffForm] = useState({
     name: '',
     email: '',
@@ -1387,6 +1389,19 @@ export default function AdminDashboard() {
     }
   };
 
+  // Loaded when the admin profile popup opens rather than on mount — it is a small panel most
+  // sessions never look at, and this keeps it off the initial dashboard load.
+  const loadBackupStatus = async () => {
+    try {
+      const res = await fetch('/api/security/backup-status', { headers: { Authorization: `Bearer ${token}` } });
+      if (res.ok) setBackupStatus(await res.json());
+      else setBackupStatus({ status: 'UNKNOWN', problems: [] });
+    } catch (err) {
+      console.error('Failed to load backup status:', err);
+      setBackupStatus({ status: 'UNKNOWN', problems: [] });
+    }
+  };
+
   const loadNotificationSettings = async () => {
     try {
       setIsLoadingNotificationSettings(true);
@@ -1551,6 +1566,12 @@ export default function AdminDashboard() {
     return () => window.removeEventListener('OPEN_STAFF_PROFILE_POPUP', openPopup);
   }, []);
 
+  // Keyed on the popup's visibility rather than on each button that opens it, so every entry
+  // point refreshes the status without needing to remember to call the loader.
+  useEffect(() => {
+    if (showAdminProfilePopup) loadBackupStatus();
+  }, [showAdminProfilePopup]);
+
   useEffect(() => {
     const handleNav = (e) => {
       const n = e.detail;
@@ -1628,6 +1649,17 @@ export default function AdminDashboard() {
 
   const handleCreateStaffSubmit = async (e) => {
     e.preventDefault();
+    setNewStaffError('');
+
+    // Checked here as well as on the server so the admin sees the rule inline, the way the
+    // set-password and change-password modals already do, instead of learning about it from a
+    // browser alert after a round trip. The server re-validates and remains the source of truth.
+    const policyError = validatePasswordPolicy(newStaffForm.password);
+    if (policyError) {
+      setNewStaffError(policyError);
+      return;
+    }
+
     try {
       setCreatingStaff(true);
       const res = await fetch('/api/staff', {
@@ -1640,6 +1672,7 @@ export default function AdminDashboard() {
         throw new Error(errData.error || 'Failed to create staff member');
       }
       setShowNewStaffModal(false);
+      setNewStaffError('');
       setNewStaffForm({
         name: '',
         email: '',
@@ -1652,7 +1685,7 @@ export default function AdminDashboard() {
       });
       await loadAdminData();
     } catch (err) {
-      alert(err.message);
+      setNewStaffError(err.message);
     } finally {
       setCreatingStaff(false);
     }
@@ -8262,10 +8295,14 @@ export default function AdminDashboard() {
                 </select>
               </div>
 
+              {newStaffError && (
+                <p className="text-xs font-semibold text-rose-600 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2">{newStaffError}</p>
+              )}
+
               <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-200">
                 <button
                   type="button"
-                  onClick={() => setShowNewStaffModal(false)}
+                  onClick={() => { setShowNewStaffModal(false); setNewStaffError(''); }}
                   className="px-4 py-2 rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-50 text-xs font-bold transition"
                 >
                   Cancel
@@ -8749,6 +8786,38 @@ export default function AdminDashboard() {
                   <p className="text-[10px] text-emerald-600 font-semibold">Tasks</p>
                   <p className="text-base font-bold text-emerald-700">{tasks.length}</p>
                 </div>
+              </div>
+
+              {/* Backup health. Reported by scripts/verify-backup.js --report; NEVER_RUN is shown
+                  plainly rather than hidden, because "no backup has ever been checked" is the most
+                  important thing this widget can say. */}
+              <div className="mt-2 bg-white p-2.5 rounded-xl border border-slate-200">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-[10px] text-slate-600 font-semibold">Backup Status</p>
+                  <span className={`text-[11px] font-bold ${
+                    backupStatus?.status === 'HEALTHY' ? 'text-emerald-700'
+                      : backupStatus?.status === 'FAILED' ? 'text-rose-700'
+                      : 'text-amber-700'
+                  }`}>
+                    {!backupStatus ? 'Checking…'
+                      : backupStatus.status === 'HEALTHY' ? 'Healthy ✅'
+                      : backupStatus.status === 'FAILED' ? 'Failed ❌'
+                      : backupStatus.status === 'STALE' ? 'Stale ⚠️'
+                      : backupStatus.status === 'NEVER_RUN' ? 'Never run ⚠️'
+                      : `${backupStatus.status} ⚠️`}
+                  </span>
+                </div>
+                {backupStatus?.takenOn && (
+                  <p className="text-[10px] text-slate-500 font-medium mt-0.5">
+                    Backup of {backupStatus.takenOn} · {backupStatus.documents} records
+                  </p>
+                )}
+                {backupStatus?.status === 'NEVER_RUN' && (
+                  <p className="text-[10px] text-slate-500 font-medium mt-0.5">Run: npm run backup</p>
+                )}
+                {backupStatus?.problems?.length > 0 && (
+                  <p className="text-[10px] text-rose-600 font-semibold mt-0.5">{backupStatus.problems[0]}</p>
+                )}
               </div>
             </div>
 

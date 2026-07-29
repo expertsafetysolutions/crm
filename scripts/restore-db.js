@@ -104,6 +104,29 @@ async function main() {
   console.log(`Target   : ${TARGET_URI.replace(/\/\/[^@]*@/, '//****:****@')}`);
   console.log(`Mode     : ${CONFIRMED ? 'WRITE — existing collections will be REPLACED' : 'DRY RUN (no writes)'}\n`);
 
+  // Integrity check BEFORE any write. Restoring a corrupted dump over a working database would
+  // replace good data with damaged data — the one outcome worse than not restoring at all. A
+  // corrupt backup is only refused for actual writes; a dry run still reports so the operator can
+  // see exactly what is wrong.
+  const { verify } = require('./verify-backup');
+  const integrity = verify(dir);
+  if (integrity.status === 'FAILED') {
+    console.error('INTEGRITY CHECK FAILED — this backup is damaged:\n');
+    for (const p of integrity.problems) console.error(`  - ${p}`);
+    if (CONFIRMED) {
+      // Exits before mongoose.connect below, so nothing has been opened or touched.
+      console.error('\nRefusing to restore. Use an earlier backup.\n');
+      process.exit(1);
+    }
+    console.error('\n(dry run — no writes attempted)\n');
+  } else if (integrity.problems.length) {
+    console.log(`Integrity: ${integrity.status}`);
+    for (const p of integrity.problems) console.log(`  - ${p}`);
+    console.log('');
+  } else {
+    console.log('Integrity: verified — all checksums match\n');
+  }
+
   await mongoose.connect(TARGET_URI, { serverSelectionTimeoutMS: 20000 });
   const db = mongoose.connection.db;
 

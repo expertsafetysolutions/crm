@@ -390,29 +390,56 @@ const QuotationPdfTemplate = React.forwardRef(({
           </div>
 
           {/* Document title band.
-              MUST NOT use text-indent. html2canvas 1.4.1 does not implement that property at all,
-              and because letter-spacing is non-zero it redraws the text glyph-by-glyph starting at
-              the element's measured left edge (renderTextWithLetterSpacing). The browser applies
-              the indent, the canvas does not, so the two disagree and the lettering lands outside
-              the band — which printed as an empty red box. The trailing gap that letter-spacing
-              leaves after the last glyph is compensated with asymmetric padding instead, which
-              html2canvas does honour. */}
-          <div className="text-center mb-2">
-            <div className="inline-block" style={{ backgroundColor: BRAND_RED, padding: '4px 28px 4px 32px' }}>
-              <h1
-                style={{
-                  color: '#ffffff',
-                  fontSize: '13px',
-                  lineHeight: 1.25,
-                  fontWeight: 900,
-                  letterSpacing: '0.2em',
-                  margin: 0,
-                  whiteSpace: 'nowrap'
-                }}
-              >
-                {DOC_TITLES[docType] || 'QUOTATION'}
-              </h1>
-            </div>
+
+              MUST NOT use CSS letter-spacing. html2canvas 1.4.1 mis-renders it: when
+              letterSpacing !== 0 it abandons a single fillText and draws the string
+              glyph-by-glyph, advancing only by measureText(letter).width and never adding the
+              spacing itself (renderTextWithLetterSpacing, html2canvas.js:6703). The BROWSER does
+              add it, so the layout the browser measured and the text the canvas paints disagree —
+              the drawn text is narrower than, and offset from, the band, which is why the PDF
+              showed an empty red bar while the screen looked correct.
+
+              Every CSS-level fix was tried and every one failed. In order: removing
+              letter-spacing; padding the string with real spaces (worse — inflates it ~40% so it
+              overflows the band); dropping the <h1> for a <div>; putting the fill and the text on
+              one element; pinning the font to Arial at weight 700; and finally rebuilding it as a
+              table row copied verbatim from "GRAND TOTAL", which prints white-on-this-same-red
+              correctly further down the page. The band still came out with the bar drawn and no
+              lettering — and the table did not even take the width it was given, so the renderer,
+              not the markup, is what is wrong here.
+
+              So the PDF no longer relies on html2canvas for this element at all. The
+              `data-pdf-redraw` attributes tell renderElementToCanvas (utils/pdfGenerator.js) to
+              repaint this band onto the finished canvas with the native 2D API — fillRect for the
+              bar, fillText per glyph for the lettering. That path cannot silently drop text.
+
+              Because the PDF is drawn independently, the on-screen styling below is free to use
+              ordinary letter-spacing again; `data-pdf-redraw-spacing` carries the equivalent
+              tracking in px so the two stay visually identical.
+
+              If this element is restyled, keep the data-pdf-redraw attributes and keep the
+              spacing values in step, or the PDF will silently drift from the screen. */}
+          <div
+            data-pdf-redraw="title"
+            data-pdf-redraw-bg={BRAND_RED}
+            data-pdf-redraw-color="#ffffff"
+            data-pdf-redraw-spacing="2.6"
+            style={{
+              backgroundColor: BRAND_RED,
+              color: '#ffffff',
+              width: '100%',
+              boxSizing: 'border-box',
+              padding: '6px 8px',
+              marginBottom: '8px',
+              fontSize: '13px',
+              lineHeight: '16px',
+              fontWeight: 700,
+              letterSpacing: '0.2em',
+              textAlign: 'center',
+              whiteSpace: 'nowrap'
+            }}
+          >
+            {DOC_TITLES[docType] || 'QUOTATION'}
           </div>
 
           {/* ---------- PARTIES ---------- */}

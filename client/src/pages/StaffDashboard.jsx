@@ -1700,13 +1700,22 @@ export default function StaffDashboard() {
       const userRole = user?.Role || 'Staff';
       const userPerms = user?.Permissions || '';
       
+      // When an Admin opens a specific staff member's dashboard, the point is to see THAT PERSON'S
+      // work — not the company-wide list again. The wide-visibility rules below (Admin bypass,
+      // FULL_ACCESS/ALL_TASKS scope, and the superior-role check further down) each pull other
+      // people's tasks back into the list, which is what made an impersonated view look identical
+      // to the Admin's own. During impersonation all three are skipped, so visibility falls
+      // through to "assigned to me / created by me" only. Same principle already applied to
+      // attendance, leave and advances above: this dashboard shows one person's day, not the team's.
+      const isImpersonating = Boolean(localStorage.getItem('expert_safety_impersonation'));
+
       const hasTaskVisibility = (task) => {
         // Admin has full access
-        if (['Admin', 'ADMIN'].includes(userRole) && !localStorage.getItem('expert_safety_impersonation')) {
+        if (['Admin', 'ADMIN'].includes(userRole) && !isImpersonating) {
           return true;
         }
         // Full Access / All Tasks scope sees all tasks
-        if (userPerms === 'FULL_ACCESS' || userPerms === 'ALL_TASKS') {
+        if (!isImpersonating && (userPerms === 'FULL_ACCESS' || userPerms === 'ALL_TASKS')) {
           return true;
         }
 
@@ -1725,7 +1734,7 @@ export default function StaffDashboard() {
         // Superior role level check:
         // If the task is assigned to someone whose role level is LESS THAN the logged-in user's role level
         const assignedStaffObj = staffList.find(s => s.Staff_ID === assignedToId || s.Name === assignedToId);
-        if (assignedStaffObj) {
+        if (assignedStaffObj && !isImpersonating) {
           const userLevel = ROLE_LEVELS[userRole] || 1;
           const targetLevel = ROLE_LEVELS[assignedStaffObj.Role] || 1;
           if (userLevel > targetLevel) {
@@ -1809,7 +1818,7 @@ export default function StaffDashboard() {
 
   const taskTapTrackerRef = useRef({});
 
-  const renderTaskCard = (task, idx, currentList = tasks) => {
+  const renderTaskCard = (task, idx, currentList = tasks, showScheduledDate = false) => {
     const custObj = customersList.find(c => c.Customer_ID === task.Customer_ID || c.Company_Name === task.Customer_Name) || {};
     const availableContacts = getAvailableContacts(custObj, task);
     const hasContacts = availableContacts.length > 0;
@@ -1918,6 +1927,14 @@ export default function StaffDashboard() {
                   ? task.Customer_Name
                   : (customersList.find(c => String(c.Customer_ID || '').trim().toLowerCase() === String(task.Customer_ID || '').trim().toLowerCase())?.Company_Name || task.Customer_Name || (task.Customer_ID ? `Customer (${task.Customer_ID})` : 'General Client'))}
               </span>
+              {showScheduledDate && (task.Scheduled_Date || task.Date) && (
+                <span
+                  className="text-[10px] font-bold text-indigo-700 whitespace-nowrap shrink-0"
+                  title="Date this task is scheduled for"
+                >
+                  ({formatDateDDMMYYYY(task.Scheduled_Date || task.Date)})
+                </span>
+              )}
               {(task.Tags || []).length > 0 && (
                 <span className="flex items-center gap-1 shrink-0">
                   {task.Tags.map(tagId => {
@@ -2710,7 +2727,7 @@ export default function StaffDashboard() {
                   <span className="text-[11px] font-semibold text-indigo-700">Calendar: Future Dates</span>
                 </div>
                 {upcomingTasks.length > 0 ? (
-                  upcomingTasks.map((task, idx) => renderTaskCard(task, idx, upcomingTasks))
+                  upcomingTasks.map((task, idx) => renderTaskCard(task, idx, upcomingTasks, true))
                 ) : (
                   <div className="p-4 rounded-xl bg-white border border-slate-200 text-center text-xs text-slate-500">
                     No upcoming tasks scheduled.

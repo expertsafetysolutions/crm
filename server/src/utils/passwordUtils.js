@@ -1,6 +1,20 @@
 const bcrypt = require('bcryptjs');
 
 /**
+ * bcrypt work factor for every password this app hashes.
+ *
+ * Raised from 8 to 10: 8 is below the modern norm and cheap to grind offline if a dump leaks.
+ * Kept here as one constant rather than repeated at each call site, because four separate literals
+ * had already been written and nothing would have caught them drifting apart.
+ *
+ * No migration is needed — a bcrypt hash carries its own cost, so existing `$2a$08$` rows keep
+ * verifying correctly and only newly set passwords use the higher factor. 10 rather than 12
+ * deliberately: hashing runs inside a Vercel serverless function on the login path, and 12 is
+ * roughly four times the work, which would show up as login latency on a cold start.
+ */
+const BCRYPT_COST = 10;
+
+/**
  * Password verification, shared by login, admin password-reset and self-service change-password so
  * the three can never drift apart.
  *
@@ -62,4 +76,4 @@ function validatePasswordPolicy(password) {
   return null;
 }
 
-module.exports = { verifyStaffPassword, validatePasswordPolicy, isBcryptHash, needsRehash };
+module.exports = { BCRYPT_COST, verifyStaffPassword, validatePasswordPolicy, isBcryptHash, needsRehash };

@@ -2,9 +2,11 @@ const express = require('express');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const sheetsService = require('../services/sheetsService');
-const { verifyStaffPassword, validatePasswordPolicy, needsRehash } = require('../utils/passwordUtils');
+const { verifyStaffPassword, validatePasswordPolicy, needsRehash, BCRYPT_COST } = require('../utils/passwordUtils');
 const { resolvePermissions } = require('../utils/permissions');
 const { loginLimiter, passwordChangeLimiter } = require('../middleware/security');
+const loginGuard = require('../utils/loginGuard');
+const { recordAudit } = require('../utils/auditLog');
 
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -29,11 +31,58 @@ router.post('/login', loginLimiter, async (req, res) => {
       return res.status(403).json({ error: 'Account is inactive. Please contact Admin.' });
     }
 
+    // Locked accounts are turned away before the password is even checked, so a locked account
+    // cannot be used as an oracle to test passwords.
+    const lock = loginGuard.checkLock(staff);
+    if (lock.locked) {
+      await recordAudit(req, {
+        entity: 'Staff_Master', entityId: staff.Staff_ID, action: 'LOGIN_BLOCKED',
+        note: `Attempt while locked; ${lock.minutesRemaining} min remaining`
+      });
+      return res.status(423).json({
+        error: `Account locked after too many failed attempts. Try again in ${lock.minutesRemaining} minute(s), or ask an Admin to unlock it.`,
+        lockedMinutesRemaining: lock.minutesRemaining
+      });
+    }
+
     // Check password
     const isMatch = verifyStaffPassword(staff, password);
 
     if (!isMatch) {
+      // Count the failure. Best-effort: if this write fails the login must still be refused,
+      // so a DB problem can never turn a wrong password into a successful login.
+      const { patch, justLocked, attemptsRemaining } = loginGuard.registerFailure(staff);
+      try {
+        await sheetsService.updateRow('Staff_Master', 'Staff_ID', staff.Staff_ID, patch);
+      } catch (guardErr) {
+        console.error(`Login guard write failed for ${staff.Staff_ID}:`, guardErr.message);
+      }
+      await recordAudit(req, {
+        entity: 'Staff_Master', entityId: staff.Staff_ID,
+        action: justLocked ? 'LOGIN_LOCKED' : 'LOGIN_FAILED',
+        note: justLocked
+          ? `Locked for ${loginGuard.LOCKOUT_MINUTES} minutes after ${loginGuard.MAX_CONSECUTIVE_FAILURES} consecutive failures`
+          : `Failed login; ${attemptsRemaining} attempt(s) before lockout`
+      });
+
+      if (justLocked) {
+        return res.status(423).json({
+          error: `Too many failed attempts. This account is locked for ${loginGuard.LOCKOUT_MINUTES} minutes.`,
+          lockedMinutesRemaining: loginGuard.LOCKOUT_MINUTES
+        });
+      }
       return res.status(401).json({ error: 'Invalid Staff ID or Password' });
+    }
+
+    // Success clears the counter — this is what makes the failure count CONSECUTIVE rather than
+    // cumulative. Skipped entirely when there is nothing to clear, which is the normal path.
+    const clearPatch = loginGuard.registerSuccess(staff);
+    if (clearPatch) {
+      try {
+        await sheetsService.updateRow('Staff_Master', 'Staff_ID', staff.Staff_ID, clearPatch);
+      } catch (clearErr) {
+        console.error(`Login guard clear failed for ${staff.Staff_ID}:`, clearErr.message);
+      }
     }
 
     // Opportunistic upgrade of a legacy plaintext row, using the password just proven correct.
@@ -42,7 +91,7 @@ router.post('/login', loginLimiter, async (req, res) => {
     if (needsRehash(staff)) {
       try {
         await sheetsService.updateRow('Staff_Master', 'Staff_ID', staff.Staff_ID, {
-          Password: bcrypt.hashSync(password, 8)
+          Password: bcrypt.hashSync(password, BCRYPT_COST)
         });
       } catch (rehashErr) {
         console.error(`Password rehash failed for ${staff.Staff_ID}:`, rehashErr.message);
@@ -133,7 +182,7 @@ router.put('/change-password', authenticateToken, passwordChangeLimiter, async (
       return res.status(401).json({ error: 'Old password is incorrect' });
     }
 
-    const hashed = bcrypt.hashSync(newPassword, 8);
+    const hashed = bcrypt.hashSync(newPassword, BCRYPT_COST);
     await sheetsService.updateRow('Staff_Master', 'Staff_ID', staff.Staff_ID, { Password: hashed });
     res.json({ success: true });
   } catch (err) {

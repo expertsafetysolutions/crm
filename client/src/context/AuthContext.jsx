@@ -11,9 +11,9 @@ const AuthContext = createContext();
 // dedicated key so that even if the main user record omits it we can still
 // restore it reliably.
 
-const PHOTO_KEY  = 'expert_safety_profile_photo';
-const USER_KEY   = 'expert_safety_user';
-const TOKEN_KEY  = 'expert_safety_token';
+const PHOTO_KEY = 'expert_safety_profile_photo';
+const USER_KEY = 'expert_safety_user';
+const TOKEN_KEY = 'expert_safety_token';
 const IMPERSON_KEY = 'expert_safety_impersonation';
 
 function safeSet(key, value) {

@@ -714,6 +714,39 @@ for (const [path, job] of Object.entries(LEGACY_CRON_PATHS)) {
   });
 }
 
+/**
+ * Backup health — written by the machine that actually takes the backup, read by the dashboard.
+ *
+ * WHY THIS IS A REPORTED STATUS AND NOT A CHECK RUN HERE
+ * Backups live on the operator's machine (or an external drive / cloud folder), never on Vercel —
+ * a serverless filesystem is ephemeral and wiped between invocations, so there is nothing here to
+ * verify. The verification therefore runs where the files are (`npm run verify:backup`), and that
+ * run POSTs its verdict here for the Admin dashboard to display.
+ *
+ * Authenticated with CRON_SECRET rather than a staff JWT, because it is called by a scheduled
+ * task with no logged-in user.
+ */
+app.post('/api/cron/backup-status', express.json(), async (req, res) => {
+  if (!isAuthorizedCron(req)) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const { status, checkedAt, collections, documents, problems, istDate } = req.body || {};
+    if (!status) return res.status(400).json({ error: 'status is required' });
+
+    await sheetsService.saveSecuritySettings({
+      backup_status: String(status).toUpperCase(),
+      backup_checked_at: checkedAt || new Date().toISOString(),
+      backup_collections: Number(collections || 0),
+      backup_documents: Number(documents || 0),
+      backup_taken_on: istDate || '',
+      backup_problems: Array.isArray(problems) ? problems.slice(0, 20) : []
+    });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('backup-status error:', err);
+    res.status(500).json({ error: 'Failed to record backup status' });
+  }
+});
+
 // Unauthenticated liveness probe. MUST stay above app.use('/api', apiRouter): apiRouter's first
 // middleware is authenticateToken, which answers 401 without calling next(), so a health route
 // registered after it is unreachable and every uptime monitor reads the API as down.

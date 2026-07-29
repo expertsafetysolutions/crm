@@ -53,7 +53,16 @@ const models = {
   Purchase_RFQ: createModel('Purchase_RFQ'),
   Purchase_Quote: createModel('Purchase_Quote'),
   Purchase_Order: createModel('Purchase_Order'),
-  Goods_Receipt: createModel('Goods_Receipt')
+  Goods_Receipt: createModel('Goods_Receipt'),
+
+  // Security. Audit_Logs is separate from Activity_Logs on purpose — see utils/auditLog.js.
+  // Auth_Sessions and Auth_OTPs are their own collections rather than arrays on Staff_Master for
+  // the same reason Job_Card_Item is: updateRow() only does $set, so two logins landing together
+  // would clobber each other's array.
+  Audit_Logs: createModel('Audit_Logs'),
+  Auth_Sessions: createModel('Auth_Sessions'),
+  Auth_OTPs: createModel('Auth_OTPs'),
+  Security_Settings: createModel('Security_Settings')
 };
 
 class MongoService {
@@ -444,6 +453,31 @@ class MongoService {
   async saveNotificationSettings(companyId = 'DEFAULT', settingsData) {
     await this.connect();
     const Model = models['Notification_Settings'];
+    const payload = { ...settingsData, company_id: companyId };
+    const result = await Model.findOneAndUpdate(
+      { company_id: companyId },
+      { $set: payload },
+      { new: true, upsert: true, returnDocument: 'after' }
+    ).lean();
+    if (result) { delete result._id; delete result.__v; }
+    return result;
+  }
+
+  /**
+   * Security settings — currently the backup-health verdict reported by scripts/verify-backup.js.
+   * Same singleton shape as the other *_Settings collections above.
+   */
+  async getSecuritySettings(companyId = 'DEFAULT') {
+    await this.connect();
+    const Model = models['Security_Settings'];
+    const doc = await Model.findOne({ company_id: companyId }).lean();
+    if (doc) { delete doc._id; delete doc.__v; }
+    return doc || null;
+  }
+
+  async saveSecuritySettings(settingsData, companyId = 'DEFAULT') {
+    await this.connect();
+    const Model = models['Security_Settings'];
     const payload = { ...settingsData, company_id: companyId };
     const result = await Model.findOneAndUpdate(
       { company_id: companyId },

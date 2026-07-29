@@ -1015,6 +1015,10 @@ export default function CertificateGeneratorPage() {
         backgroundColor: '#ffffff',
         windowWidth: 1400,
         onclone: async (clonedDoc) => {
+          // Ensure fonts are loaded before snapshotting so baseline metrics are correct and text doesn't shift.
+          if (document.fonts && document.fonts.ready) await document.fonts.ready;
+          if (clonedDoc.fonts && clonedDoc.fonts.ready) await clonedDoc.fonts.ready;
+
           const images = Array.from(clonedDoc.querySelectorAll('img'));
           await Promise.all(
             images.map(async (img) => {

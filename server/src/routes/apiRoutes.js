@@ -6,7 +6,7 @@ const workflowEngine = require('../services/workflowEngine');
 const attendanceService = require('../services/attendanceService');
 const pushService = require('../services/pushService');
 const { authenticateToken } = require('./authRoutes');
-const { verifyStaffPassword, validatePasswordPolicy } = require('../utils/passwordUtils');
+const { verifyStaffPassword, validatePasswordPolicy, BCRYPT_COST } = require('../utils/passwordUtils');
 const gstUtils = require('../utils/gstUtils');
 const { requirePermission, resolvePermissions, sanitizePermissions, can, MODULES, ACTIONS } = require('../utils/permissions');
 const quotationEngine = require('../services/quotationEngine');
@@ -884,7 +884,7 @@ router.post('/staff', async (req, res) => {
       Name: name,
       Mobile: mobile ? (mobile.startsWith('+') ? mobile : `+91 ${mobile}`) : '+91 90000 00000',
       Email: email || `${name.toLowerCase().replace(/\s+/g, '.')}@expertsafety.in`,
-      Password: bcrypt.hashSync(password, 8),
+      Password: bcrypt.hashSync(password, BCRYPT_COST),
       Role: role || 'Staff',
       Department: department || 'Field Operations',
       Status: 'Active',
@@ -904,6 +904,19 @@ router.patch('/staff/:id', async (req, res) => {
     if (req.user.role !== 'Admin') {
       return res.status(403).json({ error: 'Admin access required' });
     }
+
+    // This route $sets whatever body it is given, so a Password arriving here would be written
+    // straight to the document — unvalidated AND unhashed. The legacy-plaintext branch in
+    // verifyStaffPassword would then happily accept that bare string at login, which quietly
+    // undid the policy checks and the admin re-auth guard that the three real password routes
+    // enforce. Rejected rather than silently dropped: a caller must never be left believing a
+    // password change succeeded when it did not.
+    if ('Password' in req.body || 'password' in req.body) {
+      return res.status(400).json({
+        error: 'Passwords cannot be changed here. Use PUT /api/staff/:id/set-password, which enforces the password policy and requires your own password as confirmation.'
+      });
+    }
+
     const updated = await sheetsService.updateRow('Staff_Master', 'Staff_ID', req.params.id, req.body);
     if (!updated) return res.status(404).json({ error: 'Staff member not found' });
     const { Password, ...clean } = updated;
@@ -970,7 +983,7 @@ router.put('/staff/:id/set-password', async (req, res) => {
     const targetStaff = await sheetsService.getStaffById(req.params.id);
     if (!targetStaff) return res.status(404).json({ error: 'Staff member not found' });
 
-    const hashed = bcrypt.hashSync(newPassword, 8);
+    const hashed = bcrypt.hashSync(newPassword, BCRYPT_COST);
     await sheetsService.updateRow('Staff_Master', 'Staff_ID', targetStaff.Staff_ID, { Password: hashed });
     res.json({ success: true });
   } catch (err) {
@@ -2665,6 +2678,49 @@ router.put('/settings/notifications', async (req, res) => {
   } catch (err) {
     console.error('Save notification settings error:', err);
     res.status(500).json({ error: 'Failed to save notification settings' });
+  }
+});
+
+/**
+ * Backup health for the Admin dashboard widget.
+ *
+ * Admin-only: it reveals when the last backup was taken and what is wrong with it, which is
+ * operational detail no field user needs. Returns a NEVER_RUN status rather than 404 when nothing
+ * has reported yet, so the widget can say "no backup has ever been verified" — which is itself
+ * the most important thing an Admin could be told.
+ */
+router.get('/security/backup-status', async (req, res) => {
+  try {
+    if (req.user.role !== 'Admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    const settings = await sheetsService.getSecuritySettings();
+    if (!settings || !settings.backup_status) {
+      return res.json({
+        status: 'NEVER_RUN',
+        message: 'No backup has been verified yet. Run: npm run backup && npm run verify:backup'
+      });
+    }
+
+    // A verdict that is itself old means the check stopped running — treat that as STALE even if
+    // the last recorded verdict was healthy, otherwise the widget would show a reassuring tick
+    // forever after the scheduled task silently died.
+    const checkedAt = settings.backup_checked_at ? Date.parse(settings.backup_checked_at) : 0;
+    const ageHours = checkedAt ? (Date.now() - checkedAt) / 3600000 : Infinity;
+    const status = settings.backup_status === 'HEALTHY' && ageHours > 48 ? 'STALE' : settings.backup_status;
+
+    res.json({
+      status,
+      checkedAt: settings.backup_checked_at || null,
+      takenOn: settings.backup_taken_on || null,
+      collections: settings.backup_collections || 0,
+      documents: settings.backup_documents || 0,
+      problems: settings.backup_problems || [],
+      ageHours: Number.isFinite(ageHours) ? Math.floor(ageHours) : null
+    });
+  } catch (err) {
+    console.error('backup-status read error:', err);
+    res.status(500).json({ error: 'Failed to read backup status' });
   }
 });
 

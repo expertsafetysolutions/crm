@@ -11,12 +11,15 @@ export default function Login() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
+  // Only the staff ID is remembered — never the password. This used to persist the password in
+  // cleartext, which any XSS, shared handset or browser-profile copy would have handed over.
+  // The removeItem is not redundant: without it every device where the box was ever ticked would
+  // keep its old plaintext password forever, since nothing else ever clears that key.
   useEffect(() => {
+    localStorage.removeItem('expert_safety_remembered_pass');
     const savedId = localStorage.getItem('expert_safety_remembered_id');
-    const savedPass = localStorage.getItem('expert_safety_remembered_pass');
-    if (savedId && savedPass) {
+    if (savedId) {
       setStaffId(savedId);
-      setPassword(savedPass);
       setRememberPassword(true);
     }
   }, []);
@@ -28,10 +31,8 @@ export default function Login() {
     try {
       if (rememberPassword) {
         localStorage.setItem('expert_safety_remembered_id', staffId);
-        localStorage.setItem('expert_safety_remembered_pass', password);
       } else {
         localStorage.removeItem('expert_safety_remembered_id');
-        localStorage.removeItem('expert_safety_remembered_pass');
       }
       await login(staffId, password);
     } catch (err) {
@@ -129,7 +130,7 @@ export default function Login() {
                   onChange={(e) => setRememberPassword(e.target.checked)}
                   className="w-4 h-4 rounded border-slate-300 text-rose-600 focus:ring-rose-500 transition cursor-pointer"
                 />
-                <span>Remember Password</span>
+                <span>Remember Staff ID</span>
               </label>
             </div>
 

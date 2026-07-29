@@ -22,6 +22,16 @@ export async function renderElementToCanvas(element, options = {}) {
   if (!element) throw new Error('No element supplied to render');
   const { default: html2canvas } = await import('html2canvas');
 
+  // Wait for webfonts BEFORE measuring, not just inside onclone.
+  //
+  // getBoundingClientRect below is what fixes the capture size, and html2canvas measures text
+  // against whatever font is active at that moment. If Inter is still loading, both are computed
+  // from the fallback's metrics while the paint uses the real face — so every text run is laid out
+  // to one width and drawn at another. Awaiting here means one font is in play throughout.
+  if (document.fonts?.ready) {
+    try { await document.fonts.ready; } catch { /* font loading is best-effort */ }
+  }
+
   // Capture exactly the element's own box.
   //
   // html2canvas defaults its capture window to the browser viewport and positions the element
@@ -39,8 +49,9 @@ export async function renderElementToCanvas(element, options = {}) {
     throw new Error('The document layout has no size yet — try again in a moment.');
   }
 
-  return html2canvas(element, {
-    scale: options.scale || 2,
+  const scale = options.scale || 2;
+  const canvas = await html2canvas(element, {
+    scale,
     useCORS: true,
     allowTaint: false,
     backgroundColor: options.backgroundColor || '#ffffff',
@@ -55,6 +66,10 @@ export async function renderElementToCanvas(element, options = {}) {
     scrollX: 0,
     scrollY: 0,
     onclone: async (clonedDoc) => {
+      // Ensure fonts are loaded before snapshotting so baseline metrics are correct and text doesn't shift.
+      if (document.fonts && document.fonts.ready) await document.fonts.ready;
+      if (clonedDoc.fonts && clonedDoc.fonts.ready) await clonedDoc.fonts.ready;
+
       // Images that haven't finished decoding render blank in the captured canvas, so each one is
       // re-kicked and awaited before capture.
       const images = Array.from(clonedDoc.querySelectorAll('img'));
@@ -75,6 +90,118 @@ export async function renderElementToCanvas(element, options = {}) {
       await new Promise(r => setTimeout(r, 250));
       if (typeof options.onclone === 'function') await options.onclone(clonedDoc);
     }
+  });
+
+  // Repair any element html2canvas is known to render incorrectly. Runs against the LIVE element
+  // for geometry (the clone is gone by now) and the finished canvas for painting.
+  redrawMarkedElements(canvas, element);
+
+  return canvas;
+}
+
+/**
+ * Repaints elements marked `data-pdf-redraw` directly onto the captured canvas.
+ *
+ * WHY THIS EXISTS
+ * html2canvas 1.4.1 reliably drops the text of the quotation's title band: the coloured bar is
+ * painted, the lettering is not, and it does not land anywhere else on the sheet either. It was
+ * chased through several rewrites — removing letter-spacing, dropping the <h1>, moving the fill
+ * and the text onto one element, pinning the font, and finally rebuilding it as a table row
+ * copied from "GRAND TOTAL", which paints white-on-red correctly two inches further down the
+ * same page. The band still came out empty, and the table did not even take the width it was
+ * given, so the failure is inside the renderer rather than in the markup.
+ *
+ * Rather than keep guessing at a CSS shape that survives, the band is drawn afterwards with the
+ * canvas 2D API — the same API html2canvas itself uses, minus the layout engine that is losing
+ * the text. Native fillRect + fillText cannot silently skip a glyph.
+ *
+ * Scoped deliberately: only elements the template explicitly opts in with `data-pdf-redraw` are
+ * touched, so this stays a targeted repair of one known-broken element and not a second renderer
+ * running over the whole sheet.
+ */
+function redrawMarkedElements(canvas, sourceElement) {
+  // Search the captured node first; fall back to the whole document, because the template is
+  // rendered into an off-screen container and the node handed to html2canvas is not always the
+  // marked element's ancestor.
+  let targets = sourceElement.querySelectorAll('[data-pdf-redraw]');
+  if (!targets.length) targets = document.querySelectorAll('[data-pdf-redraw]');
+  if (!targets.length) return;
+
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  /**
+   * Untransformed offset of `el` relative to `root`.
+   *
+   * getBoundingClientRect() is NOT usable here: PageFrame applies `transform: scale(...)` to the
+   * sheet when the content would overflow A4, so a client rect is in post-transform screen pixels
+   * while html2canvas captures the pre-transform layout. offsetLeft/offsetTop are layout values
+   * and ignore transforms, so they line up with what was actually rasterised. The canvas is
+   * `scale` times the layout size, so the ratio below converts into canvas pixels.
+   */
+  const offsetWithin = (el, root) => {
+    let x = 0, y = 0, node = el;
+    while (node && node !== root) {
+      x += node.offsetLeft;
+      y += node.offsetTop;
+      node = node.offsetParent;
+      if (!node) break;
+    }
+    return { x, y };
+  };
+
+  // Derive the true canvas-per-layout-pixel ratio instead of trusting `scale`, so a rescaled sheet
+  // still maps correctly.
+  const layoutWidth = sourceElement.offsetWidth || 1;
+  const ratio = canvas.width / layoutWidth;
+
+  targets.forEach((el) => {
+    const { x: ox, y: oy } = offsetWithin(el, sourceElement);
+    const x = ox * ratio;
+    const y = oy * ratio;
+    const w = el.offsetWidth * ratio;
+    const h = el.offsetHeight * ratio;
+    if (w <= 0 || h <= 0) return;
+
+    const cs = window.getComputedStyle(el);
+    const bg = el.dataset.pdfRedrawBg || cs.backgroundColor;
+    const fg = el.dataset.pdfRedrawColor || cs.color;
+    const text = (el.textContent || '').trim();
+
+    // Repaint the fill first so any partially-drawn text underneath is covered.
+    if (bg && bg !== 'transparent' && bg !== 'rgba(0, 0, 0, 0)') {
+      ctx.fillStyle = bg;
+      ctx.fillRect(x, y, w, h);
+    }
+    if (!text) return;
+
+    const fontSize = parseFloat(cs.fontSize) * ratio;
+    const weight = cs.fontWeight || '700';
+    // A concrete family, never the CSS `inherit`/custom stack — canvas needs something it can
+    // resolve synchronously, and the metrics must not depend on a webfont having loaded.
+    ctx.font = `${weight} ${fontSize}px Arial, Helvetica, sans-serif`;
+    ctx.fillStyle = fg;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    const letterSpacing = parseFloat(el.dataset.pdfRedrawSpacing || '0') * ratio;
+    const cx = x + w / 2;
+    const cy = y + h / 2;
+
+    if (!letterSpacing) {
+      ctx.fillText(text, cx, cy);
+      return;
+    }
+    // Manual tracking: measure the spaced run, then advance glyph by glyph so the result is
+    // genuinely centred (this is the step html2canvas gets wrong).
+    const chars = Array.from(text);
+    const total = chars.reduce((sum, ch) => sum + ctx.measureText(ch).width + letterSpacing, 0) - letterSpacing;
+    let cursor = cx - total / 2;
+    ctx.textAlign = 'left';
+    chars.forEach((ch) => {
+      ctx.fillText(ch, cursor, cy);
+      cursor += ctx.measureText(ch).width + letterSpacing;
+    });
   });
 }
 

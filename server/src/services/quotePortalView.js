@@ -57,7 +57,7 @@ const BASE_STYLES = `
   .msg{padding:14px 16px;border-radius:10px;font-size:14px;margin-bottom:18px;display:none}
   .msg.ok{display:block;background:#dcfce7;color:#166534;border:1px solid #86efac}
   .msg.err{display:block;background:#fee2e2;color:#991b1b;border:1px solid #fca5a5}
-  .modal{position:fixed;inset:0;background:rgba(15,23,42,.6);display:none;align-items:center;justify-content:center;padding:16px;z-index:50}
+  .modal{position:fixed;top:0;right:0;bottom:0;left:0;background:rgba(15,23,42,.6);display:none;align-items:center;justify-content:center;padding:16px;z-index:50}
   .modal.show{display:flex}
   .modal-inner{background:#fff;border-radius:14px;padding:22px;max-width:440px;width:100%}
   .modal-inner h3{font-size:16px;margin-bottom:6px}
@@ -132,7 +132,7 @@ function renderActions(actions, actionable) {
   const buttons = (actions || [])
     .filter(a => a.enabled !== false)
     .slice(0, 4)
-    .map(a => `<button class="${styleFor(a.action_key)}" data-action="${esc(a.action_key)}">${esc(a.label)}</button>`)
+    .map(a => `<button class="${styleFor(a.action_key)}" type="button" data-action="${esc(a.action_key)}">${esc(a.label)}</button>`)
     .join('');
   return `<div class="actions">${buttons}</div>`;
 }
@@ -184,14 +184,14 @@ function renderQuotePortalPage({ quotation, settings, sellerName }) {
   <textarea id="m-note" placeholder="Tell us what you'd like changed…"></textarea>
   <input type="date" id="m-date">
   <div class="modal-btns">
-    <button class="secondary" id="m-cancel">Cancel</button>
-    <button class="primary" id="m-confirm">Confirm</button>
+    <button class="secondary" type="button" id="m-cancel">Cancel</button>
+    <button class="primary" type="button" id="m-confirm">Confirm</button>
   </div>
 </div></div>
 
 <script>
 (function(){
-  var guid = ${JSON.stringify(quotation.Portal_Guid)};
+  var guid = ${JSON.stringify(quotation.Portal_Guid || quotation.Portal_Code || '')} || window.location.pathname.split('/').pop();
   var modal = document.getElementById('modal');
   var noteEl = document.getElementById('m-note');
   var dateEl = document.getElementById('m-date');
@@ -247,7 +247,8 @@ function renderQuotePortalPage({ quotation, settings, sellerName }) {
     btn.disabled = true;
     btn.textContent = 'Submitting…';
 
-    fetch('/api/quote-portal/' + guid + '/action', {
+    var actionUrl = window.location.pathname.replace(/\/$/, '') + '/action';
+    fetch(actionUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: pending, note: noteEl.value.trim(), requestedDate: dateEl.value })

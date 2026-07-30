@@ -4,6 +4,7 @@ const cors = require('cors');
 const { authRouter } = require('./routes/authRoutes');
 const apiRouter = require('./routes/apiRoutes');
 const purchaseRouter = require('./routes/purchaseRoutes');
+const inquiryRouter = require('./routes/inquiryRoutes');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -764,6 +765,15 @@ app.get('/api/health', (req, res) => {
 // uncounted — an uptime monitor polling every 30s must never be what exhausts the budget.
 // authRouter carries its own tighter per-endpoint limiters internally (login, change-password).
 app.use('/api/auth', authRouter);
+// Public inquiry engine. MUST be mounted before apiRouter: POST /api/inquiry is reachable by an
+// anonymous customer, and apiRouter's first middleware is authenticateToken, which answers 401
+// without calling next(). Registered after that mount the public form would 401 for everyone —
+// the same ordering trap documented on /api/health above.
+//
+// Deliberately NOT behind apiLimiter: the route carries its own far tighter 3-per-minute limiter,
+// and apiLimiter's 600/min budget is sized for a technician's offline queue draining, which would
+// be a meaningless ceiling for an anonymous write endpoint.
+app.use('/api', inquiryRouter);
 // Procurement lives in its own router to keep ~500 lines out of apiRoutes.js. Mounted first only
 // because every path it owns is new — nothing here can shadow an existing route either way.
 app.use('/api', apiLimiter, purchaseRouter);

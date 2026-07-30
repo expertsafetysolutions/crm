@@ -54,8 +54,12 @@ server/src/
   routes/apiRoutes.js         ~4200 lines — everything else, all behind authenticateToken
   routes/purchaseRoutes.js    Procurement, mounted separately to keep apiRoutes from growing further.
                               Re-applies authenticateToken AND moneyMask — it inherits neither
+  routes/inquiryRoutes.js     Public /inquiry engine. MUST mount before apiRouter (auth gate).
+                              POST /inquiry + GET /inquiry/config are public; the rest re-applies
+                              authenticateToken, which it inherits from nothing
   utils/permissions.js        Module permissions: quotation | inventory | jobcard | taskstage
                               | finance | purchase
+  utils/inquiryValidator.js   Sanitises the one payload that arrives from an anonymous stranger
   utils/moneyMask.js          Strips rates/amounts from responses without `finance:view`
   utils/gstUtils.js           GSTIN validation, tax split, document totals
   services/sheetsService.js   THE data layer (Mongoose, despite the name). 36 collections,
@@ -70,6 +74,12 @@ server/src/
   services/landedCostService.js  Freight apportionment by value + moving-average costing
   services/priceListService.js   Self-building per-customer rate memory
   services/equipmentCategoryService.js  Admin-editable categories + inward checkpoints
+  services/inquiryService.js  Public lead ingestion: mobile-dedupe, customer, lead task,
+                              auto-draft quotation. Never overwrites an existing customer
+  services/inquiryDispatch.js Dual internal alert (ON) + customer thank-you (OFF by default)
+                              + the 1-click Send Company Profile action
+  services/captchaService.js  Turnstile / reCAPTCHA v3. Skipped when unconfigured; fails OPEN
+                              on a provider outage, never on a rejection
   services/inventoryService.js, dispatchService.js, emailService.js, whatsappService.js,
   services/quotationCronService.js, attendanceService.js, pushService.js
 
@@ -138,6 +148,21 @@ demands a written reason.
 - **Stock is deducted once, at part-fitting time.** `challanService.convertChallanToInvoice` deliberately does NOT call `inventoryService.deductForInvoice` for accessory lines — they left the shelf on the job card. Only `Line_Type === 'MANUAL'` lines deduct at invoice. The invoice carries `Inventory_Deducted_At_JobCard: true` to record why.
 - **`QuotationPdfTemplate` renders four document types.** `docType="CHALLAN"` gates every money column off. Editing this file affects every real quotation, PI and tax invoice — regression-check all four before shipping.
 - **Route order matters.** Express matches in registration order: literal paths (`/challans/suggest-no`, `/job-cards/lookup-hpt`, `/items/recycle-bin`) MUST be registered before their `/:id` siblings.
+- **The public inquiry form breaks in two silent ways.** `inquiryRouter` must stay mounted BEFORE
+  `apiRouter` in `server.js` — `apiRouter`'s first middleware is `authenticateToken`, which answers
+  401 without calling `next()`, so mounted after it `POST /api/inquiry` 401s every customer. And
+  `/inquiry` must stay in `PUBLIC_PATHS` in `App.jsx`, ABOVE the `if (!user) return <Login/>` gate,
+  or a customer following the website link is shown a staff login screen and leaves. Neither failure
+  is visible to anyone already logged in. See `docs/INQUIRY_PORTAL.md`.
+- **The inquiry form is the only unauthenticated WRITE in the system.** Its defence is layered
+  (32kb cap → 3/IP/min → honeypot → timing trap → CAPTCHA → validation), and the honeypot and
+  timing traps answer **200 with a fake success** on purpose — a bot told why it failed adapts.
+  CAPTCHA is skipped when no keys are configured so the form works before the Cloudflare account
+  exists, and fails OPEN on a provider outage: losing a real sales lead is worse than admitting a
+  little spam. Never "tidy" either of those into a hard failure.
+- **A public submission never overwrites an existing customer.** `ingestInquiry` matches on mobile
+  and, for a returning customer, READS the profile only. Whoever knows a customer's mobile number
+  could otherwise rewrite that customer's billing address through an endpoint with no login.
 - **`getTab` returns the cached array by reference** (3s TTL). Treat results as read-only. This is why
   `moneyMask.maskValue()` builds a new object instead of deleting keys in place — masking a cached row
   would strip prices for the *next* caller, who might be an Admin.

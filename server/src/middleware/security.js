@@ -31,10 +31,27 @@ const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
  *                                  fails at runtime, and only on the phones that use it.
  *   data: / blob: in imgSrc      — base64 photos, html2canvas canvases and generated QR codes.
  *   connectSrc api.ipify.org     — attendance geo-checks read the public IP.
+ *   challenges.cloudflare.com    — the Turnstile widget on the public /inquiry form: it loads a
+ *   + google.com/recaptcha         script, renders inside an iframe and posts the result back, so
+ *                                  it needs script/frame/connect all three. Listed unconditionally
+ *                                  rather than only when keys are configured, because a CSP built
+ *                                  from environment state would differ between deployments and
+ *                                  fail exactly where it is hardest to debug — in the browser of
+ *                                  a customer nobody is watching. Naming two well-known CAPTCHA
+ *                                  hosts costs nothing when the feature is off: no page requests
+ *                                  them, and an allow-list entry is not a request.
  *
  * frameAncestors 'none' is the clickjacking control that actually matters here: it stops the
- * login screen and the admin dashboard being framed by a lookalike site.
+ * login screen and the admin dashboard being framed by a lookalike site. Note frameSrc below is
+ * the opposite direction — what THIS page may embed — so allowing the CAPTCHA iframe does not
+ * weaken it.
  */
+const CAPTCHA_HOSTS = [
+  'https://challenges.cloudflare.com',
+  'https://www.google.com',
+  'https://www.gstatic.com'
+];
+
 const contentSecurityPolicy = {
   useDefaults: true,
   directives: {
@@ -43,12 +60,15 @@ const contentSecurityPolicy = {
     objectSrc: ["'none'"],
     frameAncestors: ["'none'"],
     formAction: ["'self'"],
-    scriptSrc: ["'self'", "'wasm-unsafe-eval'", 'blob:'],
+    scriptSrc: ["'self'", "'wasm-unsafe-eval'", 'blob:', ...CAPTCHA_HOSTS],
     workerSrc: ["'self'", 'blob:'],
     styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
     fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
     imgSrc: ["'self'", 'data:', 'blob:', 'https:'],
-    connectSrc: ["'self'", 'https://api.ipify.org'],
+    connectSrc: ["'self'", 'https://api.ipify.org', ...CAPTCHA_HOSTS],
+    // The CAPTCHA challenge renders in an iframe; without this the widget is invisible and the
+    // customer simply cannot submit the form.
+    frameSrc: ["'self'", ...CAPTCHA_HOSTS],
     upgradeInsecureRequests: []
   }
 };

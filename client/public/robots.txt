@@ -1,0 +1,16 @@
+# Expert Safety Solutions
+#
+# /inquiry is the only page here meant for the public — it is a lead-capture form linked from the
+# website, so it should be findable. Everything else is the staff CRM behind a login: crawling it
+# yields nothing but the SPA shell, and keeping it out of results avoids customers landing on a
+# staff login screen from a search.
+#
+# This is a discoverability preference, not a security control — the real protection is
+# authenticateToken on the API. Never rely on this file to hide anything.
+
+User-agent: *
+Allow: /inquiry
+Disallow: /q/
+Disallow: /api/
+
+Sitemap: https://expertsafety.in/sitemap.xml

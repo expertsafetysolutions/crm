@@ -1243,6 +1243,43 @@ router.get('/notifications/my', async (req, res) => {
 
     const notifications = [];
 
+    /*
+     * Online inquiry leads — surfaced to Admin AND Sales.
+     *
+     * The spec asked for a WebSocket pop-up. This deployment cannot hold one: the API runs as a
+     * Vercel serverless function, so there is no long-lived process to keep a socket open on, and
+     * each invocation is frozen the moment it responds. Riding the notification feed the Navbar
+     * already polls gives the same visible outcome (an alert appears on the dashboard by itself)
+     * with nothing new to operate — and it keeps working offline-to-online, which a socket would
+     * not. A genuine push already exists for phones via pushService/VAPID.
+     *
+     * Scoped to unassigned, still-open leads: once someone takes ownership the alert has done its
+     * job, and leaving it up trains people to ignore the tray.
+     */
+    // Compared case-insensitively: Role is free-form on Staff_Master and 'Sales'/'sales' both
+    // occur (resolvePermissions lowercases for the same reason). An exact match would silently
+    // hide every web lead from a salesperson whose row was typed in lower case.
+    const normalizedRole = String(role || '').trim().toLowerCase();
+    if (normalizedRole === 'admin' || normalizedRole === 'sales') {
+      tasks
+        .filter(t => t.Source === 'ONLINE_INQUIRY')
+        .filter(t => !t.Assigned_Staff && !['Completed', 'Cancelled'].includes(t.Status))
+        .sort((a, b) => Number(b.Created_At_Ms || 0) - Number(a.Created_At_Ms || 0))
+        .slice(0, 20)
+        .forEach(t => {
+          notifications.push({
+            id: `inquiry-${t.Task_ID}`,
+            title: `🚨 New Online Inquiry${t.Inquiry_No ? ` — ${t.Inquiry_No}` : ''}`,
+            message: `${t.Contact_Person || 'A customer'} (${t.Contact_Phone || 'no number'}) — ${t.Description || 'New enquiry'}`,
+            time: t.Created_At || 'Just now',
+            type: 'APPROVAL_NEEDED',
+            targetId: t.Task_ID,
+            targetType: 'TASK',
+            action: 'VIEW_TASK'
+          });
+        });
+    }
+
     if (role === 'Admin') {
       const pendingLeaves = leaves.filter(l => l.Status === 'Pending');
       pendingLeaves.forEach(l => {

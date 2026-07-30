@@ -97,7 +97,15 @@ const DEFAULT_QUOTATION_SETTINGS = {
     invoice_email: true,
     challan_email: false,
     certificate_email: false,
-    pod_confirmation: false
+    pod_confirmation: false,
+    // OFF by default for the same reason as the three above, and more sharply: this one answers a
+    // stranger from the public internet. Deploying the inquiry portal must not, on its own, start
+    // auto-replying to the public — the office switches it on once the wording has been read.
+    // The INTERNAL alert is unaffected by this flag: it goes to the office's own inboxes and is
+    // sent directly by inquiryDispatch, not through the per-template switch.
+    inquiry_acknowledgement: false,
+    // Staff press this one deliberately, so there is nothing to protect against.
+    company_profile: true
   },
 
   // Reusable files (product catalogues, brochures, compliance certificates) an Admin uploads once
@@ -246,8 +254,38 @@ const DEFAULT_QUOTATION_SETTINGS = {
       body: 'Dear {customer_name},\n\nPlease find attached your {certificate_type} {document_no}, issued on {document_date} and valid until {valid_until}.\n\nYou can verify it online at any time here:\n{verification_link}\n\nRegards,\nExpert Safety Solutions',
       whatsapp_template_name: '',
       whatsapp_template_status: 'not_submitted'
+    },
+    // Auto-reply to someone who filled in the public /inquiry form. {inquiry_no} and
+    // {requirement_summary} are unique to this template — there is no document behind it yet, so
+    // none of the money or document-number variables resolve.
+    inquiry_acknowledgement: {
+      subject: 'Thank you for your enquiry — {inquiry_no}',
+      body: 'Dear {customer_name},\n\nThank you for contacting Expert Safety Solutions. We have received your enquiry and our team will get back to you shortly.\n\nYour reference number is {inquiry_no}.\n\nWhat you asked for:\n{requirement_summary}\n\nSite address on record:\n{site_address}\n\nIf anything above is wrong, simply reply to this email and we will correct it.\n\nRegards,\nExpert Safety Solutions',
+      whatsapp_template_name: '',
+      whatsapp_template_status: 'not_submitted'
+    },
+    // Behind the one-click "Send Company Profile" button on a lead. The brochure itself is picked
+    // from email_attachments (entries flagged company_profile), not stored here.
+    company_profile: {
+      subject: 'Expert Safety Solutions — Company Profile',
+      body: 'Dear {customer_name},\n\nThank you for your interest. Please find our company profile attached.\n\nWe supply, refill and service fire extinguishers, maintain fire hydrant systems, handle Fire NOC consultancy and renewals, and conduct safety audits and training.\n\nDo let us know how we can help.\n\nRegards,\nExpert Safety Solutions',
+      whatsapp_template_name: '',
+      whatsapp_template_status: 'not_submitted'
     }
   },
+
+  /**
+   * Internal recipients of the "new online inquiry" alert.
+   *
+   * These are the OFFICE's own inboxes, never a customer's, which is why this alert ships enabled
+   * while the customer-facing acknowledgement does not. Emptying the list falls back to the
+   * built-in defaults in inquiryDispatch — an alert with nobody to alert is a lost lead, and a
+   * blank setting is far more likely to be an accident than a deliberate "tell no one".
+   */
+  inquiry_alert_recipients: [
+    'sales.expertsafety@gmail.com',
+    'expertsafetysolution@gmail.com'
+  ],
 
   // Offsets (in days relative to invoice due date) at which payment reminders fire.
   // Negative = before due, 0 = on due date, positive = overdue.

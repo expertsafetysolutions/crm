@@ -4,6 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import ClientEquipmentModal from '../components/ClientEquipmentModal';
 import ServiceReportStatsPanel from '../components/servicereport/ServiceReportStatsPanel';
 import PhonePasteButton from '../components/PhonePasteButton';
+import OnlineInquiryPanel from '../components/OnlineInquiryPanel';
 import { getAccurateGpsPosition } from '../utils/gpsHelper';
 import { cleanPhoneDigits } from '../utils/clipboardUtils';
 import {
@@ -4679,6 +4680,13 @@ export default function AdminDashboard() {
                 </div>
               </div>
             )}
+
+            {/* Renders only for leads from the public form — the source check lives inside. */}
+            <OnlineInquiryPanel
+              task={selectedTask}
+              token={token}
+              customerId={selectedTask?.Customer_ID}
+            />
 
             {/* FORM OR ACTIONS */}
             {activeModal === 'STATUS' ? (

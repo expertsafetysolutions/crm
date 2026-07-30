@@ -28,6 +28,9 @@ const ChallanListPage = lazy(() => import('./pages/ChallanListPage'));
 const CustomerPriceListPage = lazy(() => import('./pages/CustomerPriceListPage'));
 const EquipmentCategoriesPage = lazy(() => import('./pages/EquipmentCategoriesPage'));
 const PurchasePage = lazy(() => import('./pages/PurchasePage'));
+// The one page in the app a logged-OUT stranger is meant to see. Rendered before the auth gate
+// below, so it must not import anything that assumes a session.
+const PublicInquiryPage = lazy(() => import('./pages/PublicInquiryPage'));
 
 // Keyed so switching report type (or new-vs-edit) remounts the page with fresh state, since
 // React Router otherwise reuses the same instance when only the URL params change.
@@ -76,6 +79,31 @@ export default function App() {
   };
 
   const location = useLocation();
+
+  /*
+   * Public routes are matched BEFORE the auth gate below.
+   *
+   * That gate returns <Login /> for anyone without a session, which is right for every CRM screen
+   * and exactly wrong for /inquiry — a customer following a link from the website would be shown a
+   * staff login form and simply leave. Checking the path first is what makes the page genuinely
+   * public.
+   *
+   * It also renders WITHOUT the DocSettingsProvider/Navbar/OfflineBanner shell: that chrome reads
+   * auth state and fetches authenticated settings, none of which exist for a stranger. The page is
+   * deliberately self-contained for this reason.
+   *
+   * Kept as a prefix list so adding a second public page is a one-line change.
+   */
+  const PUBLIC_PATHS = ['/inquiry'];
+  if (PUBLIC_PATHS.some(p => location.pathname === p || location.pathname.startsWith(`${p}/`))) {
+    return (
+      <Suspense fallback={<RouteLoadingFallback />}>
+        <Routes>
+          <Route path="/inquiry" element={<PublicInquiryPage />} />
+        </Routes>
+      </Suspense>
+    );
+  }
 
   if (!user && !realUser) {
     return <Login />;

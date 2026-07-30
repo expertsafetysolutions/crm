@@ -24,6 +24,37 @@ entirely.
 - **RTO (max acceptable downtime): 2 hours** — the app is a Vercel redeploy, so recovery time is
   dominated by restoring data, not code.
 
+## One-command full bundle (code + data + secrets)
+
+```bash
+set ENV_BACKUP_PASSWORD=<a long passphrase>
+npm run backup:full            # or: npm run backup:full -- --gzip
+```
+
+Produces `backups/full/full-<date>/` — about **28 MB** — containing everything needed to stand the
+system up on a machine that has never seen this project:
+
+| Inside | What it is |
+|---|---|
+| `code/` | The whole application, minus `node_modules` |
+| `data/` | The database dump, with checksums |
+| `server.env.enc` | `.env`, AES-256-GCM encrypted |
+| `RESTORE-README.txt` | Step-by-step restore instructions |
+
+`node_modules` is excluded deliberately: 713 MB across the three copies, all of it reproducible by
+`npm install` from the lockfiles that *are* included — and native modules compiled on Windows can
+fail on a Linux host, so a copied `node_modules` is actively worse than a rebuilt one.
+
+**Verified end to end**: the bundle was restored into an empty folder, dependencies installed from
+the bundled lockfiles, the secrets decrypted, and the server booted and served 1,621 customer
+records. Two things that tripped it up, both now covered in the bundled README — the root
+`npm install` is required (not just client and server), and the server must be started via
+`npm run dev:server` rather than `node server/src/server.js`, because `dotenv` resolves `.env`
+against the working directory.
+
+Keep the bundle and its passphrase in **different** places. Together in one folder, the encryption
+achieves nothing.
+
 ## Daily backup
 
 ```bash

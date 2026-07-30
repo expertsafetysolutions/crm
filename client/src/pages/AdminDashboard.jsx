@@ -393,6 +393,117 @@ export default function AdminDashboard() {
     emergencyContact: '8460699569'
   });
 
+  // Profile photo cropping states & drag handlers
+  const [cropImageSrc, setCropImageSrc] = useState(null);
+  const [cropZoom, setCropZoom] = useState(1);
+  const [cropOffsetX, setCropOffsetX] = useState(0);
+  const [cropOffsetY, setCropOffsetY] = useState(0);
+  const [imageDims, setImageDims] = useState({ w: 200, h: 200 });
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
+  const [isDraggingPhoto, setIsDraggingPhoto] = useState(false);
+  const [photoDragStart, setPhotoDragStart] = useState({ x: 0, y: 0 });
+  const [cropTargetStaffId, setCropTargetStaffId] = useState(null);
+  const [verifyTargetStaff, setVerifyTargetStaff] = useState(null);
+
+  const handlePhotoMouseDown = (e) => {
+    setIsDraggingPhoto(true);
+    setPhotoDragStart({
+      x: e.clientX - cropOffsetX,
+      y: e.clientY - cropOffsetY
+    });
+  };
+
+  const handlePhotoMouseMove = (e) => {
+    if (!isDraggingPhoto) return;
+    setCropOffsetX(e.clientX - photoDragStart.x);
+    setCropOffsetY(e.clientY - photoDragStart.y);
+  };
+
+  const handlePhotoMouseUp = () => {
+    setIsDraggingPhoto(false);
+  };
+
+  const handlePhotoTouchStart = (e) => {
+    setIsDraggingPhoto(true);
+    const touch = e.touches[0];
+    setPhotoDragStart({
+      x: touch.clientX - cropOffsetX,
+      y: touch.clientY - cropOffsetY
+    });
+  };
+
+  const handlePhotoTouchMove = (e) => {
+    if (!isDraggingPhoto) return;
+    const touch = e.touches[0];
+    setCropOffsetX(touch.clientX - photoDragStart.x);
+    setCropOffsetY(touch.clientY - photoDragStart.y);
+  };
+
+  const handlePhotoImageLoad = (e) => {
+    const img = e.target;
+    const nw = img.naturalWidth;
+    const nh = img.naturalHeight;
+    let bw = 200;
+    let bh = 200;
+    if (nw > nh) {
+      bh = 200;
+      bw = (nw / nh) * 200;
+    } else {
+      bw = 200;
+      bh = (nh / nw) * 200;
+    }
+    setImageDims({ w: bw, h: bh });
+    setCropOffsetX(0);
+    setCropOffsetY(0);
+    setCropZoom(1);
+  };
+
+  const handleSaveCroppedImage = async () => {
+    if (!cropImageSrc || !cropTargetStaffId) return;
+    const img = new Image();
+    img.onload = async () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 300;
+      canvas.height = 300;
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, 300, 300);
+
+      ctx.save();
+      ctx.translate(150, 150);
+      const scaleFactor = 1.5;
+      ctx.translate(cropOffsetX * scaleFactor, cropOffsetY * scaleFactor);
+      ctx.scale(cropZoom * scaleFactor, cropZoom * scaleFactor);
+      ctx.drawImage(img, -imageDims.w / 2, -imageDims.h / 2, imageDims.w, imageDims.h);
+      ctx.restore();
+
+      const photoDataUrl = canvas.toDataURL('image/jpeg', 0.85);
+      
+      setUploadingPhoto(true);
+      try {
+        const res = await fetch(`/api/staff/${cropTargetStaffId}/photo-direct`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+          body: JSON.stringify({ photoDataUrl })
+        });
+        if (res.ok) {
+          loadAdminData(true);
+          alert(`✅ Profile photo updated directly!`);
+          setCropImageSrc(null);
+          setCropTargetStaffId(null);
+        } else {
+          let data = {};
+          try { data = await res.json(); } catch (e) { }
+          alert('❌ Upload failed: ' + (data.error || `Server error (${res.status})`));
+        }
+      } catch (err) {
+        alert('Error uploading photo: ' + err.message);
+      } finally {
+        setUploadingPhoto(false);
+      }
+    };
+    img.src = cropImageSrc;
+  };
+
   const dateCounts = useMemo(() => {
     const counts = {};
     tasks.forEach(t => {
@@ -1101,6 +1212,8 @@ export default function AdminDashboard() {
   const [creatingStaff, setCreatingStaff] = useState(false);
   const [newStaffError, setNewStaffError] = useState('');
   const [backupStatus, setBackupStatus] = useState(null);
+  const [backupBundles, setBackupBundles] = useState([]);
+  const [downloadingBundle, setDownloadingBundle] = useState('');
   const [newStaffForm, setNewStaffForm] = useState({
     name: '',
     email: '',
@@ -1399,6 +1512,51 @@ export default function AdminDashboard() {
     } catch (err) {
       console.error('Failed to load backup status:', err);
       setBackupStatus({ status: 'UNKNOWN', problems: [] });
+    }
+
+    // Downloadable bundles are a separate concern from the health verdict — a failure to list them
+    // must not blank out the status the operator came here to read.
+    try {
+      const res = await fetch('/api/security/bundles', { headers: { Authorization: `Bearer ${token}` } });
+      if (res.ok) {
+        const data = await res.json();
+        setBackupBundles(Array.isArray(data.bundles) ? data.bundles : []);
+      }
+    } catch (err) {
+      console.error('Failed to list backup bundles:', err);
+    }
+  };
+
+  /**
+   * Downloads a bundle as a .zip.
+   *
+   * Fetched with the auth header and handed to the browser as a blob rather than opening the URL
+   * directly — a plain link cannot carry the Authorization header, and this endpoint is Admin-only.
+   */
+  const handleDownloadBundle = async (name) => {
+    try {
+      setDownloadingBundle(name);
+      const res = await fetch(`/api/security/bundles/${encodeURIComponent(name)}/download`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || 'Download failed');
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${name}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      // Released on the next tick; revoking immediately can cancel the download in some browsers.
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (err) {
+      alert(`Could not download the bundle: ${err.message}`);
+    } finally {
+      setDownloadingBundle('');
     }
   };
 
@@ -6116,39 +6274,16 @@ export default function AdminDashboard() {
                                 type="file"
                                 accept="image/*"
                                 className="hidden"
-                                onChange={async (e) => {
+                                onChange={(e) => {
                                   const file = e.target.files?.[0];
                                   if (!file) return;
+                                  setCropTargetStaffId(st.Staff_ID);
                                   const reader = new FileReader();
-                                  reader.onload = async (ev) => {
-                                    const img = new Image();
-                                    img.onload = async () => {
-                                      const canvas = document.createElement('canvas');
-                                      const maxW = 300, maxH = 300;
-                                      let w = img.width, h = img.height;
-                                      if (w > maxW) { h = (maxW / w) * h; w = maxW; }
-                                      if (h > maxH) { w = (maxH / h) * w; h = maxH; }
-                                      canvas.width = w; canvas.height = h;
-                                      const ctx = canvas.getContext('2d');
-                                      ctx.drawImage(img, 0, 0, w, h);
-                                      const photoDataUrl = canvas.toDataURL('image/jpeg', 0.8);
-                                      try {
-                                        const res = await fetch(`/api/staff/${st.Staff_ID}/photo-direct`, {
-                                          method: 'PUT',
-                                          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-                                          body: JSON.stringify({ photoDataUrl })
-                                        });
-                                        if (res.ok) {
-                                          fetchStaffList();
-                                          alert(`✅ Profile photo updated directly for ${st.Name}!`);
-                                        }
-                                      } catch (err) {
-                                        alert('Error updating photo: ' + err.message);
-                                      }
-                                    };
-                                    img.src = ev.target.result;
+                                  reader.onload = (ev) => {
+                                    setCropImageSrc(ev.target.result);
                                   };
                                   reader.readAsDataURL(file);
+                                  e.target.value = '';
                                 }}
                               />
                             </label>
@@ -6157,43 +6292,20 @@ export default function AdminDashboard() {
                                 <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-800 text-[10px] font-bold">
                                   Pending New Photo
                                 </span>
-                                <div className="flex items-center gap-1">
-                                  <button
-                                    onClick={async () => {
-                                      const res = await fetch(`/api/staff/${st.Staff_ID}/photo-approve`, {
-                                        method: 'PUT',
-                                        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-                                        body: JSON.stringify({ action: 'APPROVE', directPhotoUrl: st.Pending_Photo_Request || st.Profile_Photo })
-                                      });
-                                      if (res.ok) {
-                                        fetchStaffList();
-                                        alert('✅ Staff photo approved & updated!');
-                                      } else {
-                                        let err = {};
-                                        try { err = await res.json(); } catch (e) {}
-                                        alert('❌ Approval failed: ' + (err.error || 'Unknown error'));
-                                      }
-                                    }}
-                                    className="px-2 py-0.5 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-[10px] font-bold"
-                                  >
-                                    Approve
-                                  </button>
-                                  <button
-                                    onClick={async () => {
-                                      const res = await fetch(`/api/staff/${st.Staff_ID}/photo-approve`, {
-                                        method: 'PUT',
-                                        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-                                        body: JSON.stringify({ action: 'REJECT' })
-                                      });
-                                      if (res.ok) {
-                                        fetchStaffList();
-                                      }
-                                    }}
-                                    className="px-2 py-0.5 rounded bg-rose-600 hover:bg-rose-700 text-white text-[10px] font-bold"
-                                  >
-                                    Reject
-                                  </button>
-                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setVerifyTargetStaff(st);
+                                    setCropTargetStaffId(st.Staff_ID);
+                                    setCropImageSrc(st.Pending_Photo_Request);
+                                    setCropZoom(1);
+                                    setCropOffsetX(0);
+                                    setCropOffsetY(0);
+                                  }}
+                                  className="px-2 py-1 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-[10px] font-bold transition flex items-center justify-center gap-1 shadow-sm"
+                                >
+                                  🔎 Verify & Approve
+                                </button>
                               </div>
                             )}
                           </div>
@@ -7251,6 +7363,476 @@ export default function AdminDashboard() {
                     className="flex-1 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs transition">Done</button>
                 </div>
               )}
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* PROFILE PHOTO CROP & ADJUSTMENT MODAL */}
+      {cropImageSrc && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4 animate-fadeIn">
+          <div className="bg-white border border-slate-200 rounded-3xl max-w-sm w-full p-5 shadow-2xl flex flex-col items-center space-y-4">
+            <div className="text-center w-full">
+              <h3 className="text-base font-bold text-slate-900 leading-tight">Adjust Profile Photo</h3>
+              <p className="text-[11px] font-semibold text-slate-500 mt-1">Drag image to position. Use zoom & adjust controls.</p>
+            </div>
+
+            {/* Viewport Box (rounded square viewport matching I-Card photo box shape) */}
+            <div
+              className="w-[200px] h-[200px] rounded-2xl border-2 border-rose-600 shadow-inner bg-slate-100 overflow-hidden relative shrink-0 cursor-grab active:cursor-grabbing select-none"
+              onMouseDown={handlePhotoMouseDown}
+              onMouseMove={handlePhotoMouseMove}
+              onMouseUp={handlePhotoMouseUp}
+              onMouseLeave={handlePhotoMouseUp}
+              onTouchStart={handlePhotoTouchStart}
+              onTouchMove={handlePhotoTouchMove}
+              onTouchEnd={handlePhotoMouseUp}
+            >
+              <img
+                src={cropImageSrc}
+                alt="Crop preview"
+                onLoad={handlePhotoImageLoad}
+                style={{
+                  width: imageDims.w,
+                  height: imageDims.h,
+                  transform: `translate(-50%, -50%) translate(${cropOffsetX}px, ${cropOffsetY}px) scale(${cropZoom})`,
+                  position: 'absolute',
+                  left: '50%',
+                  top: '50%',
+                  maxWidth: 'none',
+                  maxHeight: 'none',
+                  pointerEvents: 'none'
+                }}
+              />
+              
+              {/* Target I-Card preview rounded square boundary overlay */}
+              <div className="absolute inset-0 border-[3px] border-dashed border-rose-600/30 rounded-2xl pointer-events-none" />
+            </div>
+
+            {/* Zoom Slider control */}
+            <div className="w-full space-y-1">
+              <div className="flex items-center justify-between text-[11px] font-bold text-slate-600">
+                <span>🔎 Zoom / Magnifier</span>
+                <span>{Math.round(cropZoom * 100)}%</span>
+              </div>
+              <input
+                type="range"
+                min="1"
+                max="3"
+                step="0.02"
+                value={cropZoom}
+                onChange={(e) => setCropZoom(parseFloat(e.target.value))}
+                className="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-rose-600"
+              />
+            </div>
+
+            {/* Directional Adjust Controls */}
+            <div className="w-full space-y-1">
+              <span className="text-[11px] font-bold text-slate-600 block">⚙️ Position Adjust</span>
+              <div className="flex items-center justify-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setCropOffsetX(prev => prev - 5)}
+                  className="w-7 h-7 rounded bg-slate-100 hover:bg-slate-200 border border-slate-200 flex items-center justify-center font-bold text-slate-700 text-xs transition"
+                  title="Move Left"
+                >
+                  ◀
+                </button>
+                <div className="flex flex-col gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setCropOffsetY(prev => prev - 5)}
+                    className="w-7 h-7 rounded bg-slate-100 hover:bg-slate-200 border border-slate-200 flex items-center justify-center font-bold text-slate-700 text-xs transition"
+                    title="Move Up"
+                  >
+                    ▲
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCropOffsetY(prev => prev + 5)}
+                    className="w-7 h-7 rounded bg-slate-100 hover:bg-slate-200 border border-slate-200 flex items-center justify-center font-bold text-slate-700 text-xs transition"
+                    title="Move Down"
+                  >
+                    ▼
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setCropOffsetX(prev => prev + 5)}
+                  className="w-7 h-7 rounded bg-slate-100 hover:bg-slate-200 border border-slate-200 flex items-center justify-center font-bold text-slate-700 text-xs transition"
+                  title="Move Right"
+                >
+                  ▶
+                </button>
+                
+                <button
+                  type="button"
+                  onClick={() => { setCropOffsetX(0); setCropOffsetY(0); setCropZoom(1); }}
+                  className="ml-2 px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 border border-slate-200 font-bold text-slate-700 text-[10px] transition"
+                  title="Reset Position"
+                >
+                  Center
+                </button>
+              </div>
+            </div>
+
+            {/* Modal Actions */}
+            <div className="flex items-center gap-2.5 w-full pt-2">
+              <button
+                type="button"
+                onClick={() => { setCropImageSrc(null); setCropTargetStaffId(null); }}
+                className="flex-1 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 border border-slate-200 text-slate-700 font-bold text-xs transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={uploadingPhoto}
+                onClick={handleSaveCroppedImage}
+                className="flex-1 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs transition shadow-md shadow-rose-600/10 flex items-center justify-center gap-1"
+              >
+                {uploadingPhoto ? 'Saving...' : 'Upload & Save'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* STAFF PROFILE PHOTO VERIFICATION & ADJUSTMENT MODAL */}
+      {verifyTargetStaff && (() => {
+        const liveStaff = staffList.find(s => s.Staff_ID === verifyTargetStaff.Staff_ID) || verifyTargetStaff;
+        const dob = (liveStaff.DOB || '');
+        const bloodGroup = (liveStaff.Blood_Group || 'O+');
+        const emergencyContact = (liveStaff.Emergency_Contact || '8460699569');
+        const aadharNo = (liveStaff.Aadhar_No || '');
+
+        const formatAadhar = (val) => {
+          if (!val) return '–';
+          const clean = val.replace(/\s+/g, '');
+          if (clean.length < 6) return clean;
+          const maskedLength = clean.length - 6;
+          const masked = 'X'.repeat(maskedLength);
+          const visible = clean.substring(maskedLength);
+          return `${masked} ${visible}`;
+        };
+
+        const calcAge = (dobStr) => {
+          if (!dobStr) return '';
+          const b = new Date(dobStr);
+          if (isNaN(b.getTime())) return '';
+          const t = new Date();
+          let a = t.getFullYear() - b.getFullYear();
+          const m = t.getMonth() - b.getMonth();
+          if (m < 0 || (m === 0 && t.getDate() < b.getDate())) a--;
+          return a;
+        };
+        
+        const fmtDob = (d) => {
+          if (!d) return '';
+          const p = d.split('-');
+          return p.length === 3 ? `${p[2]}/${p[1]}/${p[0]}` : d;
+        };
+
+        const handleApprovePhoto = async (useCropped = false) => {
+          setUploadingPhoto(true);
+          try {
+            let finalPhotoUrl = liveStaff.Pending_Photo_Request;
+            if (useCropped && cropImageSrc) {
+              const croppedBase64 = await new Promise((resolve) => {
+                const img = new Image();
+                img.onload = () => {
+                  const canvas = document.createElement('canvas');
+                  canvas.width = 300;
+                  canvas.height = 300;
+                  const ctx = canvas.getContext('2d');
+                  ctx.clearRect(0, 0, 300, 300);
+
+                  ctx.save();
+                  ctx.translate(150, 150);
+                  const scaleFactor = 1.5;
+                  ctx.translate(cropOffsetX * scaleFactor, cropOffsetY * scaleFactor);
+                  ctx.scale(cropZoom * scaleFactor, cropZoom * scaleFactor);
+                  ctx.drawImage(img, -imageDims.w / 2, -imageDims.h / 2, imageDims.w, imageDims.h);
+                  ctx.restore();
+
+                  resolve(canvas.toDataURL('image/jpeg', 0.85));
+                };
+                img.src = cropImageSrc;
+              });
+              finalPhotoUrl = croppedBase64;
+            }
+
+            const res = await fetch(`/api/staff/${liveStaff.Staff_ID}/photo-approve`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+              body: JSON.stringify({ action: 'APPROVE', directPhotoUrl: finalPhotoUrl })
+            });
+
+            if (res.ok) {
+              loadAdminData(true);
+              alert('✅ Staff photo approved and updated!');
+              setVerifyTargetStaff(null);
+              setCropImageSrc(null);
+              setCropTargetStaffId(null);
+            } else {
+              let err = {};
+              try { err = await res.json(); } catch (e) {}
+              alert('❌ Approval failed: ' + (err.error || 'Unknown error'));
+            }
+          } catch (e) {
+            alert('Error during approval: ' + e.message);
+          } finally {
+            setUploadingPhoto(false);
+          }
+        };
+
+        const handleRejectPhoto = async () => {
+          if (!window.confirm('Are you sure you want to reject this photo request?')) return;
+          setUploadingPhoto(true);
+          try {
+            const res = await fetch(`/api/staff/${liveStaff.Staff_ID}/photo-approve`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+              body: JSON.stringify({ action: 'REJECT' })
+            });
+            if (res.ok) {
+              loadAdminData(true);
+              alert('❌ Staff photo request rejected.');
+              setVerifyTargetStaff(null);
+              setCropImageSrc(null);
+              setCropTargetStaffId(null);
+            } else {
+              let err = {};
+              try { err = await res.json(); } catch (e) {}
+              alert('❌ Rejection failed: ' + (err.error || 'Unknown error'));
+            }
+          } catch (e) {
+            alert('Error: ' + e.message);
+          } finally {
+            setUploadingPhoto(false);
+          }
+        };
+
+        return (
+          <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4 animate-fadeIn">
+            <div className="bg-white border border-slate-200 rounded-3xl max-w-3xl w-full p-5 sm:p-6 shadow-2xl flex flex-col md:flex-row gap-6 max-h-[95vh] overflow-y-auto">
+              
+              {/* Left Column: I-Card Preview */}
+              <div className="flex flex-col items-center shrink-0">
+                <span className="text-[11px] font-black text-slate-500 mb-2 uppercase tracking-wider block">Live I-Card Preview</span>
+                
+                <div className="w-[272px] rounded-2xl overflow-hidden shadow-xl border border-slate-200 flex flex-col font-sans bg-white">
+                  <div className="flex items-center justify-center pt-2.5 pb-1 bg-white border-b-[4px] border-rose-600 w-full shrink-0">
+                    <img src="/expert_logo.jpg?v=4" alt="Expert Safety Logo" className="w-[190px] h-auto object-contain p-0.5" />
+                  </div>
+
+                  <div className="flex flex-col items-center pt-3 pb-1 px-3 bg-white">
+                    <div className="w-[140px] h-[140px] rounded-xl border-2 border-rose-600 shadow-md bg-slate-100 overflow-hidden flex items-center justify-center shrink-0 relative">
+                      {cropImageSrc ? (
+                        <img
+                          src={cropImageSrc}
+                          alt={liveStaff.Name}
+                          style={{
+                            width: imageDims.w * 0.7,
+                            height: imageDims.h * 0.7,
+                            transform: `translate(-50%, -50%) translate(${cropOffsetX * 0.7}px, ${cropOffsetY * 0.7}px) scale(${cropZoom})`,
+                            position: 'absolute',
+                            left: '50%',
+                            top: '50%',
+                            maxWidth: 'none',
+                            maxHeight: 'none',
+                            pointerEvents: 'none'
+                          }}
+                        />
+                      ) : (
+                        <span className="text-slate-500 text-2xl font-black">{String(liveStaff.Name || 'S').charAt(0).toUpperCase()}</span>
+                      )}
+                    </div>
+
+                    <h4 className="text-slate-900 font-black text-[13px] uppercase tracking-wide mt-2 text-center leading-tight">{liveStaff.Name}</h4>
+                    <span className="text-rose-700 font-extrabold text-[9.5px] tracking-wider mt-0.5 text-center">
+                      ({liveStaff.Role || liveStaff.Department || 'Staff'})
+                    </span>
+                  </div>
+
+                  <div className="px-4 pb-2.5 pt-1.5 space-y-2 bg-white text-xs border-t border-slate-100">
+                    <div className="grid grid-cols-2 gap-x-2 gap-y-1.5">
+                      <div>
+                        <span className="text-[7.5px] text-rose-700 font-extrabold uppercase tracking-wider block leading-none mb-0.5">Employee ID</span>
+                        <span className="text-slate-950 font-black text-[10.5px]">{liveStaff.Staff_ID}</span>
+                      </div>
+                      <div>
+                        <span className="text-[7.5px] text-rose-700 font-extrabold uppercase tracking-wider block leading-none mb-0.5">Blood Group</span>
+                        <span className="text-slate-950 font-black text-[10.5px]">{bloodGroup}</span>
+                      </div>
+                      <div>
+                        <span className="text-[7.5px] text-rose-700 font-extrabold uppercase tracking-wider block leading-none mb-0.5">Date of Birth</span>
+                        <span className="text-slate-950 font-bold text-[10px]">{fmtDob(dob) || '–'}</span>
+                      </div>
+                      <div>
+                        <span className="text-[7.5px] text-rose-700 font-extrabold uppercase tracking-wider block leading-none mb-0.5">Age</span>
+                        <span className="text-slate-950 font-bold text-[10px]">{dob ? `${calcAge(dob)} yrs` : '–'}</span>
+                      </div>
+                    </div>
+
+                    <div className="border-t border-slate-100 pt-1.5 space-y-1.5">
+                      <div className="grid grid-cols-2 gap-x-2">
+                        <div>
+                          <span className="text-[7.5px] text-rose-700 font-extrabold uppercase tracking-wider block leading-none mb-0.5">Emergency Contact</span>
+                          <span className="text-slate-950 font-black text-[10px] font-mono">{emergencyContact}</span>
+                        </div>
+                        <div>
+                          <span className="text-[7.5px] text-rose-700 font-extrabold uppercase tracking-wider block leading-none mb-0.5">Aadhaar Card No</span>
+                          <span className="text-slate-950 font-black text-[10px] font-mono">{formatAadhar(aadharNo)}</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="px-4 py-3 bg-rose-700 flex flex-col justify-center shrink-0 border-t border-rose-800 text-center">
+                    <span className="text-white font-black text-[11.5px] uppercase tracking-wider block">Expert Safety Solutions</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Right Column: Cropping Viewport */}
+              <div className="flex-1 flex flex-col items-center justify-between space-y-4">
+                <div className="text-center md:text-left w-full border-b border-slate-100 pb-2 flex items-center justify-between">
+                  <div>
+                    <h3 className="text-base font-extrabold text-slate-900 leading-tight">Verify & Adjust Photo</h3>
+                    <p className="text-[11px] font-semibold text-slate-500 mt-0.5">Adjust the photo framing below before approval.</p>
+                  </div>
+                  <button
+                    onClick={() => { setVerifyTargetStaff(null); setCropImageSrc(null); }}
+                    className="text-slate-400 hover:text-slate-600 font-bold text-sm"
+                  >
+                    ✕
+                  </button>
+                </div>
+
+                <div
+                  className="w-[200px] h-[200px] rounded-2xl border-2 border-rose-600 shadow-inner bg-slate-100 overflow-hidden relative shrink-0 cursor-grab active:cursor-grabbing select-none"
+                  onMouseDown={handlePhotoMouseDown}
+                  onMouseMove={handlePhotoMouseMove}
+                  onMouseUp={handlePhotoMouseUp}
+                  onMouseLeave={handlePhotoMouseUp}
+                  onTouchStart={handlePhotoTouchStart}
+                  onTouchMove={handlePhotoTouchMove}
+                  onTouchEnd={handlePhotoMouseUp}
+                >
+                  <img
+                    src={cropImageSrc}
+                    alt="Adjust preview"
+                    onLoad={handlePhotoImageLoad}
+                    style={{
+                      width: imageDims.w,
+                      height: imageDims.h,
+                      transform: `translate(-50%, -50%) translate(${cropOffsetX}px, ${cropOffsetY}px) scale(${cropZoom})`,
+                      position: 'absolute',
+                      left: '50%',
+                      top: '50%',
+                      maxWidth: 'none',
+                      maxHeight: 'none',
+                      pointerEvents: 'none'
+                    }}
+                  />
+                  <div className="absolute inset-0 border-[3px] border-dashed border-rose-600/30 rounded-2xl pointer-events-none" />
+                </div>
+
+                <div className="w-full space-y-1">
+                  <div className="flex items-center justify-between text-[11px] font-bold text-slate-600">
+                    <span>🔎 Zoom / Magnifier</span>
+                    <span>{Math.round(cropZoom * 100)}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="1"
+                    max="3"
+                    step="0.02"
+                    value={cropZoom}
+                    onChange={(e) => setCropZoom(parseFloat(e.target.value))}
+                    className="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-rose-600"
+                  />
+                </div>
+
+                <div className="w-full space-y-1 text-center">
+                  <span className="text-[11px] font-bold text-slate-600 block text-left">⚙️ Position Adjust</span>
+                  <div className="flex items-center justify-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setCropOffsetX(prev => prev - 5)}
+                      className="w-7 h-7 rounded bg-slate-100 hover:bg-slate-200 border border-slate-200 flex items-center justify-center font-bold text-slate-700 text-xs transition"
+                      title="Move Left"
+                    >◀</button>
+                    <div className="flex flex-col gap-1">
+                      <button
+                        type="button"
+                        onClick={() => setCropOffsetY(prev => prev - 5)}
+                        className="w-7 h-7 rounded bg-slate-100 hover:bg-slate-200 border border-slate-200 flex items-center justify-center font-bold text-slate-700 text-xs transition"
+                        title="Move Up"
+                      >▲</button>
+                      <button
+                        type="button"
+                        onClick={() => setCropOffsetY(prev => prev + 5)}
+                        className="w-7 h-7 rounded bg-slate-100 hover:bg-slate-200 border border-slate-200 flex items-center justify-center font-bold text-slate-700 text-xs transition"
+                        title="Move Down"
+                      >▼</button>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setCropOffsetX(prev => prev + 5)}
+                      className="w-7 h-7 rounded bg-slate-100 hover:bg-slate-200 border border-slate-200 flex items-center justify-center font-bold text-slate-700 text-xs transition"
+                      title="Move Right"
+                    >▶</button>
+                    
+                    <button
+                      type="button"
+                      onClick={() => { setCropOffsetX(0); setCropOffsetY(0); setCropZoom(1); }}
+                      className="ml-2 px-2.5 py-1 rounded bg-slate-100 hover:bg-slate-200 border border-slate-200 font-bold text-slate-700 text-[10px] transition"
+                    >Center</button>
+                  </div>
+                </div>
+
+                <div className="w-full pt-3 border-t border-slate-100 flex flex-col gap-2">
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      disabled={uploadingPhoto}
+                      onClick={() => handleApprovePhoto(true)}
+                      className="flex-1 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-[11px] transition shadow-md shadow-emerald-600/10 flex items-center justify-center gap-1"
+                    >
+                      ✓ Crop & Approve
+                    </button>
+                    <button
+                      type="button"
+                      disabled={uploadingPhoto}
+                      onClick={() => handleApprovePhoto(false)}
+                      className="flex-1 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-[11px] transition shadow-md shadow-indigo-600/10 flex items-center justify-center gap-1"
+                    >
+                      ✓ Approve As-Is
+                    </button>
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      disabled={uploadingPhoto}
+                      onClick={handleRejectPhoto}
+                      className="flex-1 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs transition"
+                    >
+                      ✕ Reject Request
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setVerifyTargetStaff(null); setCropImageSrc(null); }}
+                      className="flex-1 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 border border-slate-200 text-slate-700 font-bold text-xs transition"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+
+              </div>
+
             </div>
           </div>
         );
@@ -8810,12 +9392,15 @@ export default function AdminDashboard() {
                   <p className="text-[10px] text-slate-600 font-semibold">Backup Status</p>
                   <span className={`text-[11px] font-bold ${
                     backupStatus?.status === 'HEALTHY' ? 'text-emerald-700'
-                      : backupStatus?.status === 'FAILED' ? 'text-rose-700'
+                      : (backupStatus?.status === 'FAILED' || backupStatus?.status === 'MISSING') ? 'text-rose-700'
                       : 'text-amber-700'
                   }`}>
                     {!backupStatus ? 'Checking…'
                       : backupStatus.status === 'HEALTHY' ? 'Healthy ✅'
                       : backupStatus.status === 'FAILED' ? 'Failed ❌'
+                      // MISSING is red, not amber: the file is gone, so there is nothing to
+                      // restore from. That is a worse position than a backup merely being old.
+                      : backupStatus.status === 'MISSING' ? 'No backup found ❌'
                       : backupStatus.status === 'STALE' ? 'Stale ⚠️'
                       : backupStatus.status === 'NEVER_RUN' ? 'Never run ⚠️'
                       : `${backupStatus.status} ⚠️`}
@@ -8831,6 +9416,35 @@ export default function AdminDashboard() {
                 )}
                 {backupStatus?.problems?.length > 0 && (
                   <p className="text-[10px] text-rose-600 font-semibold mt-0.5">{backupStatus.problems[0]}</p>
+                )}
+
+                {/* Full-restore bundles, downloadable so they can be copied to an external drive.
+                    Only ever populated when the app runs on a machine with a local disk — on
+                    Vercel the filesystem is discarded after each request and holds no bundles. */}
+                {backupBundles.length > 0 && (
+                  <div className="mt-2 pt-2 border-t border-slate-100">
+                    <p className="text-[10px] text-slate-600 font-semibold mb-1">
+                      Full restore bundles (code + data + secrets)
+                    </p>
+                    {backupBundles.slice(0, 3).map(b => (
+                      <div key={b.name} className="flex items-center justify-between gap-2 py-0.5">
+                        <span className="text-[10px] text-slate-500 font-medium truncate">
+                          {b.name.replace('full-', '')} · {(b.bytes / 1048576).toFixed(0)} MB
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleDownloadBundle(b.name)}
+                          disabled={downloadingBundle === b.name}
+                          className="shrink-0 px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-900 text-white text-[10px] font-bold transition disabled:opacity-50"
+                        >
+                          {downloadingBundle === b.name ? 'Preparing…' : 'Download'}
+                        </button>
+                      </div>
+                    ))}
+                    <p className="text-[9px] text-amber-700 font-semibold mt-1">
+                      Contains customer data + encrypted keys. Store the passphrase separately.
+                    </p>
+                  </div>
                 )}
               </div>
             </div>

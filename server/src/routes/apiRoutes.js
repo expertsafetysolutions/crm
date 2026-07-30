@@ -19,6 +19,7 @@ const priceListService = require('../services/priceListService');
 const interactionLogger = require('../services/interactionLogger');
 const moneyMask = require('../utils/moneyMask');
 const piiMask = require('../utils/piiMask');
+const { recordAudit } = require('../utils/auditLog');
 
 const router = express.Router();
 
@@ -2707,7 +2708,42 @@ router.get('/security/backup-status', async (req, res) => {
     // forever after the scheduled task silently died.
     const checkedAt = settings.backup_checked_at ? Date.parse(settings.backup_checked_at) : 0;
     const ageHours = checkedAt ? (Date.now() - checkedAt) / 3600000 : Infinity;
-    const status = settings.backup_status === 'HEALTHY' && ageHours > 48 ? 'STALE' : settings.backup_status;
+    let status = settings.backup_status === 'HEALTHY' && ageHours > 48 ? 'STALE' : settings.backup_status;
+    const problems = [...(settings.backup_problems || [])];
+
+    // Re-check that the files are still THERE, rather than trusting the stored verdict alone.
+    //
+    // This showed "Healthy ✅" while the backups directory was empty: a verification had genuinely
+    // passed days earlier, the verdict was recorded, and the folder was deleted afterwards. Nothing
+    // told the dashboard, so it kept vouching for a backup that no longer existed — the worst
+    // possible failure for this widget, because it is the one an Admin trusts to know they are
+    // covered. Only meaningful where the process can see the disk (a local/VM install); on Vercel
+    // the filesystem is ephemeral and holds no backups, so an absent directory there says nothing
+    // and the stored verdict is left alone.
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const root = path.join(__dirname, '../../../backups');
+      const onVercel = Boolean(process.env.VERCEL);
+
+      if (!onVercel) {
+        const present = fs.existsSync(root)
+          ? fs.readdirSync(root, { withFileTypes: true }).filter(e =>
+              e.isDirectory()
+              && /^\d{4}-\d{2}-\d{2}_\d{6}$/.test(e.name)
+              && fs.existsSync(path.join(root, e.name, '_manifest.json'))
+            ).length
+          : 0;
+
+        if (present === 0) {
+          status = 'MISSING';
+          problems.unshift('The recorded backup is no longer on disk. Run: npm run backup');
+        }
+      }
+    } catch (fsErr) {
+      // Never let a filesystem problem break the widget — report what was stored instead.
+      console.error('backup-status file check failed:', fsErr.message);
+    }
 
     res.json({
       status,
@@ -2715,12 +2751,102 @@ router.get('/security/backup-status', async (req, res) => {
       takenOn: settings.backup_taken_on || null,
       collections: settings.backup_collections || 0,
       documents: settings.backup_documents || 0,
-      problems: settings.backup_problems || [],
+      problems,
       ageHours: Number.isFinite(ageHours) ? Math.floor(ageHours) : null
     });
   } catch (err) {
     console.error('backup-status read error:', err);
     res.status(500).json({ error: 'Failed to read backup status' });
+  }
+});
+
+/**
+ * Lists the full-restore bundles available to download.
+ *
+ * Admin-only. Reads the local disk, so it returns an empty list on Vercel by design — the bundles
+ * live on the machine that runs the nightly backup, which is the only place they can reach an
+ * external drive from.
+ */
+router.get('/security/bundles', async (req, res) => {
+  try {
+    if (req.user.role !== 'Admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    const fs = require('fs');
+    const path = require('path');
+    const root = path.join(__dirname, '../../../backups/full');
+
+    if (Boolean(process.env.VERCEL) || !fs.existsSync(root)) {
+      return res.json({ bundles: [], onServer: Boolean(process.env.VERCEL) });
+    }
+
+    const dirSize = (dir) => {
+      let n = 0;
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        const p = path.join(dir, e.name);
+        n += e.isDirectory() ? dirSize(p) : fs.statSync(p).size;
+      }
+      return n;
+    };
+
+    const bundles = fs.readdirSync(root, { withFileTypes: true })
+      .filter(e => e.isDirectory() && /^full-\d{4}-\d{2}-\d{2}_\d{4}$/.test(e.name))
+      .filter(e => fs.existsSync(path.join(root, e.name, 'RESTORE-README.txt')))
+      .map(e => ({
+        name: e.name,
+        bytes: dirSize(path.join(root, e.name)),
+        createdAt: fs.statSync(path.join(root, e.name)).mtime.toISOString()
+      }))
+      .sort((a, b) => b.name.localeCompare(a.name));
+
+    res.json({ bundles, onServer: false });
+  } catch (err) {
+    console.error('bundle list error:', err);
+    res.status(500).json({ error: 'Failed to list backup bundles' });
+  }
+});
+
+/**
+ * Streams one bundle as a .zip for saving to an external drive.
+ *
+ * The bundle contains the database and an encrypted copy of server/.env, so this is the single most
+ * sensitive download in the app — hence Admin-only, and hence the name is validated against a
+ * strict pattern rather than trusted. `../` in that parameter would otherwise walk out of the
+ * backups directory and serve any file on the disk.
+ */
+router.get('/security/bundles/:name/download', async (req, res) => {
+  try {
+    if (req.user.role !== 'Admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    const name = String(req.params.name || '');
+    // Exact shape only — this is the path-traversal guard, not a formatting nicety.
+    if (!/^full-\d{4}-\d{2}-\d{2}_\d{4}$/.test(name)) {
+      return res.status(400).json({ error: 'Invalid bundle name' });
+    }
+
+    const fs = require('fs');
+    const path = require('path');
+    const dir = path.join(__dirname, '../../../backups/full', name);
+    if (!fs.existsSync(path.join(dir, 'RESTORE-README.txt'))) {
+      return res.status(404).json({ error: 'That bundle no longer exists on the server' });
+    }
+
+    const { zipDirectory } = require('../utils/zipStream');
+    const zip = zipDirectory(dir, name);
+
+    await recordAudit(req, {
+      entity: 'Security_Settings', entityId: name, action: 'BACKUP_DOWNLOADED',
+      note: `Full restore bundle downloaded (${(zip.length / 1048576).toFixed(1)} MB) — contains data and encrypted secrets`
+    });
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${name}.zip"`);
+    res.setHeader('Content-Length', zip.length);
+    res.send(zip);
+  } catch (err) {
+    console.error('bundle download error:', err);
+    res.status(500).json({ error: 'Failed to package the bundle' });
   }
 });
 

@@ -196,6 +196,114 @@ export default function StaffDashboard() {
     emergencyContact: '8460699569'
   });
 
+  // Profile photo cropping states & drag handlers
+  const [cropImageSrc, setCropImageSrc] = useState(null);
+  const [cropZoom, setCropZoom] = useState(1);
+  const [cropOffsetX, setCropOffsetX] = useState(0);
+  const [cropOffsetY, setCropOffsetY] = useState(0);
+  const [imageDims, setImageDims] = useState({ w: 200, h: 200 });
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
+  const [isDraggingPhoto, setIsDraggingPhoto] = useState(false);
+  const [photoDragStart, setPhotoDragStart] = useState({ x: 0, y: 0 });
+
+  const handlePhotoMouseDown = (e) => {
+    setIsDraggingPhoto(true);
+    setPhotoDragStart({
+      x: e.clientX - cropOffsetX,
+      y: e.clientY - cropOffsetY
+    });
+  };
+
+  const handlePhotoMouseMove = (e) => {
+    if (!isDraggingPhoto) return;
+    setCropOffsetX(e.clientX - photoDragStart.x);
+    setCropOffsetY(e.clientY - photoDragStart.y);
+  };
+
+  const handlePhotoMouseUp = () => {
+    setIsDraggingPhoto(false);
+  };
+
+  const handlePhotoTouchStart = (e) => {
+    setIsDraggingPhoto(true);
+    const touch = e.touches[0];
+    setPhotoDragStart({
+      x: touch.clientX - cropOffsetX,
+      y: touch.clientY - cropOffsetY
+    });
+  };
+
+  const handlePhotoTouchMove = (e) => {
+    if (!isDraggingPhoto) return;
+    const touch = e.touches[0];
+    setCropOffsetX(touch.clientX - photoDragStart.x);
+    setCropOffsetY(touch.clientY - photoDragStart.y);
+  };
+
+  const handlePhotoImageLoad = (e) => {
+    const img = e.target;
+    const nw = img.naturalWidth;
+    const nh = img.naturalHeight;
+    let bw = 200;
+    let bh = 200;
+    if (nw > nh) {
+      bh = 200;
+      bw = (nw / nh) * 200;
+    } else {
+      bw = 200;
+      bh = (nh / nw) * 200;
+    }
+    setImageDims({ w: bw, h: bh });
+    setCropOffsetX(0);
+    setCropOffsetY(0);
+    setCropZoom(1);
+  };
+
+  const handleSaveCroppedImage = async () => {
+    if (!cropImageSrc) return;
+    const img = new Image();
+    img.onload = async () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 300;
+      canvas.height = 300;
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, 300, 300);
+
+      ctx.save();
+      ctx.translate(150, 150);
+      const scaleFactor = 1.5;
+      ctx.translate(cropOffsetX * scaleFactor, cropOffsetY * scaleFactor);
+      ctx.scale(cropZoom * scaleFactor, cropZoom * scaleFactor);
+      ctx.drawImage(img, -imageDims.w / 2, -imageDims.h / 2, imageDims.w, imageDims.h);
+      ctx.restore();
+
+      const photoDataUrl = canvas.toDataURL('image/jpeg', 0.85);
+      
+      setUploadingPhoto(true);
+      try {
+        const res = await fetch('/api/staff/profile-photo-request', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+          body: JSON.stringify({ photoDataUrl })
+        });
+        let data = {};
+        try { data = await res.json(); } catch (e) { }
+        if (res.ok) {
+          updateUser({ Pending_Photo_Request: photoDataUrl, Photo_Status: 'Pending Approval' });
+          alert('✅ Profile photo uploaded! Waiting for Admin approval.');
+          setCropImageSrc(null);
+        } else {
+          alert('❌ Upload failed: ' + (data.error || `Server error (${res.status})`));
+        }
+      } catch (err) {
+        alert('Error uploading photo: ' + err.message);
+      } finally {
+        setUploadingPhoto(false);
+      }
+    };
+    img.src = cropImageSrc;
+  };
+
   const dateCounts = useMemo(() => {
     const counts = {};
     tasks.forEach(t => {
@@ -3931,43 +4039,15 @@ export default function StaffDashboard() {
                       type="file"
                       accept="image/*"
                       className="hidden"
-                      onChange={async (e) => {
+                      onChange={(e) => {
                         const file = e.target.files?.[0];
                         if (!file) return;
                         const reader = new FileReader();
-                        reader.onload = async (ev) => {
-                          const img = new Image();
-                          img.onload = async () => {
-                            const canvas = document.createElement('canvas');
-                            const maxW = 300, maxH = 300;
-                            let w = img.width, h = img.height;
-                            if (w > maxW) { h = (maxW / w) * h; w = maxW; }
-                            if (h > maxH) { w = (maxH / h) * w; h = maxH; }
-                            canvas.width = w; canvas.height = h;
-                            const ctx = canvas.getContext('2d');
-                            ctx.drawImage(img, 0, 0, w, h);
-                            const photoDataUrl = canvas.toDataURL('image/jpeg', 0.8);
-                            try {
-                              const res = await fetch('/api/staff/profile-photo-request', {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-                                body: JSON.stringify({ photoDataUrl })
-                              });
-                              let data = {};
-                              try { data = await res.json(); } catch (e) { }
-                              if (res.ok) {
-                                updateUser({ Pending_Photo_Request: photoDataUrl, Photo_Status: 'Pending Approval' });
-                                alert('✅ Profile photo uploaded! Waiting for Admin approval.');
-                              } else {
-                                alert('❌ Upload failed: ' + (data.error || `Server error (${res.status})`));
-                              }
-                            } catch (err) {
-                              alert('Error uploading photo: ' + err.message);
-                            }
-                          };
-                          img.src = ev.target.result;
+                        reader.onload = (ev) => {
+                          setCropImageSrc(ev.target.result);
                         };
                         reader.readAsDataURL(file);
+                        e.target.value = '';
                       }}
                     />
                   </label>

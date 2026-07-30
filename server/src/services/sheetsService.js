@@ -491,9 +491,22 @@ class MongoService {
   async getQuotationSettings(companyId = 'DEFAULT') {
     await this.connect();
     const Model = models['Quotation_Settings'];
-    const doc = await Model.findOne({ company_id: companyId }).lean();
-    if (doc) { delete doc._id; delete doc.__v; }
-    return doc || null;
+    const doc = await Model.findOne({ company_id: companyId });
+    if (doc) {
+      const oldBody = 'Dear {customer_name},\n\nA gentle reminder regarding quotation {quote_no} for {amount}. Do let us know your feedback.\n\n{view_link}\n\nRegards,\nExpert Safety Solutions';
+      const newBody = 'Dear {customer_name},\n\nA gentle reminder regarding quotation {quote_no} for {amount}. Do let us know your feedback.\n\nYou can view and download the quotation from the following link:\n{view_link}\n\nRegards,\nExpert Safety Solutions';
+      if (doc.draft_templates?.followup_reminder?.body === oldBody) {
+        if (!doc.draft_templates) doc.draft_templates = {};
+        if (!doc.draft_templates.followup_reminder) doc.draft_templates.followup_reminder = {};
+        doc.draft_templates.followup_reminder.body = newBody;
+        doc.markModified('draft_templates');
+        await doc.save();
+      }
+      const raw = doc.toObject();
+      delete raw._id; delete raw.__v;
+      return raw;
+    }
+    return null;
   }
 
   async saveQuotationSettings(companyId = 'DEFAULT', settingsData) {

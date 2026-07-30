@@ -15,6 +15,31 @@ const PHOTO_KEY = 'expert_safety_profile_photo';
 const USER_KEY = 'expert_safety_user';
 const TOKEN_KEY = 'expert_safety_token';
 const IMPERSON_KEY = 'expert_safety_impersonation';
+const DEVICE_KEY = 'expert_safety_device_id';
+
+/**
+ * A stable random id for this browser profile, minted once and kept.
+ *
+ * It identifies a BROWSER, not a machine: clearing site data or opening a private window looks
+ * like a new device and will ask for a code once. That is inherent to storing it client-side.
+ *
+ * It is not a credential and grants nothing on its own — the server only uses it to decide
+ * whether to demand the emailed second factor, which still requires the correct password first.
+ */
+function getDeviceId() {
+  try {
+    let id = localStorage.getItem(DEVICE_KEY);
+    if (!id) {
+      id = (crypto?.randomUUID?.() || `dev-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+      localStorage.setItem(DEVICE_KEY, id);
+    }
+    return id;
+  } catch {
+    // Private mode with storage blocked: fall back to a per-session id. The user is asked for a
+    // code each time, which is correct — we genuinely cannot recognise this browser again.
+    return `ephemeral-${Math.random().toString(36).slice(2)}`;
+  }
+}
 
 function safeSet(key, value) {
   try {
@@ -161,11 +186,36 @@ export function AuthProvider({ children }) {
     const res = await fetch('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ staffId, password })
+      body: JSON.stringify({ staffId, password, deviceId: getDeviceId() })
     });
     const data = await res.json();
+
+    // 202 = credentials accepted, but this browser has not been used before and the server is
+    // waiting for the emailed code. Surfaced as a value rather than an Error because it is a
+    // normal step in the flow, not a failure — the Login page switches to the code prompt.
+    if (res.status === 202 && data.otpRequired) {
+      return { otpRequired: true, staffId: data.staffId, message: data.message };
+    }
+
     if (!res.ok) {
       throw new Error(data.error || 'Login failed');
+    }
+
+    return establishSession(data);
+  };
+
+  /**
+   * Completes a sign-in from a successful /login or /verify-otp payload.
+   * Shared so a session created after an OTP is identical to a direct one.
+   */
+  const establishSession = async (data) => {
+    // A response without a token means the server and this bundle disagree about the login
+    // protocol — which is exactly what a stale service-worker cache produces after the auth flow
+    // changes. Throwing a plain Error here is caught by the Login page and shown as a message;
+    // proceeding would store `undefined` as the token and crash the tree on the next render,
+    // which is what closed the tab.
+    if (!data || !data.token || !data.user) {
+      throw new Error('Sign-in could not be completed. Please reload the page and try again.');
     }
 
     safeSet(TOKEN_KEY, data.token);
@@ -199,6 +249,18 @@ export function AuthProvider({ children }) {
     return data.user;
   };
 
+  /** Second step of a new-device sign-in: exchange the emailed code for a session. */
+  const verifyOtp = async (staffId, password, code) => {
+    const res = await fetch('/api/auth/verify-otp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ staffId, password, code, deviceId: getDeviceId() })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Could not verify the code');
+    return establishSession(data);
+  };
+
   const logout = () => {
     isLoggedOutRef.current = true;
     // Best-effort: remove this device's push subscription before the token it needs to
@@ -217,8 +279,12 @@ export function AuthProvider({ children }) {
     setToken(null);
     setUser(null);
     setImpersonatedStaff(null);
+    // ONE navigation, not two. This previously called replace('/') and then reload() back to back;
+    // the second call fires while the first navigation is already in flight, and Chrome can treat
+    // that as an unstable page and discard the tab outright rather than land on the login screen.
+    // replace() alone both leaves the current route and drops it from history, which is all logout
+    // needs — the fresh document load re-runs AuthProvider with the cleared localStorage.
     window.location.replace('/');
-    window.location.reload();
   };
 
   const startImpersonating = useCallback((staffObj) => {
@@ -276,6 +342,7 @@ export function AuthProvider({ children }) {
         pendingSyncCount,
         isSyncing,
         login,
+        verifyOtp,
         logout,
         updateUser,
         updateQueueCount,

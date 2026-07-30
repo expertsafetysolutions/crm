@@ -1582,7 +1582,14 @@ export default function AdminDashboard() {
         setTimeout(() => scrollToSection('section-leave-queue'), 150);
       } else if (n.targetType === 'TASK') {
         setActiveTab('PIPELINE');
-        if (n.targetId) setSearchQuery(n.targetId);
+        if (n.targetId) {
+          setSearchQuery(n.targetId);
+          const found = tasks.find(t => t.Task_ID === n.targetId);
+          if (found) {
+            setEditingTask(found);
+            setShowEditTaskModal(true);
+          }
+        }
         setTimeout(() => scrollToSection('section-pipeline-list'), 150);
       } else if (n.targetType === 'STAFF') {
         setActiveTab('STAFF');
@@ -1590,11 +1597,18 @@ export default function AdminDashboard() {
       } else if (n.targetType === 'ADVANCE') {
         setActiveTab('ATTENDANCE');
         setTimeout(() => scrollToSection('section-attendance-logs'), 150);
+      } else if (n.targetType === 'SERVICE_REPORT') {
+        if (n.targetId) {
+          navigate(`/certificate/${n.targetId}`);
+        } else {
+          setActiveTab('SERVICE_REPORTS');
+          setServiceReportFilter('PENDING');
+        }
       }
     };
     window.addEventListener('NAVIGATE_TO_TARGET', handleNav);
     return () => window.removeEventListener('NAVIGATE_TO_TARGET', handleNav);
-  }, [activeTab]);
+  }, [activeTab, tasks, navigate]);
 
   const handleLeaveStatusUpdate = async (requestId, status) => {
     try {

@@ -82,6 +82,21 @@ export default function Navbar({ currentView, setCurrentView }) {
     };
   }, []);
 
+  const dismissSingleNotification = useCallback((n) => {
+    const userIdKey = (realUser || user)?.Staff_ID || (realUser || user)?.id || 'default';
+    const dismissedKey = `expert_safety_dismissed_notifs_${userIdKey}`;
+    const dismissedIds = JSON.parse(localStorage.getItem(dismissedKey) || '[]');
+    if (n.id && !dismissedIds.includes(n.id)) {
+      const updatedDismissed = [...dismissedIds, n.id];
+      localStorage.setItem(dismissedKey, JSON.stringify(updatedDismissed.slice(-1000)));
+    }
+    setNotifications(prev => {
+      const updated = prev.filter(item => item.id !== n.id);
+      if (updated.length === 0) setHasUnread(false);
+      return updated;
+    });
+  }, [user?.Staff_ID, user?.id, realUser?.Staff_ID, realUser?.id]);
+
   const handleMarkAllRead = () => {
     const userIdKey = (realUser || user)?.Staff_ID || (realUser || user)?.id || 'default';
     const dismissedKey = `expert_safety_dismissed_notifs_${userIdKey}`;
@@ -99,18 +114,7 @@ export default function Navbar({ currentView, setCurrentView }) {
 
   const handleNotificationClick = (n) => {
     // 1. Immediately dismiss/remove this specific notification on tap
-    const userIdKey = (realUser || user)?.Staff_ID || (realUser || user)?.id || 'default';
-    const dismissedKey = `expert_safety_dismissed_notifs_${userIdKey}`;
-    const dismissedIds = JSON.parse(localStorage.getItem(dismissedKey) || '[]');
-    if (n.id && !dismissedIds.includes(n.id)) {
-      const updatedDismissed = [...dismissedIds, n.id];
-      localStorage.setItem(dismissedKey, JSON.stringify(updatedDismissed.slice(-1000)));
-    }
-    setNotifications(prev => {
-      const updated = prev.filter(item => item.id !== n.id);
-      if (updated.length === 0) setHasUnread(false);
-      return updated;
-    });
+    dismissSingleNotification(n);
     setShowNotifications(false);
 
     // 2. Identify targetType and reference ID dynamically (fallback to regex if not explicit)
@@ -135,7 +139,18 @@ export default function Navbar({ currentView, setCurrentView }) {
       } else if (n.id?.startsWith('adv-')) {
         targetType = 'ADVANCE';
         targetId = n.id?.split('-')[1];
+      } else if (n.id?.startsWith('cert-') || n.id?.startsWith('certificate')) {
+        targetType = 'CERTIFICATE';
+        targetId = n.id?.replace('cert-', '').replace('certificate-', '');
+      } else if (n.id?.startsWith('srpending-') || n.id?.startsWith('sr-')) {
+        targetType = 'SERVICE_REPORT';
+        targetId = n.id?.replace('srpending-', '').replace('sr-', '');
       }
+    }
+
+    if (targetType === 'CERTIFICATE' && targetId) {
+      window.open(`/api/verify-certificate/${targetId}`, '_blank');
+      return;
     }
 
     // 3. Switch active view/role if needed when clicking from admin mode
@@ -349,30 +364,12 @@ export default function Navbar({ currentView, setCurrentView }) {
                     </div>
                   ) : (
                     notifications.map((n, idx) => (
-                      <div
+                      <NotificationItem
                         key={n.id || idx}
-                        onClick={() => handleNotificationClick(n)}
-                        className={`p-3 rounded-xl border text-left transition cursor-pointer hover:scale-[1.01] hover:shadow-md active:scale-[0.99] ${
-                          n.type === 'SUCCESS' ? 'bg-emerald-50/70 border-emerald-200 hover:bg-emerald-100/70' :
-                          n.type === 'APPROVAL_NEEDED' ? 'bg-amber-50/80 border-amber-300 shadow-2xs hover:bg-amber-100/80' :
-                          n.type === 'ALERT' ? 'bg-rose-50/80 border-rose-200 hover:bg-rose-100/80' :
-                          'bg-slate-50 border-slate-200 hover:bg-slate-100'
-                        }`}
-                      >
-                        <div className="flex items-start justify-between gap-2">
-                          <p className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
-                            {n.type === 'SUCCESS' && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />}
-                            {n.type === 'APPROVAL_NEEDED' && <Clock className="w-3.5 h-3.5 text-amber-600 shrink-0" />}
-                            {n.type === 'ALERT' && <AlertCircle className="w-3.5 h-3.5 text-rose-600 shrink-0" />}
-                            {(!n.type || n.type === 'TASK' || n.type === 'INFO') && <Info className="w-3.5 h-3.5 text-indigo-600 shrink-0" />}
-                            {n.title}
-                          </p>
-                          <span className="text-[10px] text-slate-400 shrink-0 font-medium">{n.time}</span>
-                        </div>
-                        <p className="text-xs text-slate-600 font-medium mt-1 leading-snug">
-                          {n.message}
-                        </p>
-                      </div>
+                        n={n}
+                        onClick={handleNotificationClick}
+                        onDismiss={dismissSingleNotification}
+                      />
                     ))
                   )}
                 </div>
@@ -456,5 +453,91 @@ export default function Navbar({ currentView, setCurrentView }) {
         </div>
       )}
     </header>
+  );
+}
+
+function NotificationItem({ n, onClick, onDismiss }) {
+  const [touchStart, setTouchStart] = useState(0);
+  const [swipeOffset, setSwipeOffset] = useState(0);
+  const [isSwiping, setIsSwiping] = useState(false);
+  const [isDismissed, setIsDismissed] = useState(false);
+
+  const handleTouchStart = (e) => {
+    setTouchStart(e.targetTouches[0].clientX);
+    setIsSwiping(true);
+  };
+
+  const handleTouchMove = (e) => {
+    if (!isSwiping) return;
+    const currentX = e.targetTouches[0].clientX;
+    const diff = currentX - touchStart;
+    setSwipeOffset(diff);
+  };
+
+  const handleTouchEnd = () => {
+    setIsSwiping(false);
+    if (Math.abs(swipeOffset) > 120) {
+      setIsDismissed(true);
+      setTimeout(() => {
+        onDismiss(n);
+      }, 200);
+    } else {
+      setSwipeOffset(0);
+    }
+  };
+
+  return (
+    <div
+      onTouchStart={handleTouchStart}
+      onTouchMove={handleTouchMove}
+      onTouchEnd={handleTouchEnd}
+      style={{
+        transform: isDismissed
+          ? `translateX(${swipeOffset > 0 ? 100 : -100}%)`
+          : `translateX(${swipeOffset}px)`,
+        opacity: isDismissed ? 0 : Math.max(0.1, 1 - Math.abs(swipeOffset) / 250),
+        transition: isSwiping ? 'none' : 'transform 0.2s ease-out, opacity 0.2s ease-out',
+      }}
+      className="relative group overflow-hidden"
+    >
+      <div
+        onClick={() => onClick(n)}
+        className={`p-3 pr-8 rounded-xl border text-left transition cursor-pointer hover:scale-[1.01] hover:shadow-md active:scale-[0.99] ${
+          n.type === 'SUCCESS' ? 'bg-emerald-50/70 border-emerald-200 hover:bg-emerald-100/70' :
+          n.type === 'APPROVAL_NEEDED' ? 'bg-amber-50/80 border-amber-300 shadow-2xs hover:bg-amber-100/80' :
+          n.type === 'ALERT' ? 'bg-rose-50/80 border-rose-200 hover:bg-rose-100/80' :
+          'bg-slate-50 border-slate-200 hover:bg-slate-100'
+        }`}
+      >
+        <div className="flex items-start justify-between gap-2">
+          <p className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
+            {n.type === 'SUCCESS' && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />}
+            {n.type === 'APPROVAL_NEEDED' && <Clock className="w-3.5 h-3.5 text-amber-600 shrink-0" />}
+            {n.type === 'ALERT' && <AlertCircle className="w-3.5 h-3.5 text-rose-600 shrink-0" />}
+            {(!n.type || n.type === 'TASK' || n.type === 'INFO') && <Info className="w-3.5 h-3.5 text-indigo-600 shrink-0" />}
+            {n.title}
+          </p>
+          <span className="text-[10px] text-slate-400 shrink-0 font-medium">{n.time}</span>
+        </div>
+        <p className="text-xs text-slate-600 font-medium mt-1 leading-snug">
+          {n.message}
+        </p>
+      </div>
+
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          setIsDismissed(true);
+          setTimeout(() => {
+            onDismiss(n);
+          }, 200);
+        }}
+        className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-200/60 opacity-0 group-hover:opacity-100 transition"
+        title="Dismiss notification"
+      >
+        <X className="w-3.5 h-3.5" />
+      </button>
+    </div>
   );
 }

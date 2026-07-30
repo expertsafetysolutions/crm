@@ -200,7 +200,7 @@ const DEFAULT_QUOTATION_SETTINGS = {
     },
     followup_reminder: {
       subject: 'Gentle reminder — Quotation {quote_no}',
-      body: 'Dear {customer_name},\n\nA gentle reminder regarding quotation {quote_no} for {amount}. Do let us know your feedback.\n\n{view_link}\n\nRegards,\nExpert Safety Solutions',
+      body: 'Dear {customer_name},\n\nA gentle reminder regarding quotation {quote_no} for {amount}. Do let us know your feedback.\n\nYou can view and download the quotation from the following link:\n{view_link}\n\nRegards,\nExpert Safety Solutions',
       whatsapp_template_name: '',
       whatsapp_template_status: 'not_submitted'
     },

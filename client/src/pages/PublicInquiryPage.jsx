@@ -653,7 +653,7 @@ export default function PublicInquiryPage() {
 
           <p className="text-[11px] text-slate-400 font-medium text-center leading-relaxed mb-4 flex items-center justify-center gap-1.5">
             <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
-            Your details are used only to respond to this enquiry.
+            Your details are used for future correspondence.
           </p>
         </form>
       </main>

@@ -113,17 +113,88 @@ function normalizeMobile(value) {
 }
 
 /**
+ * Addresses that are structurally impossible, disposable, or an obvious placeholder.
+ *
+ * This form feeds a SALES pipeline: every junk address becomes a customer record, a lead nobody can
+ * answer, and a quotation that bounces. So the check goes past RFC structure into judgement about
+ * whether a human will ever read it.
+ *
+ * Kept in step with the same lists on the client (PublicInquiryPage.jsx). The client copy exists to
+ * give instant feedback; THIS one is the control.
+ */
+const FAKE_EMAIL_DOMAINS = new Set([
+  'test.com', 'test.co.in', 'example.com', 'example.org', 'domain.com', 'email.com',
+  'abc.com', 'xyz.com', 'asdf.com', 'qwerty.com', 'sample.com', 'demo.com',
+  'mailinator.com', 'yopmail.com', 'guerrillamail.com', '10minutemail.com',
+  'tempmail.com', 'temp-mail.org', 'throwawaymail.com', 'trashmail.com', 'sharklasers.com'
+]);
+
+// Typos of the domains Indian businesses actually use. Each silently loses our reply — the customer
+// waits for a call that was never deliverable — so they are named explicitly rather than guessed at
+// with edit distance, which would also flag legitimate small domains.
+const EMAIL_DOMAIN_TYPOS = {
+  'gmial.com': 'gmail.com', 'gmai.com': 'gmail.com', 'gmail.co': 'gmail.com',
+  'gmail.con': 'gmail.com', 'gmail.cm': 'gmail.com', 'gmaill.com': 'gmail.com',
+  'gmail.comm': 'gmail.com', 'gnail.com': 'gmail.com', 'gamil.com': 'gmail.com',
+  'yahho.com': 'yahoo.com', 'yaho.com': 'yahoo.com', 'yahoo.co': 'yahoo.com',
+  'hotmial.com': 'hotmail.com', 'hotmai.com': 'hotmail.com',
+  'outlok.com': 'outlook.com', 'outlook.co': 'outlook.com',
+  'rediffmail.co': 'rediffmail.com', 'rediff.co': 'rediff.com'
+};
+
+const PLACEHOLDER_EMAIL_LOCALS = new Set([
+  'test', 'testing', 'test123', 'asdf', 'asdfgh', 'qwerty', 'abc', 'abcd', 'xyz',
+  'aaa', 'sample', 'demo', 'dummy', 'nobody', 'noemail', 'none', 'na', 'xxx'
+]);
+
+/**
  * Email validation.
  *
- * Deliberately a shape check, not RFC 5322 — the full grammar accepts addresses no mail server
- * will route, and this value is only ever used as a send target. Rejecting a real address is the
- * expensive failure here (the customer never hears back), so the pattern stays permissive about
- * what it allows before the @ and strict only about structure.
+ * Structure is checked first, then the junk heuristics above. Deliberately NOT full RFC 5322 (its
+ * grammar accepts addresses no mail server will route) and deliberately NOT an MX lookup — that
+ * would put a DNS round-trip on a public endpoint and fail whenever a customer's mail host is
+ * briefly unreachable.
+ *
+ * Everything uncertain is ACCEPTED. A genuine small business often quotes from a Gmail address, and
+ * turning away one real customer costs more than accepting a hundred junk rows.
+ *
+ * Returns '' for anything rejected, so callers keep the existing "falsy means invalid" contract.
  */
 function normalizeEmail(value) {
   const email = sanitizeText(value, LIMITS.email).toLowerCase().replace(/\s/g, '');
   if (!email) return '';
-  return /^[^@\s]+@[^@\s.]+(\.[^@\s.]+)+$/.test(email) ? email : '';
+
+  // One @, something before it, and a dotted domain ending in an alphabetic TLD. This is what
+  // rejects `abc@gmail` (no TLD) and `123@123.123` (numeric TLD).
+  if (!/^[^\s@]+@[^\s@.]+(\.[^\s@.]+)*\.[a-z]{2,}$/.test(email)) return '';
+
+  const [local, domain] = email.split('@');
+  if (EMAIL_DOMAIN_TYPOS[domain]) return '';
+  if (FAKE_EMAIL_DOMAINS.has(domain)) return '';
+  if (PLACEHOLDER_EMAIL_LOCALS.has(local)) return '';
+  // a@a.com / q@q.qq — one character either side is never a working business address.
+  if (local.length < 2 || domain.split('.')[0].length < 2) return '';
+  // aaaa@bbbb.com — a single repeated character is a keyboard mash.
+  if (/^(.)\1+$/.test(local)) return '';
+
+  return email;
+}
+
+/**
+ * Why a specific address was refused, for the message shown to the customer.
+ *
+ * Split out from normalizeEmail so that function keeps its simple string-or-'' contract while the
+ * form can still say "Did you mean @gmail.com?" instead of a flat "invalid" — a typo the customer
+ * cannot see is exactly the case worth spelling out.
+ */
+function emailRejectionReason(value) {
+  const email = sanitizeText(value, LIMITS.email).toLowerCase().replace(/\s/g, '');
+  if (!email) return 'Please enter your email address';
+  if (!/^[^\s@]+@[^\s@.]+(\.[^\s@.]+)*\.[a-z]{2,}$/.test(email)) return 'Please enter a valid email address';
+
+  const domain = email.split('@')[1];
+  if (EMAIL_DOMAIN_TYPOS[domain]) return `Did you mean @${EMAIL_DOMAIN_TYPOS[domain]}?`;
+  return normalizeEmail(email) ? '' : 'Please enter a real email address we can reply to';
 }
 
 /**
@@ -203,10 +274,10 @@ function validateInquiry(body = {}) {
   if (!companyName) errors.companyName = 'Please enter your company name';
 
   // Email is required: it is how the customer receives the confirmation and, later, the quotation.
-  const rawEmail = String(body.email ?? '').trim();
   const email = normalizeEmail(body.email);
-  if (!rawEmail) errors.email = 'Please enter your email address';
-  else if (!email) errors.email = 'Please enter a valid email address';
+  // The specific reason, so a typo'd domain says "Did you mean @gmail.com?" rather than a flat
+  // "invalid" the customer cannot act on.
+  if (!email) errors.email = emailRejectionReason(body.email);
 
   const address = sanitizeText(body.address, LIMITS.address);
   if (!address) errors.address = 'Please enter your site address';
@@ -285,6 +356,7 @@ module.exports = {
   sanitizeText,
   normalizeMobile,
   normalizeEmail,
+  emailRejectionReason,
   sanitizeExtraContacts,
   validateInquiry,
   labelForRequirement,

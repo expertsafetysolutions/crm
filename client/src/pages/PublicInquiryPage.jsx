@@ -74,6 +74,96 @@ const EMPTY_CONTACT = { name: '', designation: '', mobile: '', whatsapp: '', ema
 // that would be dropped without explanation.
 const MAX_EXTRA_CONTACTS = 6;
 
+/**
+ * Reduces anything typed or pasted into a phone box to a bare 10-digit Indian mobile.
+ *
+ * The field already shows "+91" beside it, so the country code must not be typed again — without
+ * this, "+918460699569" pasted from a contacts app displays as "+91 +918460699569" and reads as a
+ * mistake even though the server would have parsed it correctly.
+ *
+ * Stripping rather than rejecting is deliberate: pasting a full number with the code, or with a
+ * leading 0, is the normal way people move a number between apps, and refusing it would make the
+ * field feel broken.
+ */
+function toLocalMobile(value) {
+  let digits = String(value || '').replace(/\D/g, '');
+  if (digits.length > 10 && digits.startsWith('91')) digits = digits.slice(2);   // +91XXXXXXXXXX
+  if (digits.length > 10 && digits.startsWith('0')) digits = digits.slice(1);    // trunk prefix
+  /*
+   * Truncate from the FRONT, matching server normalizeMobile.
+   *
+   * `slice(-10)` here would quietly turn 11 stray digits into a different, valid-looking number and
+   * the customer would never know their number was altered — the server rejects that same input
+   * outright, so the two must not disagree. Capping the visible length instead means the extra
+   * keystroke simply does not register, which is what a maxLength field does anyway.
+   */
+  return digits.slice(0, 10);
+}
+
+/**
+ * Rejects addresses that are structurally impossible or obviously not a real inbox.
+ *
+ * Structure first, then two judgement calls that exist because this form feeds a SALES pipeline:
+ * every junk address becomes a customer record, a lead nobody can answer, and a bounced quotation.
+ *
+ *  - Placeholder locals/domains (test@, a@a.com, asdf@) are the ones people type to skip a form.
+ *  - Misspelt popular domains (gmial, gmai.com, gmail.con) are honest typos, and the customer never
+ *    finds out — our reply simply bounces into nothing while they wait for a call.
+ *
+ * Deliberately NOT a blanket "free email" or MX check: a genuine small business often quotes from a
+ * Gmail address, and an MX lookup cannot run in the browser. Anything uncertain is ACCEPTED — a
+ * rejected real customer is far more expensive here than an accepted junk one.
+ */
+const DISPOSABLE_OR_FAKE_DOMAINS = new Set([
+  'test.com', 'test.co.in', 'example.com', 'example.org', 'domain.com', 'email.com',
+  'abc.com', 'xyz.com', 'asdf.com', 'qwerty.com', 'sample.com', 'demo.com',
+  'mailinator.com', 'yopmail.com', 'guerrillamail.com', '10minutemail.com',
+  'tempmail.com', 'temp-mail.org', 'throwawaymail.com', 'trashmail.com', 'sharklasers.com'
+]);
+
+// Near-misses of the domains Indian businesses actually use. Each is a typo that silently loses
+// the reply, so it is worth naming them rather than guessing with edit distance.
+const DOMAIN_TYPOS = {
+  'gmial.com': 'gmail.com', 'gmai.com': 'gmail.com', 'gmail.co': 'gmail.com',
+  'gmail.con': 'gmail.com', 'gmail.cm': 'gmail.com', 'gmaill.com': 'gmail.com',
+  'gmail.comm': 'gmail.com', 'gnail.com': 'gmail.com', 'gamil.com': 'gmail.com',
+  'yahho.com': 'yahoo.com', 'yaho.com': 'yahoo.com', 'yahoo.co': 'yahoo.com',
+  'hotmial.com': 'hotmail.com', 'hotmai.com': 'hotmail.com',
+  'outlok.com': 'outlook.com', 'outlook.co': 'outlook.com',
+  'rediffmail.co': 'rediffmail.com', 'rediff.co': 'rediff.com'
+};
+
+const PLACEHOLDER_LOCALS = new Set([
+  'test', 'testing', 'test123', 'asdf', 'asdfgh', 'qwerty', 'abc', 'abcd', 'xyz',
+  'aaa', 'sample', 'demo', 'dummy', 'nobody', 'noemail', 'none', 'na', 'xxx'
+]);
+
+function validateEmailAddress(raw) {
+  const email = String(raw || '').trim().toLowerCase();
+  if (!email) return 'Please enter your email address';
+
+  // Structure. One @, something before it, and a dotted domain whose TLD is alphabetic — which is
+  // what rules out 123@123.123 and abc@gmail.
+  if (!/^[^\s@]+@[^\s@.]+(\.[^\s@.]+)*\.[a-z]{2,}$/.test(email)) {
+    return 'Please enter a valid email address';
+  }
+
+  const [local, domain] = email.split('@');
+
+  if (DOMAIN_TYPOS[domain]) return `Did you mean @${DOMAIN_TYPOS[domain]}?`;
+  if (DISPOSABLE_OR_FAKE_DOMAINS.has(domain)) return 'Please enter a real email address we can reply to';
+  if (PLACEHOLDER_LOCALS.has(local)) return 'Please enter a real email address we can reply to';
+
+  // a@a.com, q@q.qq — a single character either side is never a working business address.
+  if (local.length < 2 || domain.split('.')[0].length < 2) {
+    return 'Please enter a real email address we can reply to';
+  }
+  // aaaa@bbbb.com — one repeated character is someone mashing the keyboard.
+  if (/^(.)\1+$/.test(local)) return 'Please enter a real email address we can reply to';
+
+  return '';
+}
+
 export default function PublicInquiryPage() {
   const [form, setForm] = useState(EMPTY_FORM);
   const [requirements, setRequirements] = useState(FALLBACK_REQUIREMENTS);
@@ -179,22 +269,26 @@ export default function PublicInquiryPage() {
     const next = {};
     if (!form.name.trim() || form.name.trim().length < 2) next.name = 'Please enter your full name';
 
-    const digits = form.mobile.replace(/\D/g, '').slice(-10);
+    const digits = toLocalMobile(form.mobile);
     if (!form.mobile.trim()) next.mobile = 'Please enter your mobile number';
-    else if (!/^[6-9]\d{9}$/.test(digits)) next.mobile = 'Please enter a valid 10-digit mobile number';
+    else if (digits.length !== 10) next.mobile = 'Mobile number must be exactly 10 digits';
+    // An Indian mobile always starts 6-9. Landlines and short codes reach nobody on WhatsApp and
+    // are the commonest "valid-looking" junk entry.
+    else if (!/^[6-9]/.test(digits)) next.mobile = 'A mobile number starts with 6, 7, 8 or 9';
 
     // Only checked when the customer has explicitly said it differs — a blank field with the
     // "same as mobile" box ticked is the normal case, not an omission.
     if (!form.whatsappSameAsMobile) {
-      const wa = form.whatsapp.replace(/\D/g, '').slice(-10);
+      const wa = toLocalMobile(form.whatsapp);
       if (!form.whatsapp.trim()) next.whatsapp = 'Enter the WhatsApp number, or tick "same as mobile"';
-      else if (!/^[6-9]\d{9}$/.test(wa)) next.whatsapp = 'Please enter a valid 10-digit WhatsApp number';
+      else if (wa.length !== 10) next.whatsapp = 'WhatsApp number must be exactly 10 digits';
+      else if (!/^[6-9]/.test(wa)) next.whatsapp = 'A mobile number starts with 6, 7, 8 or 9';
     }
 
     if (!form.companyName.trim()) next.companyName = 'Please enter your company name';
 
-    if (!form.email.trim()) next.email = 'Please enter your email address';
-    else if (!/^[^@\s]+@[^@\s.]+(\.[^@\s.]+)+$/.test(form.email.trim())) next.email = 'Please enter a valid email address';
+    const emailProblem = validateEmailAddress(form.email);
+    if (emailProblem) next.email = emailProblem;
 
     if (!form.address.trim()) next.address = 'Please enter your site address';
 
@@ -431,13 +525,15 @@ export default function PublicInquiryPage() {
                 <span className="inline-flex items-center px-3 rounded-xl bg-slate-100 border border-slate-200 text-[13px] font-bold text-slate-500 shrink-0">
                   +91
                 </span>
-                {/* inputMode numeric brings up the digit keypad on a phone without rejecting a
-                    pasted "+91 98765 43210" the way type=number would. */}
+                {/* The +91 is already shown to the left, so this box takes the 10-digit number
+                    ONLY. Anything else is stripped as it is typed: a pasted "+91 98765 43210" or
+                    "098765 43210" is reduced to its last 10 digits rather than rejected, which is
+                    what people actually paste out of a contacts app. */}
                 <input
                   type="tel" inputMode="numeric" autoComplete="tel" className="jc-input"
                   value={form.mobile}
-                  onChange={e => setField('mobile', e.target.value.replace(/[^\d\s+-]/g, ''))}
-                  placeholder="98765 43210" maxLength={17}
+                  onChange={e => setField('mobile', toLocalMobile(e.target.value))}
+                  placeholder="98765 43210" maxLength={10}
                 />
               </div>
             </Field>
@@ -540,8 +636,8 @@ export default function PublicInquiryPage() {
                   </span>
                   <input
                     type="tel" inputMode="numeric" className="jc-input" value={contact.mobile}
-                    onChange={e => setContactField(index, 'mobile', e.target.value.replace(/[^\d\s+-]/g, ''))}
-                    placeholder="Mobile number" maxLength={17}
+                    onChange={e => setContactField(index, 'mobile', toLocalMobile(e.target.value))}
+                    placeholder="Mobile number" maxLength={10}
                     aria-label={`Contact ${index + 2} mobile`}
                   />
                 </div>
@@ -551,8 +647,8 @@ export default function PublicInquiryPage() {
                   </span>
                   <input
                     type="tel" inputMode="numeric" className="jc-input" value={contact.whatsapp}
-                    onChange={e => setContactField(index, 'whatsapp', e.target.value.replace(/[^\d\s+-]/g, ''))}
-                    placeholder="WhatsApp (if different)" maxLength={17}
+                    onChange={e => setContactField(index, 'whatsapp', toLocalMobile(e.target.value))}
+                    placeholder="WhatsApp (if different)" maxLength={10}
                     aria-label={`Contact ${index + 2} WhatsApp number`}
                   />
                 </div>

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { Wifi, WifiOff, RefreshCw, User, LayoutDashboard, Briefcase, HelpCircle, PhoneCall, Bell, CheckCircle2, AlertCircle, Clock, X, Info } from 'lucide-react';
 import { formatDateDDMMYYYY, getLocalTimeStr } from '../utils/dateUtils';
@@ -13,6 +13,28 @@ export default function Navbar({ currentView, setCurrentView }) {
   const [notifications, setNotifications] = useState([]);
   const [showNotifications, setShowNotifications] = useState(false);
   const [hasUnread, setHasUnread] = useState(false);
+  const notifRef = useRef(null);
+
+  // Tap anywhere outside the bell + popover closes it. Listener is only bound while the popover is
+  // open, and uses pointerdown so a tap registers before the touch turns into a scroll or a click
+  // on whatever is underneath. Escape closes too, for the desktop side.
+  useEffect(() => {
+    if (!showNotifications) return;
+    const handlePointerDown = (e) => {
+      if (notifRef.current && !notifRef.current.contains(e.target)) {
+        setShowNotifications(false);
+      }
+    };
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') setShowNotifications(false);
+    };
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [showNotifications]);
 
   const fetchNotifications = useCallback(async () => {
     if (!user && !realUser) return;
@@ -313,7 +335,7 @@ export default function Navbar({ currentView, setCurrentView }) {
           </div>
 
           {/* Notification Bell right near profile */}
-          <div className="relative flex items-center">
+          <div ref={notifRef} className="relative flex items-center">
             <button
               type="button"
               onClick={() => {

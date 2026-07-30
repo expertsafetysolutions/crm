@@ -175,7 +175,11 @@ export function emptyLineItem(defaultGstRate = 18) {
     Rate: 0,
     GST_Rate: defaultGstRate,
     Discount_Pct: 0,
-    Discount_Amt: 0
+    Discount_Amt: 0,
+    // Free-text note typed per line and printed under the item on the PDF. Kept SEPARATE from
+    // Long_Description, which is catalogue copy auto-filled from the item master — editing that
+    // here would read as changing the product itself, and would be overwritten on re-pick.
+    Remarks: ''
   };
 }
 

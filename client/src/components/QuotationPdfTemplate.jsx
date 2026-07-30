@@ -542,6 +542,13 @@ const QuotationPdfTemplate = React.forwardRef(({
                         {l.Long_Description || l.Description}
                       </div>
                     )}
+                    {/* Hand-typed per-line note. Sits below the catalogue copy and is styled darker
+                        than it — it is a deliberate instruction to this customer, not boilerplate. */}
+                    {l.Remarks && (
+                      <div className="text-slate-700 text-[7.5px] leading-snug whitespace-pre-line mt-0.5">
+                        {l.Remarks}
+                      </div>
+                    )}
                   </td>
                   {(!isChallan || challanCfg.show_hsn !== false) && (
                     <td className={`${cell} text-center`}>{l.HSN_Code || '-'}</td>

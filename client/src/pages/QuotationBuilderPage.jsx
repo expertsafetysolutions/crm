@@ -2,13 +2,14 @@ import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   ArrowLeft, Plus, Trash2, Save, Send, FileText, Download, CheckCircle2,
-  AlertTriangle, History, Loader2, Copy, Building2, Search, Eye, X, Printer, MoreHorizontal,
-  Image as ImageIcon, Mail, MessageCircle, Paperclip, Trophy
+  AlertTriangle, History, Loader2, Copy, Building2, Eye, X, Printer, MoreHorizontal,
+  Image as ImageIcon, Mail, MessageCircle, Paperclip, Trophy, MessageSquarePlus
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { matchesQuery, filterByQuery } from '../utils/searchUtils';
+import { matchesQuery } from '../utils/searchUtils';
 import { useDocSettings } from '../context/DocSettingsContext';
 import QuotationPdfTemplate from '../components/QuotationPdfTemplate';
+import SmartSearchSelect from '../components/SmartSearchSelect';
 import GstinInput from '../components/GstinInput';
 import { downloadPdfFromElement, fetchAsBase64, safeFileName } from '../utils/pdfGenerator';
 import {
@@ -53,7 +54,6 @@ export default function QuotationBuilderPage() {
   const [quotation, setQuotation] = useState(null);
   const [history, setHistory] = useState([]);
   const [showHistory, setShowHistory] = useState(false);
-  const [customerSearch, setCustomerSearch] = useState('');
   const [showPreview, setShowPreview] = useState(false);
   const [showActions, setShowActions] = useState(false);
   // Inline customer editor, so a missing GSTIN can be fixed without leaving the quotation.
@@ -83,7 +83,11 @@ export default function QuotationBuilderPage() {
     followUpIntervalDays: '',
     autoExpiryDays: '',
     destinationStateCode: '',
+    // Additional discount is entered EITHER as a percentage OR as a rupee amount, never both:
+    // computeDocumentTotals lets pct win whenever it is > 0, so the unused one is always sent as 0.
+    discountMode: 'PCT',
     documentDiscountPct: 0,
+    documentDiscountAmt: 0,
     lineItems: [emptyLineItem()]
   });
   const [totals, setTotals] = useState(null);
@@ -162,7 +166,12 @@ export default function QuotationBuilderPage() {
           followUpIntervalDays: q.Follow_Up_Interval_Days,
           autoExpiryDays: q.Auto_Expiry_Days,
           destinationStateCode: q.Destination_State_Code || '',
+          // Only the pct is stored as entered — the amt is always the computed result. So a saved
+          // pct of 0 with a non-zero amt is what identifies a quotation discounted by rupee value.
+          discountMode: (!Number(q.Document_Level_Discount_Pct) && Number(q.Document_Level_Discount_Amt) > 0)
+            ? 'AMT' : 'PCT',
           documentDiscountPct: q.Document_Level_Discount_Pct || 0,
+          documentDiscountAmt: q.Document_Level_Discount_Amt || 0,
           lineItems: (q.Line_Items || []).length ? q.Line_Items : [emptyLineItem()]
         }));
         setTotals(q);
@@ -233,6 +242,18 @@ export default function QuotationBuilderPage() {
       || detectStateCode(selectedCustomer.Address || selectedCustomer.Billing_Address);
   }, [selectedCustomer]);
 
+  /**
+   * The additional-discount pair to send to the server, resolved from the active mode.
+   *
+   * Exactly one is ever non-zero. computeDocumentTotals treats a pct > 0 as authoritative and
+   * ignores the amt, so sending both would silently discard whichever the user actually typed.
+   */
+  const discountFields = useMemo(() => (
+    form.discountMode === 'AMT'
+      ? { documentDiscountPct: 0, documentDiscountAmt: Number(form.documentDiscountAmt) || 0 }
+      : { documentDiscountPct: Number(form.documentDiscountPct) || 0, documentDiscountAmt: 0 }
+  ), [form.discountMode, form.documentDiscountPct, form.documentDiscountAmt]);
+
   // ---- live server-side pricing (debounced) ----
   const priceNow = useCallback(async () => {
     const valid = form.lineItems.filter(l => l.Item_Name && Number(l.Qty) > 0);
@@ -244,14 +265,14 @@ export default function QuotationBuilderPage() {
         body: JSON.stringify({
           customerId: form.customerId,
           lineItems: valid,
-          documentDiscountPct: Number(form.documentDiscountPct) || 0,
+          ...discountFields,
           // The auto-resolved state wins; the manual picker only fills the gap when it is blank.
           destinationStateCode: resolvedStateCode || form.destinationStateCode
         })
       });
       if (res.ok) setTotals(await res.json());
     } catch (e) { /* keep last good totals */ }
-  }, [form.customerId, form.lineItems, form.documentDiscountPct, form.destinationStateCode, resolvedStateCode, authHeaders]);
+  }, [form.customerId, form.lineItems, discountFields, form.destinationStateCode, resolvedStateCode, authHeaders]);
 
   useEffect(() => {
     if (readOnly) return;
@@ -261,10 +282,14 @@ export default function QuotationBuilderPage() {
 
   // ---- line item helpers ----
   const updateLine = (idx, patch) => {
-    setForm(f => ({
-      ...f,
-      lineItems: f.lineItems.map((l, i) => (i === idx ? { ...l, ...patch } : l))
-    }));
+    setForm(f => {
+      // An index past the end means a just-created item is landing on a row that was appended in
+      // the same tick (see openItemCreate) — .map alone would drop the patch on the floor.
+      const base = idx < f.lineItems.length
+        ? f.lineItems
+        : [...f.lineItems, emptyLineItem(settings?.defaults?.default_gst_rate || 18)];
+      return { ...f, lineItems: base.map((l, i) => (i === idx ? { ...l, ...patch } : l)) };
+    });
   };
 
   /**
@@ -302,11 +327,18 @@ export default function QuotationBuilderPage() {
     });
   };
 
-  const pickItem = (idx, itemId) => applyItemToLine(idx, items.find(i => i.Item_ID === itemId));
-
-  /** Opens the item-create dialog for a specific line; `idx` is where the new item will land. */
+  /**
+   * Opens the item-create dialog for a specific line; `idx` is where the new item will land.
+   *
+   * The section-header button has no line of its own, so it passes no index: the new item then goes
+   * to the first empty row, or to a row one past the end when every row is filled — updateLine
+   * grows the array to meet it. Defaulting to the last row instead would overwrite a completed line.
+   */
   const openItemCreate = (idx) => setItemCreate({
-    idx,
+    idx: idx ?? (() => {
+      const empty = form.lineItems.findIndex(l => !l.Item_Name);
+      return empty !== -1 ? empty : form.lineItems.length;
+    })(),
     itemName: '',
     unit: 'Nos',
     standardRate: '',
@@ -334,8 +366,9 @@ export default function QuotationBuilderPage() {
 
       setItems(list => [...list, data]);
       // Apply the response object directly rather than re-resolving by id — `items` has not
-      // re-rendered yet, so a lookup would miss and blank the line.
-      if (idx < form.lineItems.length) applyItemToLine(idx, data);
+      // re-rendered yet, so a lookup would miss and blank the line. No length guard: when the
+      // header button appended a fresh row, `idx` legitimately points at it.
+      applyItemToLine(idx, data);
       setItemCreate(null);
       flash(`${data.Item_Name} added to the catalogue.`);
     } catch (e) {
@@ -365,7 +398,7 @@ export default function QuotationBuilderPage() {
     customerId: form.customerId,
     taskId: form.taskId || undefined,
     lineItems: form.lineItems.filter(l => l.Item_Name && Number(l.Qty) > 0),
-    documentDiscountPct: Number(form.documentDiscountPct) || 0,
+    ...discountFields,
     destinationStateCode: resolvedStateCode || form.destinationStateCode,
     subject: form.subject,
     notes: form.notes,
@@ -679,10 +712,6 @@ export default function QuotationBuilderPage() {
     Line_Items: (quotation.Line_Items || []).map(l => ({ ...l, Photo_URL: linePhoto(l) }))
   };
 
-  const filteredCustomers = customerSearch
-    ? customers.filter(c => matchesQuery(customerSearch, [c.Company_Name, c.Auth_Person, c.Contact, c.Address])).slice(0, 40)
-    : customers.slice(0, 40);
-
   // POST /api/items is gated on inventory.add, so hide the inline creator rather than let it 403.
   const canAddItem = isAdmin || Boolean(perms?.inventory?.add);
 
@@ -785,31 +814,39 @@ export default function QuotationBuilderPage() {
                   <div className="mt-1 font-semibold text-slate-800">{quotation.Customer_Name_Snapshot}</div>
                 </>
               ) : (
-                <>
-                  <div className="qt-field qt-has-icon mt-1">
-                    <Search className="qt-icon w-4 h-4" />
-                    <input value={customerSearch} onChange={e => setCustomerSearch(e.target.value)}
-                      placeholder=" " className="qt-input" />
-                    <label>Search customers</label>
-                  </div>
-                  {/* size>1 turns this into a list box, which the floating label would overlap —
-                      so the label only floats in the collapsed single-row state. */}
-                  <div className={`qt-field mt-3 ${customerSearch ? '' : 'qt-filled'}`}>
-                    <select value={form.customerId} onChange={e => setForm(f => ({ ...f, customerId: e.target.value }))}
-                      className="qt-select" size={customerSearch ? 6 : 1}>
-                      <option value="">— Select customer —</option>
-                      {filteredCustomers.map(c => (
-                        <option key={c.Customer_ID} value={c.Customer_ID}>
-                          {c.Company_Name}{c.GSTIN ? ` (${c.GSTIN})` : ' (No GSTIN)'}
-                        </option>
-                      ))}
-                    </select>
-                    {!customerSearch && <label>Customer</label>}
-                  </div>
-                  <button onClick={openCustomerCreate} className="qt-btn qt-btn-text text-xs py-1.5 mt-1">
-                    <Plus className="w-3.5 h-3.5" /> NEW CUSTOMER
+                /* One control, not two: searching IS selecting. The old layout had a search box
+                   that only filtered a separate <select> below it, so picking a customer took two
+                   interactions in two different places. SmartSearchSelect matches any token in any
+                   order and commits on tap. */
+                <div className="mt-1 flex items-start gap-2">
+                  <SmartSearchSelect
+                    className="flex-1 min-w-0"
+                    label="Customer"
+                    placeholder="Search name, mobile, city…"
+                    options={customers}
+                    value={selectedCustomer || null}
+                    onChange={c => setForm(f => ({ ...f, customerId: c?.Customer_ID || '' }))}
+                    getKey={c => c.Customer_ID}
+                    getLabel={c => c.Company_Name}
+                    getSubtitle={c => [
+                      c.GSTIN || c.Gst_No ? `GSTIN ${c.GSTIN || c.Gst_No}` : 'No GSTIN',
+                      c.Contact,
+                      c.Address
+                    ].filter(Boolean).join(' · ')}
+                    getSearchable={c => [c.Company_Name, c.Auth_Person, c.Contact, c.Email, c.Address, c.GSTIN || c.Gst_No]}
+                    emptyText="No customer matches that."
+                  />
+                  {/* Alone on its line, so it earns the full 48px target rather than a toolbar 32px. */}
+                  <button
+                    type="button"
+                    onClick={openCustomerCreate}
+                    title="Add a new customer"
+                    aria-label="Add a new customer"
+                    className="mt-[15px] w-12 h-12 shrink-0 rounded-xl border border-slate-300 flex items-center justify-center text-slate-600 hover:bg-slate-50 active:bg-slate-100 transition"
+                  >
+                    <Plus className="w-5 h-5" />
                   </button>
-                </>
+                </div>
               )}
 
               {selectedCustomer && !readOnly && (
@@ -917,9 +954,12 @@ export default function QuotationBuilderPage() {
         <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
           <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between">
             <span className="qt-section-label">Items</span>
-            {!readOnly && (
-              <button onClick={addLine} className="qt-btn qt-btn-outline text-xs py-2 px-3.5">
-                <Plus className="w-3.5 h-3.5" /> ADD ITEM
+            {/* Creating a catalogue entry belongs beside the product list; adding a ROW to this
+                quotation lives at the bottom of the rows, next to where the last one was filled. */}
+            {!readOnly && canAddItem && (
+              <button onClick={() => openItemCreate()}
+                className="qt-btn qt-btn-outline text-xs py-2 px-3.5">
+                <Plus className="w-3.5 h-3.5" /> NEW ITEM
               </button>
             )}
           </div>
@@ -941,18 +981,11 @@ export default function QuotationBuilderPage() {
                       {readOnly ? (
                         <div className="font-semibold text-sm">{line.Item_Name}</div>
                       ) : (
-                        <>
-                          <select value={line.Item_ID} onChange={e => pickItem(idx, e.target.value)}
-                            className="qt-select">
-                            <option value="">— Select item —</option>
-                            {items.map(i => <option key={i.Item_ID} value={i.Item_ID}>{i.Item_Name}</option>)}
-                          </select>
-                          {canAddItem && (
-                            <button onClick={() => openItemCreate(idx)} className="qt-btn qt-btn-text text-xs py-1 mt-0.5">
-                              <Plus className="w-3 h-3" /> NEW ITEM
-                            </button>
-                          )}
-                        </>
+                        <ItemPicker
+                          items={items}
+                          line={line}
+                          onPick={item => applyItemToLine(idx, item)}
+                        />
                       )}
                     </div>
                     {!readOnly && (
@@ -979,6 +1012,12 @@ export default function QuotationBuilderPage() {
                     <MobileNumField label="GST %" value={line.GST_Rate} disabled={readOnly}
                       onChange={v => updateLine(idx, { GST_Rate: v })} />
                   </div>
+
+                  <LineRemarks
+                    value={line.Remarks}
+                    readOnly={readOnly}
+                    onChange={v => updateLine(idx, { Remarks: v })}
+                  />
 
                   <div className="flex justify-between items-center pt-1.5 border-t border-slate-100">
                     <span className="text-[11px] font-bold uppercase text-slate-400">Line total</span>
@@ -1017,25 +1056,22 @@ export default function QuotationBuilderPage() {
                         {readOnly ? (
                           <div className="font-medium">{line.Item_Name}</div>
                         ) : (
-                          <>
-                            <select value={line.Item_ID} onChange={e => pickItem(idx, e.target.value)}
-                              className="qt-cell">
-                              <option value="">— Select item —</option>
-                              {items.map(i => <option key={i.Item_ID} value={i.Item_ID}>{i.Item_Name}</option>)}
-                            </select>
-                            {canAddItem && (
-                              <button onClick={() => openItemCreate(idx)}
-                                className="qt-btn qt-btn-text text-[10px] py-0.5 px-1 mt-0.5">
-                                <Plus className="w-3 h-3" /> NEW ITEM
-                              </button>
-                            )}
-                          </>
+                          <ItemPicker
+                            items={items}
+                            line={line}
+                            onPick={item => applyItemToLine(idx, item)}
+                          />
                         )}
                         {suggestion && !readOnly && (
                           <div className="text-[10px] text-indigo-600 mt-1">
                             Last quoted to this customer: {formatMoney(suggestion.rate)} on {formatDate(suggestion.quotedOn)}
                           </div>
                         )}
+                        <LineRemarks
+                          value={line.Remarks}
+                          readOnly={readOnly}
+                          onChange={v => updateLine(idx, { Remarks: v })}
+                        />
                       </td>
                       <td className="px-2 py-2">
                         <input type="number" min="0" step="any" value={line.Qty} disabled={readOnly}
@@ -1074,16 +1110,77 @@ export default function QuotationBuilderPage() {
             </table>
           </div>
 
+          {/* Adds the next line where the eye already is — directly under the last row, in both
+              layouts. Full-width, so it reads as "continue the list" rather than a toolbar action. */}
+          {!readOnly && (
+            <div className="border-t border-slate-100 p-3">
+              <button
+                onClick={addLine}
+                className="w-full min-h-[48px] rounded-xl border border-dashed border-slate-300 text-xs font-extrabold uppercase tracking-wide text-slate-600 flex items-center justify-center gap-2 hover:bg-slate-50 active:bg-slate-100 transition"
+              >
+                <Plus className="w-4 h-4" /> ADD ITEM
+              </button>
+            </div>
+          )}
+
           {/* Totals */}
           <div className="border-t border-slate-200 bg-slate-50 px-4 py-3">
             <div className="flex flex-col md:flex-row gap-4 justify-between">
               <div className="text-xs space-y-2 md:max-w-xs w-full">
                 {!readOnly && (
-                  <div className="qt-field">
-                    <input type="number" min="0" max="100" step="any" value={form.documentDiscountPct} placeholder=" "
-                      onChange={e => setForm(f => ({ ...f, documentDiscountPct: e.target.value }))}
-                      className="qt-input" />
-                    <label>Additional discount %</label>
+                  <div>
+                    <div className="qt-section-label mb-1.5">Additional discount</div>
+                    {/* Switching mode zeroes the other field rather than keeping it hidden-but-set:
+                        a stale 10% left behind an amount entry would win at the server and quietly
+                        override the rupee figure the user typed. */}
+                    <div className="flex gap-1 p-1 bg-slate-200/70 rounded-xl mb-2">
+                      {[['PCT', 'PERCENT %'], ['AMT', 'AMOUNT ₹']].map(([mode, text]) => (
+                        <button
+                          key={mode}
+                          type="button"
+                          onClick={() => setForm(f => ({
+                            ...f,
+                            discountMode: mode,
+                            documentDiscountPct: mode === 'PCT' ? f.documentDiscountPct : 0,
+                            documentDiscountAmt: mode === 'AMT' ? f.documentDiscountAmt : 0
+                          }))}
+                          className={`flex-1 min-h-[36px] rounded-lg text-[11px] font-extrabold tracking-wide transition ${
+                            form.discountMode === mode
+                              ? 'bg-white text-slate-900 shadow-sm'
+                              : 'text-slate-500 active:bg-white/50'
+                          }`}
+                        >
+                          {text}
+                        </button>
+                      ))}
+                    </div>
+                    {form.discountMode === 'AMT' ? (
+                      <div className="qt-field">
+                        <input type="number" inputMode="decimal" min="0" step="any" placeholder=" "
+                          value={form.documentDiscountAmt}
+                          onChange={e => setForm(f => ({ ...f, documentDiscountAmt: e.target.value }))}
+                          className="qt-input" />
+                        <label>Discount amount (₹)</label>
+                      </div>
+                    ) : (
+                      <div className="qt-field">
+                        <input type="number" inputMode="decimal" min="0" max="100" step="any" placeholder=" "
+                          value={form.documentDiscountPct}
+                          onChange={e => setForm(f => ({ ...f, documentDiscountPct: e.target.value }))}
+                          className="qt-input" />
+                        <label>Discount percent (%)</label>
+                      </div>
+                    )}
+                    {/* The server caps the deduction at the taxable value, so a too-large amount is
+                        silently reduced — say so instead of letting the total look wrong. */}
+                    {form.discountMode === 'AMT'
+                      && Number(form.documentDiscountAmt) > 0
+                      && Number(displayTotals?.Document_Level_Discount_Amt) > 0
+                      && Number(displayTotals.Document_Level_Discount_Amt) < Number(form.documentDiscountAmt) && (
+                      <div className="text-[11px] text-amber-700 mt-1">
+                        Capped at {formatMoney(displayTotals.Document_Level_Discount_Amt)} — a discount cannot exceed the item value.
+                      </div>
+                    )}
                   </div>
                 )}
                 {displayTotals?.approvalRequired && (
@@ -1593,6 +1690,84 @@ function SubjectCombo({ value, onChange, options, disabled }) {
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * Per-line remark, printed under the item on the PDF.
+ *
+ * Collapsed to a single small button until there is something to show — twenty always-open
+ * textareas would bury the numbers that matter (see the progressive-disclosure rule in CLAUDE.md).
+ * Once text exists it stays visible, because a note the customer will read must never be hidden
+ * behind a tap the user has to remember to make.
+ *
+ * Opens on click and autofocuses; blurring with an empty box collapses it again, so an accidental
+ * tap leaves no trace.
+ */
+function LineRemarks({ value, onChange, readOnly }) {
+  const [open, setOpen] = useState(false);
+  const text = String(value || '');
+
+  if (readOnly) {
+    return text
+      ? <div className="text-[11px] text-slate-600 mt-1 whitespace-pre-line">{text}</div>
+      : null;
+  }
+
+  if (!open && !text) {
+    return (
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="mt-1 inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-slate-400 hover:text-slate-700 transition"
+      >
+        <MessageSquarePlus className="w-3 h-3" /> Remark
+      </button>
+    );
+  }
+
+  return (
+    <textarea
+      value={text}
+      autoFocus={open && !text}
+      rows={2}
+      placeholder="Remark — prints under this item on the PDF"
+      onChange={e => onChange(e.target.value)}
+      onBlur={() => { if (!text.trim()) setOpen(false); }}
+      className="qt-cell mt-1 w-full text-[11px] leading-snug"
+      style={{ height: 'auto', minHeight: '44px' }}
+    />
+  );
+}
+
+/**
+ * Item picker for one quotation line.
+ *
+ * Matches the item name, category, HSN and any saved alias anywhere in the string and in any word
+ * order, so "6kg abc" finds "ABC Powder Type 6kg". Aliases matter most here: they are where the
+ * names staff actually say are recorded, which are rarely the catalogue name. Replaces a plain
+ * <select>, which on a several-hundred-item catalogue meant scrolling a native dropdown.
+ *
+ * The selected row is synthesised from the LINE, not looked up in `items`, so a line whose catalogue
+ * entry was later renamed or deactivated still shows the name the quotation was built with.
+ */
+function ItemPicker({ items, line, onPick }) {
+  const selected = line.Item_ID
+    ? { Item_ID: line.Item_ID, Item_Name: line.Item_Name, HSN_Code: line.HSN_Code, Unit: line.Unit }
+    : null;
+
+  return (
+    <SmartSearchSelect
+      options={items}
+      value={selected}
+      onChange={onPick}
+      placeholder="Search item name or HSN…"
+      getKey={i => i.Item_ID}
+      getLabel={i => i.Item_Name}
+      getSubtitle={i => [i.Category, i.HSN_Code ? `HSN ${i.HSN_Code}` : '', i.Unit].filter(Boolean).join(' · ')}
+      getSearchable={i => [i.Item_Name, i.Category, i.HSN_Code, ...(i.Aliases || [])]}
+      emptyText="No item matches that."
+    />
   );
 }
 

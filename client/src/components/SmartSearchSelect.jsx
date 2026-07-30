@@ -129,10 +129,12 @@ export default function SmartSearchSelect({
         </button>
       ) : (
         <div className="relative">
-          <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+          {/* Icon sits on the RIGHT so it never crowds the text the user is typing — on a narrow
+              phone a left icon eats the first characters of a long company name. */}
+          <Search className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
           <input
             type="text"
-            className="jc-input pl-9"
+            className="jc-input pr-9"
             value={query}
             placeholder={placeholder}
             disabled={disabled}

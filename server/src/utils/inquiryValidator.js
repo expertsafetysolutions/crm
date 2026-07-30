@@ -33,7 +33,12 @@ const LIMITS = {
   email: 254, // RFC 5321 maximum
   address: 500,
   gstin: 15,
-  otherRequirement: 1000
+  otherRequirement: 1000,
+  designation: 80,
+  // A company has purchase, stores, safety and accounts people who each own part of a job. Six
+  // extras is well past what anyone fills in at first contact, and it caps what one submission can
+  // write into the register.
+  extraContacts: 6
 };
 
 /**
@@ -122,6 +127,41 @@ function normalizeEmail(value) {
 }
 
 /**
+ * Validates the optional extra contact people.
+ *
+ * A company has purchase, stores, safety and accounts staff who each own part of a job, and the
+ * person filling this form is often not the one who signs off. Capturing them here saves the office
+ * a round of "who do I speak to about the invoice?".
+ *
+ * Rules are deliberately lax compared with the main contact: an extra person is a bonus, so a row
+ * with a name but no number is kept rather than rejected — refusing the whole submission over a
+ * half-filled optional block would be absurd. Only a row with NOTHING usable is dropped, and a
+ * malformed phone is discarded while the name survives.
+ *
+ * Returns a clean array; never throws and never produces field errors.
+ */
+function sanitizeExtraContacts(raw) {
+  if (!Array.isArray(raw)) return [];
+
+  return raw
+    .slice(0, LIMITS.extraContacts)
+    .map(entry => {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+      const contact = {
+        name: sanitizeText(entry.name, LIMITS.name),
+        designation: sanitizeText(entry.designation, LIMITS.designation),
+        mobile: normalizeMobile(entry.mobile),
+        whatsapp: normalizeMobile(entry.whatsapp),
+        email: normalizeEmail(entry.email)
+      };
+      // A row is only worth storing if it carries something the office can act on.
+      const usable = contact.name || contact.mobile || contact.whatsapp || contact.email;
+      return usable ? contact : null;
+    })
+    .filter(Boolean);
+}
+
+/**
  * Validates the whole submission.
  *
  * Returns `{ valid, errors, data }` rather than throwing: the form shows every problem at once,
@@ -137,9 +177,27 @@ function validateInquiry(body = {}) {
   if (!name) errors.name = 'Please enter your name';
   else if (name.length < 2) errors.name = 'Please enter your full name';
 
+  const designation = sanitizeText(body.designation, LIMITS.designation);
+
   const mobile = normalizeMobile(body.mobile);
   if (!String(body.mobile ?? '').trim()) errors.mobile = 'Please enter your mobile number';
   else if (!mobile) errors.mobile = 'Please enter a valid 10-digit Indian mobile number';
+
+  /*
+   * WhatsApp number.
+   *
+   * Optional, and when left blank it falls back to the mobile — which is the true case for most
+   * people, so the form defaults to "same as mobile" and this only diverges when the customer says
+   * so. A supplied-but-invalid number IS an error rather than a silent fallback: quietly messaging
+   * a different number than the one they typed is worse than telling them it is wrong.
+   */
+  const rawWhatsapp = String(body.whatsapp ?? '').trim();
+  let whatsapp = mobile;
+  if (rawWhatsapp) {
+    const parsed = normalizeMobile(rawWhatsapp);
+    if (!parsed) errors.whatsapp = 'Please enter a valid 10-digit WhatsApp number, or leave it blank';
+    else whatsapp = parsed;
+  }
 
   const companyName = sanitizeText(body.companyName, LIMITS.companyName);
   if (!companyName) errors.companyName = 'Please enter your company name';
@@ -180,12 +238,17 @@ function validateInquiry(body = {}) {
     errors.otherRequirement = 'Please describe your requirement';
   }
 
+  const extraContacts = sanitizeExtraContacts(body.extraContacts);
+
   return {
     valid: Object.keys(errors).length === 0,
     errors,
     data: {
       name,
+      designation,
       mobile,
+      whatsapp,
+      extraContacts,
       companyName,
       email,
       gstin,
@@ -222,6 +285,7 @@ module.exports = {
   sanitizeText,
   normalizeMobile,
   normalizeEmail,
+  sanitizeExtraContacts,
   validateInquiry,
   labelForRequirement,
   summarizeRequirements

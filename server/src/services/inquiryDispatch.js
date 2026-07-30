@@ -109,16 +109,39 @@ function buildAlertHtml({ inquiryNo, data, customer, task, isReturning, quotatio
       <div style="margin-bottom:14px">${statusBadge}</div>
 
       <table style="width:100%;border-collapse:collapse;border:1px solid #e2e8f0;border-radius:10px;overflow:hidden">
-        ${row('Name', data.name)}
         ${row('Company', data.companyName)}
-        ${row('Mobile', `+91 ${data.mobile}`)}
-        ${row('Email', data.email)}
         ${row('GST No', data.gstin || '— not provided —')}
         ${row('Site Address', data.address)}
+        ${row('Name', data.name)}
+        ${row('Designation', data.designation)}
+        ${row('Mobile', `+91 ${data.mobile}`)}
+        ${/* Only shown when it differs — an identical second number is noise on a lead the
+             salesperson is skim-reading before dialling. */ ''}
+        ${data.whatsapp && data.whatsapp !== data.mobile ? row('WhatsApp', `+91 ${data.whatsapp}`) : ''}
+        ${row('Email', data.email)}
         ${row('Customer ID', customer.Customer_ID)}
         ${row('Lead / Task ID', task.Task_ID)}
         ${quotation ? row('Draft Quotation', `${quotation.Quote_No_Display} (unpriced — rates to be filled)`) : ''}
       </table>
+
+      ${(data.extraContacts || []).length ? `
+      <div style="margin-top:16px">
+        <div style="color:#64748b;font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">
+          Other contacts at this company
+        </div>
+        ${data.extraContacts.map(c => `
+          <div style="border:1px solid #e2e8f0;border-radius:10px;padding:10px 12px;margin-bottom:8px;background:#f8fafc">
+            <div style="font-size:13px;font-weight:800;color:#0f172a">
+              ${escapeHtml(c.name || 'Unnamed')}${c.designation ? `<span style="color:#64748b;font-weight:600;font-size:11.5px"> · ${escapeHtml(c.designation)}</span>` : ''}
+            </div>
+            <div style="font-size:12px;color:#334155;font-weight:600;margin-top:4px">
+              ${c.mobile ? `<a href="tel:+91${escapeHtml(c.mobile)}" style="color:#9a3412;text-decoration:none">📞 +91 ${escapeHtml(c.mobile)}</a>` : ''}
+              ${c.whatsapp && c.whatsapp !== c.mobile ? `<a href="https://wa.me/91${escapeHtml(c.whatsapp)}" style="color:#16a34a;text-decoration:none;margin-left:10px">💬 +91 ${escapeHtml(c.whatsapp)}</a>` : ''}
+              ${c.email ? `<a href="mailto:${escapeHtml(c.email)}" style="color:#0284c7;text-decoration:none;margin-left:10px">✉️ ${escapeHtml(c.email)}</a>` : ''}
+            </div>
+          </div>
+        `).join('')}
+      </div>` : ''}
 
       <div style="margin-top:18px">
         <div style="color:#64748b;font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Requirements</div>
@@ -162,12 +185,21 @@ function buildAlertText({ inquiryNo, data, customer, task, isReturning, quotatio
     `${formatIstTimestamp(submittedAt)} IST`,
     isReturning ? 'EXISTING CUSTOMER — added to their profile' : 'NEW CUSTOMER — profile created',
     '',
-    `Name:         ${data.name}`,
     `Company:      ${data.companyName}`,
-    `Mobile:       +91 ${data.mobile}`,
-    `Email:        ${data.email}`,
     `GST No:       ${data.gstin || '(not provided)'}`,
     `Site Address: ${data.address}`,
+    '',
+    `Name:         ${data.name}${data.designation ? ` (${data.designation})` : ''}`,
+    `Mobile:       +91 ${data.mobile}`,
+    ...(data.whatsapp && data.whatsapp !== data.mobile ? [`WhatsApp:     +91 ${data.whatsapp}`] : []),
+    `Email:        ${data.email}`,
+    ...((data.extraContacts || []).length
+      ? ['', 'OTHER CONTACTS:', ...data.extraContacts.map(c =>
+          `  ${c.name || 'Unnamed'}${c.designation ? ` (${c.designation})` : ''}`
+          + `${c.mobile ? ` · +91 ${c.mobile}` : ''}`
+          + `${c.whatsapp && c.whatsapp !== c.mobile ? ` · WA +91 ${c.whatsapp}` : ''}`
+          + `${c.email ? ` · ${c.email}` : ''}`)]
+      : []),
     '',
     `Requirements: ${inquiryValidator.summarizeRequirements(data)}`,
     '',
@@ -274,13 +306,28 @@ function buildAcknowledgementHtml({ inquiryNo, data }) {
         Details you submitted
       </div>
       <table style="width:100%;border-collapse:collapse;border-top:1px solid #e2e8f0">
-        ${row('Name', data.name)}
-        ${row('Mobile', `+91 ${data.mobile}`)}
-        ${row('Email', data.email)}
         ${row('Company', data.companyName)}
         ${row('GST No', data.gstin)}
         ${row('Site Address', data.address)}
+        ${row('Name', data.name)}
+        ${row('Designation', data.designation)}
+        ${row('Mobile', `+91 ${data.mobile}`)}
+        ${data.whatsapp && data.whatsapp !== data.mobile ? row('WhatsApp', `+91 ${data.whatsapp}`) : ''}
+        ${row('Email', data.email)}
       </table>
+
+      ${(data.extraContacts || []).length ? `
+      <div style="margin-top:14px">
+        <div style="font-size:11px;font-weight:800;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">
+          Other contacts you gave us
+        </div>
+        ${data.extraContacts.map(c => `
+          <div style="font-size:12.5px;color:${BRAND_INK};font-weight:700;padding:4px 0">
+            ${escapeHtml(c.name || 'Unnamed')}${c.designation ? `<span style="color:#64748b;font-weight:600"> · ${escapeHtml(c.designation)}</span>` : ''}
+            ${c.mobile ? `<span style="color:#64748b;font-weight:600"> · +91 ${escapeHtml(c.mobile)}</span>` : ''}
+          </div>
+        `).join('')}
+      </div>` : ''}
 
       <div style="margin-top:16px">
         <div style="font-size:11px;font-weight:800;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">

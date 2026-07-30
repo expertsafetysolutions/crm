@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  Phone, MessageCircle, Building2, FileText, User,
+  Phone, MessageCircle, Building2, FileText, User, Users, Plus, X,
   CheckCircle2, AlertCircle, Loader2, Send, ShieldCheck
 } from 'lucide-react';
 
@@ -50,16 +50,29 @@ const BRAND_RED_DARK = '#A3111A';
 const BRAND_INK = '#111827';
 
 const EMPTY_FORM = {
-  name: '',
-  mobile: '',
   companyName: '',
-  email: '',
   gstin: '',
   address: '',
+  name: '',
+  designation: '',
+  mobile: '',
+  whatsapp: '',
+  // Most people use one number for both, so the form assumes that and only asks for a second when
+  // this is unticked. It saves a field for nearly everyone without hiding the option.
+  whatsappSameAsMobile: true,
+  email: '',
+  extraContacts: [],
   requirements: [],
   otherRequirement: '',
   website: '' // honeypot — see the hidden field near the bottom of the form
 };
+
+const EMPTY_CONTACT = { name: '', designation: '', mobile: '', whatsapp: '', email: '' };
+
+// Mirrors LIMITS.extraContacts in server/src/utils/inquiryValidator.js, which silently truncates
+// beyond this. Hiding the add button at the same number means the customer never types a contact
+// that would be dropped without explanation.
+const MAX_EXTRA_CONTACTS = 6;
 
 export default function PublicInquiryPage() {
   const [form, setForm] = useState(EMPTY_FORM);
@@ -140,6 +153,14 @@ export default function PublicInquiryPage() {
     setErrors(prev => (prev[field] ? { ...prev, [field]: undefined } : prev));
   }, []);
 
+  /** Updates one field on one extra contact row, without disturbing the others. */
+  const setContactField = useCallback((index, field, value) => {
+    setForm(prev => ({
+      ...prev,
+      extraContacts: prev.extraContacts.map((c, i) => (i === index ? { ...c, [field]: value } : c))
+    }));
+  }, []);
+
   const toggleRequirement = useCallback((key) => {
     setForm(prev => ({
       ...prev,
@@ -161,6 +182,14 @@ export default function PublicInquiryPage() {
     const digits = form.mobile.replace(/\D/g, '').slice(-10);
     if (!form.mobile.trim()) next.mobile = 'Please enter your mobile number';
     else if (!/^[6-9]\d{9}$/.test(digits)) next.mobile = 'Please enter a valid 10-digit mobile number';
+
+    // Only checked when the customer has explicitly said it differs — a blank field with the
+    // "same as mobile" box ticked is the normal case, not an omission.
+    if (!form.whatsappSameAsMobile) {
+      const wa = form.whatsapp.replace(/\D/g, '').slice(-10);
+      if (!form.whatsapp.trim()) next.whatsapp = 'Enter the WhatsApp number, or tick "same as mobile"';
+      else if (!/^[6-9]\d{9}$/.test(wa)) next.whatsapp = 'Please enter a valid 10-digit WhatsApp number';
+    }
 
     if (!form.companyName.trim()) next.companyName = 'Please enter your company name';
 
@@ -218,7 +247,18 @@ export default function PublicInquiryPage() {
         body: JSON.stringify({
           ...form,
           mobile: form.mobile.replace(/\D/g, '').slice(-10),
+          // Blank when "same as mobile" is ticked; the server then falls back to the mobile, so
+          // the two sides cannot disagree about which number WhatsApp goes to.
+          whatsapp: form.whatsappSameAsMobile ? '' : form.whatsapp.replace(/\D/g, '').slice(-10),
           gstin: form.gstin.trim().toUpperCase(),
+          extraContacts: form.extraContacts
+            // A row the customer added but never filled is dropped here rather than sent as noise.
+            .filter(c => c.name.trim() || c.mobile.trim() || c.whatsapp.trim() || c.email.trim())
+            .map(c => ({
+              ...c,
+              mobile: c.mobile.replace(/\D/g, '').slice(-10),
+              whatsapp: c.whatsapp.replace(/\D/g, '').slice(-10)
+            })),
           renderedAt: renderedAtRef.current,
           captchaToken: token || ''
         })
@@ -245,7 +285,19 @@ export default function PublicInquiryPage() {
       setSubmittedSnapshot({
         ...form,
         mobile: form.mobile.replace(/\D/g, '').slice(-10),
+        // Mirrors the server's fallback, so the read-back shows the number that will actually be
+        // messaged rather than an empty field.
+        whatsapp: form.whatsappSameAsMobile
+          ? form.mobile.replace(/\D/g, '').slice(-10)
+          : form.whatsapp.replace(/\D/g, '').slice(-10),
         gstin: form.gstin.trim().toUpperCase(),
+        extraContacts: form.extraContacts
+          .filter(c => c.name.trim() || c.mobile.trim() || c.whatsapp.trim() || c.email.trim())
+          .map(c => ({
+            ...c,
+            mobile: c.mobile.replace(/\D/g, '').slice(-10),
+            whatsapp: c.whatsapp.replace(/\D/g, '').slice(-10)
+          })),
         requirementLabels: form.requirements.map(
           k => requirements.find(o => o.key === k)?.label || k
         )
@@ -328,40 +380,8 @@ export default function PublicInquiryPage() {
         )}
 
         <form onSubmit={handleSubmit} noValidate>
-          <Section title="Your details" icon={User}>
-            <Field id="inq-name" label="Your Name" required error={errors.name}>
-              <input
-                type="text" className="jc-input" value={form.name} autoComplete="name"
-                onChange={e => setField('name', e.target.value)}
-                placeholder="e.g. Ramesh Patel" maxLength={100}
-              />
-            </Field>
-
-            <Field id="inq-mobile" label="Mobile Number" required error={errors.mobile} hint="We will call or WhatsApp you on this number">
-              <div className="flex items-stretch gap-2">
-                <span className="inline-flex items-center px-3 rounded-xl bg-slate-100 border border-slate-200 text-[13px] font-bold text-slate-500 shrink-0">
-                  +91
-                </span>
-                {/* inputMode numeric brings up the digit keypad on a phone without rejecting a
-                    pasted "+91 98765 43210" the way type=number would. */}
-                <input
-                  type="tel" inputMode="numeric" autoComplete="tel" className="jc-input"
-                  value={form.mobile}
-                  onChange={e => setField('mobile', e.target.value.replace(/[^\d\s+-]/g, ''))}
-                  placeholder="98765 43210" maxLength={17}
-                />
-              </div>
-            </Field>
-
-            <Field id="inq-email" label="Email ID" required error={errors.email} hint="Your confirmation and quotation go here">
-              <input
-                type="email" className="jc-input" value={form.email} autoComplete="email"
-                onChange={e => setField('email', e.target.value)}
-                placeholder="you@company.com" maxLength={254}
-              />
-            </Field>
-          </Section>
-
+          {/* Company first: the customer thinks of themselves as the company, and starting with the
+              organisation matches how the office files the enquiry. */}
           <Section title="Company details" icon={Building2}>
             <Field id="inq-company" label="Company Name" required error={errors.companyName}>
               <input
@@ -387,6 +407,175 @@ export default function PublicInquiryPage() {
                 maxLength={500} style={{ minHeight: '76px' }}
               />
             </Field>
+          </Section>
+
+          <Section title="Your details" icon={User}>
+            <Field id="inq-name" label="Your Name" required error={errors.name}>
+              <input
+                type="text" className="jc-input" value={form.name} autoComplete="name"
+                onChange={e => setField('name', e.target.value)}
+                placeholder="e.g. Ramesh Patel" maxLength={100}
+              />
+            </Field>
+
+            <Field id="inq-designation" label="Designation" error={errors.designation} hint="Optional — helps us address you correctly">
+              <input
+                type="text" className="jc-input" value={form.designation} autoComplete="organization-title"
+                onChange={e => setField('designation', e.target.value)}
+                placeholder="e.g. Purchase Manager" maxLength={80}
+              />
+            </Field>
+
+            <Field id="inq-mobile" label="Mobile Number" required error={errors.mobile} hint="We will call you on this number">
+              <div className="flex items-stretch gap-2">
+                <span className="inline-flex items-center px-3 rounded-xl bg-slate-100 border border-slate-200 text-[13px] font-bold text-slate-500 shrink-0">
+                  +91
+                </span>
+                {/* inputMode numeric brings up the digit keypad on a phone without rejecting a
+                    pasted "+91 98765 43210" the way type=number would. */}
+                <input
+                  type="tel" inputMode="numeric" autoComplete="tel" className="jc-input"
+                  value={form.mobile}
+                  onChange={e => setField('mobile', e.target.value.replace(/[^\d\s+-]/g, ''))}
+                  placeholder="98765 43210" maxLength={17}
+                />
+              </div>
+            </Field>
+
+            {/* Defaulted ON, so the common case costs no typing and the second field never appears. */}
+            <label className="flex items-center gap-2.5 cursor-pointer select-none py-1">
+              <input
+                type="checkbox"
+                checked={form.whatsappSameAsMobile}
+                onChange={e => {
+                  setField('whatsappSameAsMobile', e.target.checked);
+                  // Clear any number typed before ticking, or a stale value would be submitted
+                  // invisibly once the field is hidden again.
+                  if (e.target.checked) setField('whatsapp', '');
+                }}
+                className="w-[18px] h-[18px] rounded shrink-0"
+                style={{ accentColor: BRAND_RED }}
+              />
+              <span className="text-[12.5px] font-bold text-slate-600">
+                WhatsApp number is the same
+              </span>
+            </label>
+
+            {!form.whatsappSameAsMobile && (
+              <div className="animate-fadeIn">
+                <Field id="inq-whatsapp" label="WhatsApp Number" error={errors.whatsapp} hint="We will send updates here">
+                  <div className="flex items-stretch gap-2">
+                    <span className="inline-flex items-center px-3 rounded-xl bg-slate-100 border border-slate-200 text-[13px] font-bold text-slate-500 shrink-0">
+                      +91
+                    </span>
+                    <input
+                      type="tel" inputMode="numeric" className="jc-input"
+                      value={form.whatsapp}
+                      onChange={e => setField('whatsapp', e.target.value.replace(/[^\d\s+-]/g, ''))}
+                      placeholder="98765 43210" maxLength={17}
+                    />
+                  </div>
+                </Field>
+              </div>
+            )}
+
+            <Field id="inq-email" label="Email ID" required error={errors.email} hint="Your confirmation and quotation go here">
+              <input
+                type="email" className="jc-input" value={form.email} autoComplete="email"
+                onChange={e => setField('email', e.target.value)}
+                placeholder="you@company.com" maxLength={254}
+              />
+            </Field>
+          </Section>
+
+          {/*
+            Other people at the company.
+
+            Collapsed to a single button until used, because most enquiries need none of it and an
+            empty repeated block on a phone reads as "more work to do". A company with separate
+            purchase, stores and safety staff can add each of them; six is the server's cap.
+          */}
+          <Section title="Other contact persons" icon={Users}>
+            {form.extraContacts.length === 0 && (
+              <p className="text-[12px] text-slate-400 font-medium leading-relaxed -mt-1">
+                Optional. Add purchase, stores, safety or accounts contacts if someone else handles
+                that side.
+              </p>
+            )}
+
+            {form.extraContacts.map((contact, index) => (
+              <div key={index} className="rounded-xl border border-slate-200 bg-slate-50/60 p-3 space-y-2.5 animate-fadeIn">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-extrabold uppercase tracking-wide text-slate-400">
+                    Contact {index + 2}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setForm(prev => ({
+                      ...prev,
+                      extraContacts: prev.extraContacts.filter((_, i) => i !== index)
+                    }))}
+                    aria-label={`Remove contact ${index + 2}`}
+                    className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-400 active:scale-95 transition"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+
+                <input
+                  type="text" className="jc-input" value={contact.name}
+                  onChange={e => setContactField(index, 'name', e.target.value)}
+                  placeholder="Name" maxLength={100}
+                  aria-label={`Contact ${index + 2} name`}
+                />
+                <input
+                  type="text" className="jc-input" value={contact.designation}
+                  onChange={e => setContactField(index, 'designation', e.target.value)}
+                  placeholder="Designation (e.g. Stores In-charge)" maxLength={80}
+                  aria-label={`Contact ${index + 2} designation`}
+                />
+                <div className="flex items-stretch gap-2">
+                  <span className="inline-flex items-center px-3 rounded-xl bg-white border border-slate-200 text-[13px] font-bold text-slate-500 shrink-0">
+                    +91
+                  </span>
+                  <input
+                    type="tel" inputMode="numeric" className="jc-input" value={contact.mobile}
+                    onChange={e => setContactField(index, 'mobile', e.target.value.replace(/[^\d\s+-]/g, ''))}
+                    placeholder="Mobile number" maxLength={17}
+                    aria-label={`Contact ${index + 2} mobile`}
+                  />
+                </div>
+                <div className="flex items-stretch gap-2">
+                  <span className="inline-flex items-center px-3 rounded-xl bg-white border border-slate-200 text-[13px] font-bold shrink-0" style={{ color: '#25D366' }}>
+                    <MessageCircle className="w-3.5 h-3.5" />
+                  </span>
+                  <input
+                    type="tel" inputMode="numeric" className="jc-input" value={contact.whatsapp}
+                    onChange={e => setContactField(index, 'whatsapp', e.target.value.replace(/[^\d\s+-]/g, ''))}
+                    placeholder="WhatsApp (if different)" maxLength={17}
+                    aria-label={`Contact ${index + 2} WhatsApp number`}
+                  />
+                </div>
+                <input
+                  type="email" className="jc-input" value={contact.email}
+                  onChange={e => setContactField(index, 'email', e.target.value)}
+                  placeholder="Email (optional)" maxLength={254}
+                  aria-label={`Contact ${index + 2} email`}
+                />
+              </div>
+            ))}
+
+            {form.extraContacts.length < MAX_EXTRA_CONTACTS && (
+              <button
+                type="button"
+                onClick={() => setForm(prev => ({ ...prev, extraContacts: [...prev.extraContacts, { ...EMPTY_CONTACT }] }))}
+                className="w-full flex items-center justify-center gap-2 rounded-xl border-2 border-dashed font-extrabold text-[12.5px] active:scale-[0.99] transition"
+                style={{ minHeight: '48px', borderColor: BRAND_RED, color: BRAND_RED }}
+              >
+                <Plus className="w-4 h-4" />
+                Add another contact person
+              </button>
+            )}
           </Section>
 
           <Section title="What do you need?" icon={FileText} error={errors.requirements}>
@@ -582,14 +771,22 @@ function SuccessPanel({ result, submitted, requirementLabels, onReset }) {
     `Hello Expert Safety Solutions, I have submitted an enquiry${result.inquiryNo ? ` (${result.inquiryNo})` : ''}. My name is ${submitted?.name || ''}.`
   );
 
+  // Ordered to match the form the customer just filled: company, then themselves.
   const rows = [
-    ['Name', submitted?.name],
-    ['Mobile', submitted?.mobile ? `+91 ${submitted.mobile}` : ''],
-    ['Email', submitted?.email],
     ['Company', submitted?.companyName],
     ['GST No', submitted?.gstin],
-    ['Site Address', submitted?.address]
+    ['Site Address', submitted?.address],
+    ['Name', submitted?.name],
+    ['Designation', submitted?.designation],
+    ['Mobile', submitted?.mobile ? `+91 ${submitted.mobile}` : ''],
+    // Only when it genuinely differs — repeating the same number reads as a mistake on our side.
+    ['WhatsApp', submitted?.whatsapp && submitted.whatsapp !== submitted.mobile ? `+91 ${submitted.whatsapp}` : ''],
+    ['Email', submitted?.email]
   ].filter(([, v]) => v);
+
+  const extras = (submitted?.extraContacts || []).filter(
+    c => c.name || c.mobile || c.whatsapp || c.email
+  );
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -651,6 +848,23 @@ function SuccessPanel({ result, submitted, requirementLabels, onReset }) {
                   </div>
                 ))}
               </dl>
+
+              {extras.length > 0 && (
+                <div className="mt-4">
+                  <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wide mb-2">
+                    Other contacts
+                  </div>
+                  <div className="space-y-1.5">
+                    {extras.map((c, i) => (
+                      <div key={i} className="text-[12.5px] font-bold" style={{ color: BRAND_INK }}>
+                        {c.name || 'Unnamed'}
+                        {c.designation && <span className="text-slate-400 font-semibold"> · {c.designation}</span>}
+                        {c.mobile && <span className="text-slate-500 font-semibold"> · +91 {c.mobile}</span>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               {requirementLabels?.length > 0 && (
                 <div className="mt-4">

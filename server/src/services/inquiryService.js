@@ -86,6 +86,35 @@ async function findCustomerByMobile(mobile) {
  * Contact is stored as `+91 XXXXXXXXXX` to match POST /api/customers, so the register stays
  * uniform and existing phone/WhatsApp links keep working. Everything else is already sanitised.
  */
+/**
+ * Builds the Coordinators array in the shape the CRM's customer editor already reads and writes:
+ * `{ name, designation, phone, contactNumber, email }`. `whatsapp` is added alongside — additive,
+ * so existing rows without it keep working and the editor simply shows a blank when it grows a
+ * field for it.
+ *
+ * `phone` and `contactNumber` carry the same value because the editor writes both and different
+ * screens read one or the other; setting only one would make a number vanish from half the UI.
+ */
+function buildCoordinators(data) {
+  const toEntry = (c, role) => ({
+    name: c.name || '',
+    designation: c.designation || '',
+    phone: c.mobile ? `+91 ${c.mobile}` : '',
+    contactNumber: c.mobile || '',
+    whatsapp: c.whatsapp ? `+91 ${c.whatsapp}` : '',
+    email: c.email || '',
+    role
+  });
+
+  return [
+    toEntry(
+      { name: data.name, designation: data.designation, mobile: data.mobile, whatsapp: data.whatsapp, email: data.email },
+      'Company Coordinator'
+    ),
+    ...(data.extraContacts || []).map(c => toEntry(c, c.designation || 'Contact Person'))
+  ];
+}
+
 async function createCustomerFromInquiry(data) {
   const gstUtils = require('../utils/gstUtils');
   const gstin = data.gstin || '';
@@ -94,7 +123,9 @@ async function createCustomerFromInquiry(data) {
     Customer_ID: `CUST${Date.now().toString().slice(-4)}${Math.floor(Math.random() * 10)}`,
     Company_Name: data.companyName,
     Auth_Person: data.name,
+    Auth_Person_Designation: data.designation || '',
     Contact: `+91 ${data.mobile}`,
+    Whatsapp_Number: data.whatsapp ? `+91 ${data.whatsapp}` : '',
     Email: data.email,
     Address: data.address,
     Billing_Address: data.address,
@@ -102,12 +133,7 @@ async function createCustomerFromInquiry(data) {
     State_Code: gstin ? gstUtils.extractStateCode(gstin) : '',
     Customer_Type: gstin ? 'B2B' : 'B2C',
     Location_Link: '',
-    Coordinators: JSON.stringify([{
-      name: data.name,
-      phone: `+91 ${data.mobile}`,
-      email: data.email,
-      role: 'Company Coordinator'
-    }]),
+    Coordinators: JSON.stringify(buildCoordinators(data)),
     Source: SOURCE,
     Tags: [ONLINE_INQUIRY_TAG],
     Created_At: istToday()
@@ -115,6 +141,48 @@ async function createCustomerFromInquiry(data) {
 
   await sheetsService.insertRow('Customer_Master', customer);
   return customer;
+}
+
+/**
+ * Adds any NEW contact people from this enquiry onto an existing customer's Coordinators.
+ *
+ * This is the one place a public submission is allowed to change an existing customer row, and it
+ * is strictly additive by design (see the header note on why public input never overwrites a
+ * profile): a person whose number is already on file is skipped, so a returning customer cannot
+ * have their stored contacts renamed or replaced by whoever filled the form. Worst case a genuinely
+ * new colleague is appended, which is exactly what the office wants from a company with several
+ * departments.
+ *
+ * Best-effort: a failure here must not lose the lead, so it is caught by the caller.
+ */
+async function mergeCoordinatorsIntoCustomer(customer, data) {
+  let existing = customer.Coordinators;
+  if (typeof existing === 'string') {
+    try { existing = JSON.parse(existing); } catch { existing = []; }
+  }
+  if (!Array.isArray(existing)) existing = [];
+
+  const known = new Set(
+    existing.flatMap(c => [
+      inquiryValidator.normalizeMobile(c?.phone || c?.contactNumber),
+      inquiryValidator.normalizeMobile(c?.whatsapp)
+    ]).filter(Boolean)
+  );
+
+  const additions = buildCoordinators(data).filter(c => {
+    const digits = inquiryValidator.normalizeMobile(c.contactNumber);
+    // Without a number there is nothing to dedupe on, and appending every anonymous row would grow
+    // the list without bound across repeat enquiries.
+    if (!digits) return false;
+    return !known.has(digits);
+  });
+
+  if (!additions.length) return { added: 0 };
+
+  await sheetsService.updateRow('Customer_Master', 'Customer_ID', customer.Customer_ID, {
+    Coordinators: JSON.stringify([...existing, ...additions])
+  });
+  return { added: additions.length };
 }
 
 /**
@@ -170,8 +238,13 @@ async function createLeadTask({ customer, data, inquiryNo, tagId }) {
     Inquiry_Requirements: data.requirements,
     Inquiry_Other_Text: data.otherRequirement,
     Contact_Person: data.name,
+    Contact_Designation: data.designation || '',
     Contact_Phone: `+91 ${data.mobile}`,
+    Contact_Whatsapp: data.whatsapp ? `+91 ${data.whatsapp}` : '',
     Contact_Email: data.email,
+    // Denormalised onto the task so the lead view can show every department's contact without a
+    // second lookup into Customer_Master — the salesperson calling back needs them in one place.
+    Extra_Contacts: data.extraContacts || [],
     Site_Address: data.address,
     Created_By: 'PUBLIC_INQUIRY',
     Created_At: istToday(),
@@ -241,6 +314,17 @@ async function ingestInquiry(data, meta = {}) {
   // register row would let anyone who knows a mobile number edit that customer's details.
   const customer = existingCustomer || await createCustomerFromInquiry(data);
 
+  // The single exception, and it is additive only: a NEW colleague named on this enquiry is
+  // appended to the contact list. Nothing already on file is renamed or removed. Best-effort —
+  // a contact list is worth less than the lead itself.
+  if (existingCustomer) {
+    try {
+      await mergeCoordinatorsIntoCustomer(existingCustomer, data);
+    } catch (e) {
+      console.error('[inquiryService] Coordinator merge failed:', e.message);
+    }
+  }
+
   const tagId = await ensureOnlineInquiryTag();
   const task = await createLeadTask({ customer, data, inquiryNo, tagId });
 
@@ -250,7 +334,15 @@ async function ingestInquiry(data, meta = {}) {
     tag: ONLINE_INQUIRY_TAG,
     summary: [
       `${inquiryNo} received via the website.`,
-      `Contact: ${data.name} · +91 ${data.mobile} · ${data.email}`,
+      `Contact: ${data.name}${data.designation ? ` (${data.designation})` : ''} · +91 ${data.mobile}`
+        + `${data.whatsapp && data.whatsapp !== data.mobile ? ` · WhatsApp +91 ${data.whatsapp}` : ''}`
+        + ` · ${data.email}`,
+      ...(data.extraContacts || []).map(c =>
+        `Also: ${c.name || 'Unnamed'}${c.designation ? ` (${c.designation})` : ''}`
+        + `${c.mobile ? ` · +91 ${c.mobile}` : ''}`
+        + `${c.whatsapp && c.whatsapp !== c.mobile ? ` · WhatsApp +91 ${c.whatsapp}` : ''}`
+        + `${c.email ? ` · ${c.email}` : ''}`
+      ),
       `Site: ${data.address}`,
       `Requirements: ${inquiryValidator.summarizeRequirements(data)}`,
       isReturning ? 'Existing customer — added to their profile.' : 'New customer profile created.'
@@ -325,6 +417,8 @@ module.exports = {
   istToday,
   nextInquiryNo,
   findCustomerByMobile,
+  buildCoordinators,
+  mergeCoordinatorsIntoCustomer,
   createCustomerFromInquiry,
   createLeadTask,
   createDraftQuotation,

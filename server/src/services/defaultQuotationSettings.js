@@ -98,12 +98,13 @@ const DEFAULT_QUOTATION_SETTINGS = {
     challan_email: false,
     certificate_email: false,
     pod_confirmation: false,
-    // OFF by default for the same reason as the three above, and more sharply: this one answers a
-    // stranger from the public internet. Deploying the inquiry portal must not, on its own, start
-    // auto-replying to the public — the office switches it on once the wording has been read.
+    // ON: the customer is told on screen that a copy has been emailed to them, so suppressing it
+    // would make the confirmation page a lie. It is also the customer's only durable record of the
+    // reference number and of exactly what we received — the one thing that lets them spot a
+    // mistyped mobile number before our follow-up call fails to arrive.
     // The INTERNAL alert is unaffected by this flag: it goes to the office's own inboxes and is
     // sent directly by inquiryDispatch, not through the per-template switch.
-    inquiry_acknowledgement: false,
+    inquiry_acknowledgement: true,
     // Staff press this one deliberately, so there is nothing to protect against.
     company_profile: true
   },
@@ -258,9 +259,13 @@ const DEFAULT_QUOTATION_SETTINGS = {
     // Auto-reply to someone who filled in the public /inquiry form. {inquiry_no} and
     // {requirement_summary} are unique to this template — there is no document behind it yet, so
     // none of the money or document-number variables resolve.
+    // The HTML the customer actually sees is built in inquiryDispatch.buildAcknowledgementHtml —
+    // a settings template is one plain string and cannot carry a details table or tappable
+    // buttons. This body remains the PLAINTEXT alternative (and the WhatsApp text), so it repeats
+    // the same facts in full rather than pointing at an HTML part a text-only client will not show.
     inquiry_acknowledgement: {
       subject: 'Thank you for your enquiry — {inquiry_no}',
-      body: 'Dear {customer_name},\n\nThank you for contacting Expert Safety Solutions. We have received your enquiry and our team will get back to you shortly.\n\nYour reference number is {inquiry_no}.\n\nWhat you asked for:\n{requirement_summary}\n\nSite address on record:\n{site_address}\n\nIf anything above is wrong, simply reply to this email and we will correct it.\n\nRegards,\nExpert Safety Solutions',
+      body: 'Dear {customer_name},\n\nThank you for contacting Expert Safety Solutions. We have received your enquiry and our team will contact you shortly.\n\nYOUR REFERENCE NUMBER: {inquiry_no}\nPlease quote this when you contact us.\n\n--- DETAILS YOU SUBMITTED ---\nName:         {customer_name}\nMobile:       {customer_phone}\nEmail:        {customer_email}\nCompany:      {company_name}\nGST No:       {customer_gstin}\nSite Address: {site_address}\n\nRequirements: {requirement_summary}\n\nIf any detail above is wrong, simply reply to this email or message us on WhatsApp and we will correct it.\n\nNeed to reach us now?\nCall / WhatsApp: +91 84606 99569\n\nRegards,\nExpert Safety Solutions\nFire Extinguishers | Hydrant Systems | Fire NOC | Safety Audits',
       whatsapp_template_name: '',
       whatsapp_template_status: 'not_submitted'
     },

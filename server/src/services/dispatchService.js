@@ -151,7 +151,7 @@ function buildVars(doc, extra = {}) {
  * with named variables mapped to the positional body params Meta expects, in the fixed order
  * customer_name, quote_no, amount, view_link. Templates must be authored in that parameter order.
  */
-async function dispatchTemplated({ doc, templateKey, recipientEmail, recipientPhone, attachments, settings, channel, extraVars, actor }) {
+async function dispatchTemplated({ doc, templateKey, recipientEmail, recipientPhone, attachments, settings, channel, extraVars, actor, htmlOverride }) {
   const cfg = settings || await getSettings();
   const template = cfg.draft_templates?.[templateKey] || {};
   const vars = buildVars(doc, extraVars);
@@ -181,10 +181,21 @@ async function dispatchTemplated({ doc, templateKey, recipientEmail, recipientPh
       to: recipientEmail,
       subject: substitute(template.subject, vars),
       body,
-      // Preserve template line breaks in HTML-rendering clients.
-      html: `<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.6;white-space:pre-wrap">${body
-        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-        .replace(/(https?:\/\/[^\s]+)/g, '<a href="$1">$1</a>')}</div>`,
+      /*
+       * `htmlOverride` lets a caller supply a designed layout instead of the auto-generated one.
+       *
+       * The default below can only ever produce the template's plain text in a <pre>-like wrapper,
+       * which is right for a quotation covering note but cannot express a table of the customer's
+       * own details or tappable Call/WhatsApp buttons. The caller owns escaping when it overrides —
+       * inquiryDispatch escapes every interpolation through escapeHtml.
+       *
+       * `body` is still sent as the plaintext alternative either way, so a client that refuses HTML
+       * always has something readable.
+       */
+      html: htmlOverride
+        || `<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.6;white-space:pre-wrap">${body
+          .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+          .replace(/(https?:\/\/[^\s]+)/g, '<a href="$1">$1</a>')}</div>`,
       attachments
     }));
   }

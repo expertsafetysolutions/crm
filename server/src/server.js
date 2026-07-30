@@ -64,6 +64,37 @@ app.get('/api/media/:id', async (req, res) => {
   }
 });
 
+/**
+ * The date this document is actually good until — the LAST of its per-item next-due dates, falling
+ * back to the stored header value when a document has no dated items (Training Certificates, and
+ * anything issued before per-item dates existed).
+ *
+ * The header Valid_Until and the per-row "Next Date of Testing" are stored independently and could
+ * disagree: an HP Testing certificate for a CO2 cylinder printed a 2031 next-test date in its table
+ * while its header — computed from one flat 3-year duration — said 2029. The QR page read only the
+ * header, so scanning a perfectly valid certificate showed a shorter validity than the PDF in the
+ * customer's hand, and would eventually have declared it expired two years early.
+ *
+ * Resolved here, at read time, rather than by migrating rows: the printed PDF is the artefact the
+ * customer holds and cannot be reissued, so verification must agree with the paper. The item dates
+ * are the trustworthy side — they are what the technician set per cylinder.
+ */
+function effectiveValidUntil(c) {
+  const stored = c.Valid_Until || c.validUntil || '';
+  const items = c.itemsList || c.Items_List || [];
+  if (!Array.isArray(items) || !items.length) return stored;
+
+  const dates = items
+    .map(it => it && (it.nextDate || it.Next_Date || it.nextDueDate))
+    .filter(Boolean)
+    .filter(d => !isNaN(new Date(d).getTime()));
+  if (!dates.length) return stored;
+
+  const latest = dates.reduce((max, d) => (new Date(d) > new Date(max) ? d : max), dates[0]);
+  if (!stored || isNaN(new Date(stored).getTime())) return latest;
+  return new Date(latest) > new Date(stored) ? latest : stored;
+}
+
 // Public Certificate Verification API (No Auth Required for QR Code Verification)
 app.get('/api/verify-certificate/:guid', publicVerifyLimiter, async (req, res) => {
   try {
@@ -155,7 +186,7 @@ app.get('/api/verify-certificate/:guid', publicVerifyLimiter, async (req, res) =
         client: c.Customer_Name || c.customerName,
         address: c.Address || c.address,
         date: c.Issue_Date || c.issueDate,
-        validity: c.Valid_Until || c.validUntil,
+        validity: effectiveValidUntil(c),
         status: c.Status || 'VERIFIED & COMPLIANT',
         title: c.title || 'COMPLIANCE CERTIFICATE',
         equipmentDetails: c.equipmentDetails || '',
@@ -176,7 +207,7 @@ app.get('/api/verify-certificate/:guid', publicVerifyLimiter, async (req, res) =
           client: r.Customer_Name || r.customerName,
           address: r.Address || r.address,
           date: r.Service_Date || r.serviceDate || r.Scheduled_Date,
-          validity: r.Valid_Until || r.validUntil || 'N/A',
+          validity: effectiveValidUntil(r) || 'N/A',
           status: r.Status || 'Approved',
           title: 'OFFICIAL SERVICE INSPECTION REPORT',
           equipmentDetails: r.fieldObservations || '',

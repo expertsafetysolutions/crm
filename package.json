@@ -14,6 +14,7 @@
     "encrypt:data": "node scripts/encrypt-existing-data.js",
     "decrypt:data": "node scripts/decrypt-existing-data.js",
     "verify:encryption": "node server/tests/verifyEncryption.js",
+    "guide:staff": "node scripts/build-staff-guide.js",
     "backup:env": "node scripts/backup-env.js",
     "backup:full": "node scripts/backup-full.js",
     "verify:backup": "node scripts/verify-backup.js",

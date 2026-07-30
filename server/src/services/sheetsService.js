@@ -403,17 +403,23 @@ class MongoService {
   async getEquipmentMaster() {
     const items = await this.getTab('Equipment_Master');
     if (items && items.length > 0) return items;
+    // refillValidityYears / hptValidityYears seed the two intervals the certificate module needs.
+    // Only the CO2 cylinder is a 5-year hydro-test vessel (Gas Cylinder Rules); every other body is
+    // 3 years per IS 2190 — including Water CO2, which is a water body with a CO2 cartridge and is
+    // routinely mistaken for a gas cylinder because of its name. Non-cylinder equipment (hose,
+    // sprinkler, alarm panel) is never hydro-tested; it keeps the 3-year default only so the field
+    // is always present, and those items are simply not used on an HP Testing certificate.
     return [
-      { id: 'eq-1', type: 'Dry Chemical Powder (ABC Type IS:15683)', capacities: ['1 Kg', '2 Kg', '4 Kg', '4.5 Kg', '6 Kg', '9 Kg'] },
-      { id: 'eq-2', type: 'CO2 Fire Extinguisher (IS:15683 / IS:2878)', capacities: ['2 Kg', '3 Kg', '4.5 Kg', '6.5 Kg', '9 Kg', '22.5 Kg'] },
-      { id: 'eq-3', type: 'Clean Agent / HFC-236fa Extinguisher', capacities: ['1 Kg', '2 Kg', '4 Kg', '6 Kg'] },
-      { id: 'eq-4', type: 'Foam Type Fire Extinguisher (Mechanical Foam)', capacities: ['9 Ltr', '50 Ltr (Trolley)', '150 Ltr'] },
-      { id: 'eq-5', type: 'Water CO2 Type Fire Extinguisher', capacities: ['9 Ltr', '50 Ltr (Trolley)'] },
-      { id: 'eq-6', type: 'Automatic Modular Extinguisher (Clean Agent / ABC)', capacities: ['2 Kg', '5 Kg', '10 Kg', '15 Kg'] },
-      { id: 'eq-7', type: 'Wet Chemical Fire Extinguisher (Kitchen Safety)', capacities: ['2 Ltr', '4 Ltr', '6 Ltr', '9 Ltr'] },
-      { id: 'eq-8', type: 'Fire Hydrant Hose Reel & Branch Pipe Unit', capacities: ['30 Meter (3/4")', '30 Meter (1")', 'Standard Branch Pipe'] },
-      { id: 'eq-9', type: 'Sprinkler Head & Alarm Valve Unit', capacities: ['68°C Pendent Type', '68°C Upright Type', 'Sprinkler Alarm Valve'] },
-      { id: 'eq-10', type: 'Conventional / Addressable Fire Alarm Panel', capacities: ['2 Zone Panel', '4 Zone Panel', '8 Zone Panel', 'Loop Addressable'] }
+      { id: 'eq-1', type: 'Dry Chemical Powder (ABC Type IS:15683)', capacities: ['1 Kg', '2 Kg', '4 Kg', '4.5 Kg', '6 Kg', '9 Kg'], refillValidityYears: 1, hptValidityYears: 3 },
+      { id: 'eq-2', type: 'CO2 Fire Extinguisher (IS:15683 / IS:2878)', capacities: ['2 Kg', '3 Kg', '4.5 Kg', '6.5 Kg', '9 Kg', '22.5 Kg'], refillValidityYears: 1, hptValidityYears: 5 },
+      { id: 'eq-3', type: 'Clean Agent / HFC-236fa Extinguisher', capacities: ['1 Kg', '2 Kg', '4 Kg', '6 Kg'], refillValidityYears: 1, hptValidityYears: 3 },
+      { id: 'eq-4', type: 'Foam Type Fire Extinguisher (Mechanical Foam)', capacities: ['9 Ltr', '50 Ltr (Trolley)', '150 Ltr'], refillValidityYears: 1, hptValidityYears: 3 },
+      { id: 'eq-5', type: 'Water CO2 Type Fire Extinguisher', capacities: ['9 Ltr', '50 Ltr (Trolley)'], refillValidityYears: 1, hptValidityYears: 3 },
+      { id: 'eq-6', type: 'Automatic Modular Extinguisher (Clean Agent / ABC)', capacities: ['2 Kg', '5 Kg', '10 Kg', '15 Kg'], refillValidityYears: 1, hptValidityYears: 3 },
+      { id: 'eq-7', type: 'Wet Chemical Fire Extinguisher (Kitchen Safety)', capacities: ['2 Ltr', '4 Ltr', '6 Ltr', '9 Ltr'], refillValidityYears: 1, hptValidityYears: 3 },
+      { id: 'eq-8', type: 'Fire Hydrant Hose Reel & Branch Pipe Unit', capacities: ['30 Meter (3/4")', '30 Meter (1")', 'Standard Branch Pipe'], refillValidityYears: 1, hptValidityYears: 3 },
+      { id: 'eq-9', type: 'Sprinkler Head & Alarm Valve Unit', capacities: ['68°C Pendent Type', '68°C Upright Type', 'Sprinkler Alarm Valve'], refillValidityYears: 1, hptValidityYears: 3 },
+      { id: 'eq-10', type: 'Conventional / Addressable Fire Alarm Panel', capacities: ['2 Zone Panel', '4 Zone Panel', '8 Zone Panel', 'Loop Addressable'], refillValidityYears: 1, hptValidityYears: 3 }
     ];
   }
   async getAllServiceReports() { return this.getTab('Service_Reports'); }

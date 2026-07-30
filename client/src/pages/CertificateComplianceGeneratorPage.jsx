@@ -36,6 +36,7 @@ import {
 } from 'lucide-react';
 import { QRCodeCanvas } from 'qrcode.react';
 import { matchesQuery, filterByQuery } from '../utils/searchUtils';
+import { addYearsIso, computeCertValidUntil } from '../utils/hptValidity';
 // html2canvas/jspdf are loaded on demand (see generateCertificateCanvas/buildCertificatePdf) —
 // they're ~590KB and only needed when the user actually downloads/prints/shares, not to open the page.
 
@@ -67,15 +68,39 @@ const normalizeSectionOrder = (saved) => {
   return [...valid, ...CERT_SECTION_IDS.filter(id => !valid.includes(id))];
 };
 
+// Item names compared with case, punctuation and spacing flattened, so "Stored Pressure ABC" and
+// "Stored Pressure - ABC" are recognised as the same item. Must stay in step with
+// equipmentNameKey() in server/src/routes/apiRoutes.js — the server rejects on the same rule, and a
+// looser client check would only turn a blocked add into a confusing 409.
+const equipmentNameKey = (n) => String(n || '')
+  .trim()
+  .toLowerCase()
+  .replace(/[^a-z0-9]+/g, ' ')
+  .replace(/\s+/g, ' ')
+  .trim();
+
+// Quantity is a count of cylinders — digits only. Kept as a string (not a number input) so the
+// field can be empty while typing; leading zeros are dropped so "007" cannot print as "007 Nos.".
+const sanitizeQtyInput = (val) => {
+  const digits = String(val ?? '').replace(/\D/g, '');
+  if (!digits) return '';
+  const stripped = digits.replace(/^0+/, '');
+  return stripped === '' ? '0' : stripped.slice(0, 5);
+};
+
 // Helper: Format quantity with "Nos." unit
 const formatQtyNos = (val) => {
   if (val === undefined || val === null || val === '') return '1 Nos.';
   const str = String(val).trim();
   if (!str) return '1 Nos.';
   if (str.toLowerCase().endsWith('nos.') || str.toLowerCase().endsWith('nos')) {
-    return str;
+    // Re-check the numeric part: rows saved before Qty was validated carry values like
+    // "5DGDGDFG Nos." and must not keep printing that on a reissued certificate.
+    const lead = sanitizeQtyInput(str);
+    return lead ? `${lead} Nos.` : '1 Nos.';
   }
-  return `${str} Nos.`;
+  const digits = sanitizeQtyInput(str);
+  return digits ? `${digits} Nos.` : '1 Nos.';
 };
 
 // Default equipment-table heading per certificate type, used when no custom Table Title is set.
@@ -590,12 +615,66 @@ export default function CertificateComplianceGeneratorPage() {
     }
   };
 
+  // HP Testing retest intervals are a property of the cylinder, not of the certificate — CO2 is a
+  // 5-year gas cylinder, ABC/foam/water are 3-year vessels — so one certificate covering both needs
+  // a per-row answer. Configured under the HP Testing settings tab; every other format keeps the
+  // single flat duration it always had.
+  // The form's own draft wins over the saved settings so an edit in the settings tab re-dates the
+  // items immediately, before Save is pressed.
+  // Both formats carry a per-item interval now — HP Testing from hptValidityYears, Refilling from
+  // refillValidityYears — so both re-date rows individually instead of using one flat duration.
+  const PER_ITEM_VALIDITY_FORMATS = ['HP Testing', 'Refilling'];
+  const isPerTypeValidity = PER_ITEM_VALIDITY_FORMATS.includes(certForm.formatType)
+    && certForm.validityDuration !== 'Custom';
+
+  // Years to add for ONE row.
+  //
+  // The Item Master is the single source: an interval stored against the equipment is a decision
+  // someone made, and it is editable from the Item Master panel on this page. A row naming an item
+  // that is not in the master falls back to the certificate's flat duration — deliberately no
+  // name-keyword guessing, so there is exactly one place to look when a date is wrong.
+  // Outside HP Testing / Refilling (or on Custom) this is the flat duration, as it always was.
+  const yearsForItem = (itemName, duration = certForm.validityDuration) => {
+    if (duration === 'Custom') return 1;
+    const isHpt = certForm.formatType === 'HP Testing';
+    const isRefill = certForm.formatType === 'Refilling';
+
+    if (isHpt || isRefill) {
+      const master = findMatchingMasterItem(equipmentMasterList, null, itemName);
+      const stored = master && (isHpt ? master.hptValidityYears : master.refillValidityYears);
+      if (Number(stored) > 0) return Number(stored);
+      // Unknown item on an HP Testing certificate: 3 years, the interval for every cylinder except
+      // CO2. Understating brings it back for retest early; overstating leaves an untested cylinder
+      // in service, so the conservative number is the safe default.
+      if (isHpt) return 3;
+    }
+    return duration === '5 Years' ? 5 : duration === '3 Years' ? 3 : 1;
+  };
+
+  // Re-dates every row from its own rule, then lifts the certificate's Valid Until to the last of
+  // them so the header can never claim less than the table already promises.
+  const applyPerItemValidity = (form, duration = form.validityDuration) => {
+    if (!PER_ITEM_VALIDITY_FORMATS.includes(form.formatType) || duration === 'Custom') return form;
+    const itemsList = (form.itemsList || []).map(item => ({
+      ...item,
+      nextDate: addYearsIso(
+        item.refillingDate || form.challanDate,
+        yearsForItem(item.itemName, duration)
+      ) || item.nextDate
+    }));
+    return { ...form, itemsList, validUntil: computeCertValidUntil(itemsList, form.validUntil) };
+  };
+
   // Item Master CRUD panel state
   const [showItemMasterPanel, setShowItemMasterPanel] = useState(false);
   const [imEditId, setImEditId] = useState(null); // null = new, string = editing existing
   const [imName, setImName] = useState('');
   const [imVariants, setImVariants] = useState(''); // comma-separated string
   const [imSaving, setImSaving] = useState(false);
+  const [imSearch, setImSearch] = useState('');
+  // Held as strings so the number inputs can be cleared while typing; coerced on save.
+  const [imRefillYears, setImRefillYears] = useState('1');
+  const [imHptYears, setImHptYears] = useState('3');
 
   const handleUpdateCertNoFields = (updatedFields) => {
     setCertForm(prev => {
@@ -1946,7 +2025,7 @@ export default function CertificateComplianceGeneratorPage() {
                           setCertForm(prev => {
                             const nextChallanDate = prev.challanDate > issueDt ? issueDt : prev.challanDate;
                             const nextDt = new Date(new Date(nextChallanDate).setFullYear(new Date(nextChallanDate).getFullYear() + years)).toISOString().split('T')[0];
-                            return {
+                            const next = {
                               ...prev,
                               issueDate: issueDt,
                               challanDate: nextChallanDate,
@@ -1961,6 +2040,7 @@ export default function CertificateComplianceGeneratorPage() {
                                 };
                               })
                             };
+                            return applyPerItemValidity(next);
                           });
                           const nextCappedChallan = certForm.challanDate > issueDt ? issueDt : certForm.challanDate;
                           setNewItemRefillDate(nextCappedChallan);
@@ -1988,7 +2068,7 @@ export default function CertificateComplianceGeneratorPage() {
                             alert("Challan Date cannot exceed Certificate Date.");
                           }
                           const nextDt = new Date(new Date(targetDate).setFullYear(new Date(targetDate).getFullYear() + years)).toISOString().split('T')[0];
-                          setCertForm(prev => ({
+                          setCertForm(prev => applyPerItemValidity({
                             ...prev,
                             challanDate: targetDate,
                             validUntil: prev.validityDuration === 'Custom' ? prev.validUntil : nextDt,
@@ -2192,6 +2272,13 @@ export default function CertificateComplianceGeneratorPage() {
                                 } else {
                                   setNewItemSelectedMasterId('');
                                 }
+                                // Preview the due date from THIS item's own interval as it is typed.
+                                // Without this the field keeps showing the previous item's date until
+                                // Add is pressed, so a CO2 row visibly reads 3 years before it is added.
+                                if (isPerTypeValidity) {
+                                  const due = addYearsIso(newItemRefillDate || certForm.challanDate, yearsForItem(val));
+                                  if (due) setNewItemNextDate(due);
+                                }
                               }}
                               onFocus={(e) => { setShowNewItemDropdown(true); scrollFieldIntoView(e); }}
                               onBlur={() => setTimeout(() => setShowNewItemDropdown(false), 180)}
@@ -2213,12 +2300,26 @@ export default function CertificateComplianceGeneratorPage() {
                                           if ((eq.capacities || []).length > 0) {
                                             setNewItemCapacity(eq.capacities[0]);
                                           }
+                                          if (isPerTypeValidity) {
+                                            const due = addYearsIso(newItemRefillDate || certForm.challanDate, yearsForItem(name));
+                                            if (due) setNewItemNextDate(due);
+                                          }
                                           setShowNewItemDropdown(false);
                                         }}
                                         className="flex items-center justify-between px-3 py-2 hover:bg-amber-50 cursor-pointer transition"
                                       >
                                         <div>
-                                          <div className="font-bold text-slate-900 text-xs">{name}</div>
+                                          <div className="font-bold text-slate-900 text-xs flex items-center gap-1.5">
+                                            <span>{name}</span>
+                                            {/* Which interval this item will apply, before it is
+                                                picked — the due date is otherwise only visible after
+                                                the row has been added. */}
+                                            {isPerTypeValidity && (
+                                              <span className={`shrink-0 px-1 py-0.5 rounded text-[8px] font-black ${certForm.formatType === 'HP Testing' ? 'bg-blue-100 text-blue-800' : 'bg-amber-100 text-amber-800'}`}>
+                                                {yearsForItem(name)}Y
+                                              </span>
+                                            )}
+                                          </div>
                                           <div className="text-[10px] text-amber-800 font-semibold truncate max-w-xs">
                                             {caps ? `Available: ${caps}` : 'Standard Equipment'}
                                           </div>
@@ -2269,8 +2370,12 @@ export default function CertificateComplianceGeneratorPage() {
                               <label className="block text-[10px] font-bold text-slate-600">Qty *</label>
                               <input
                                 type="text"
+                                inputMode="numeric"
                                 value={newItemQty}
-                                onChange={e => setNewItemQty(e.target.value)}
+                                // Strips non-digits instead of blocking keystrokes: a hard block
+                                // silently drops pastes and phone autocorrect, and "5DGDGDFG Nos."
+                                // reached a real certificate because nothing sanitised this at all.
+                                onChange={e => setNewItemQty(sanitizeQtyInput(e.target.value))}
                                 onFocus={scrollFieldIntoView}
                                 placeholder="e.g. 5"
                                 className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-bold focus:outline-none"
@@ -2290,7 +2395,13 @@ export default function CertificateComplianceGeneratorPage() {
                                 }
                                 setNewItemRefillDate(refillDt);
                                 if (certForm.validityDuration !== 'Custom') {
-                                  setNewItemNextDate(calculateNextDate(refillDt));
+                                  // Item Master interval when the row names a known item, otherwise
+                                  // the certificate's flat duration — same precedence as yearsForItem.
+                                  setNewItemNextDate(
+                                    isPerTypeValidity
+                                      ? (addYearsIso(refillDt, yearsForItem(newItemSearch)) || calculateNextDate(refillDt))
+                                      : calculateNextDate(refillDt)
+                                  );
                                 }
                               }}
                                 className="w-full px-2 py-1.5 bg-white border border-slate-300 rounded-lg text-xs focus:outline-none"/>
@@ -2325,20 +2436,48 @@ export default function CertificateComplianceGeneratorPage() {
                         }
                         const finalCapacity = isTraining ? '—' : (newItemCapacity || (availableCaps.length > 0 ? availableCaps[0] : ''));
                         if (!isTraining && (!finalCapacity || !finalCapacity.trim())) { alert('Please select or enter the Capacity / Size.'); return; }
+                        // The label has always said "Qty *" but nothing enforced it, so a blank
+                        // silently became "1 Nos." — a wrong count on a document the customer signs.
+                        if (!isTraining && Number(sanitizeQtyInput(newItemQty)) <= 0) { alert('Please enter the Qty as a number (e.g. 5).'); return; }
                         const currentList = certForm.itemsList || [];
+                        const itemName = isTraining ? '' : newItemSearch.trim();
+                        const itemRefillDate = isTraining ? certForm.challanDate : (newItemRefillDate||certForm.challanDate);
+                        // On HP Testing the row's own type decides its retest interval, so an
+                        // untouched date field must not silently inherit the certificate's.
+                        const itemNextDate = isPerTypeValidity
+                          ? (addYearsIso(itemRefillDate, yearsForItem(itemName)) || newItemNextDate || certForm.validUntil)
+                          : (isTraining ? certForm.validUntil : (newItemNextDate||certForm.validUntil));
                         const newItem = {
                           id: 'item-'+Date.now(), srNo: currentList.length+1,
-                          itemName: isTraining ? '' : newItemSearch.trim(), capacity: finalCapacity.trim(),
+                          itemName, capacity: finalCapacity.trim(),
                           qty: isTraining ? '1 Nos.' : formatQtyNos(newItemQty),
-                          refillingDate: isTraining ? certForm.challanDate : (newItemRefillDate||certForm.challanDate),
-                          nextDate: isTraining ? certForm.validUntil : (newItemNextDate||certForm.validUntil),
+                          refillingDate: itemRefillDate,
+                          nextDate: itemNextDate,
                           customValues: {...newItemCustomValues}
                         };
-                        setCertForm(prev => ({...prev, itemsList: [...(prev.itemsList||[]), newItem]}));
+                        setCertForm(prev => {
+                          const itemsList = [...(prev.itemsList||[]), newItem];
+                          return {
+                            ...prev,
+                            itemsList,
+                            // Adding a 5-year CO2 to a 3-year certificate must push the header out
+                            // too, or the QR page would report the certificate expired while that
+                            // cylinder is still certified.
+                            validUntil: isPerTypeValidity ? computeCertValidUntil(itemsList, prev.validUntil) : prev.validUntil
+                          };
+                        });
                         setNewItemCustomValues({});
-                        if (isTraining) {
-                          setNewItemSearch('');
-                        }
+                        // Clear the entry fields so the next item can be picked straight away.
+                        // They used to keep the previous row's values, so adding a second item meant
+                        // deleting the old text first — and a half-cleared field is how one row's
+                        // EUID or Qty ends up on the next cylinder.
+                        setNewItemSearch('');
+                        setNewItemSelectedMasterId('');
+                        setNewItemCapacity('');
+                        setNewItemQty('');
+                        // Dates deliberately NOT reset: consecutive cylinders are tested on the same
+                        // day, so carrying them forward is the point (see "Reduce typing" in the UI
+                        // standard). Only the item-identity fields clear.
                       }} className="w-full py-2 bg-amber-700 hover:bg-amber-800 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition shadow-xs">
                         <PlusCircle className="w-3.5 h-3.5"/>+ Add Item to Certificate Table
                       </button>
@@ -2397,8 +2536,11 @@ export default function CertificateComplianceGeneratorPage() {
                                             className="ml-1 w-14 bg-transparent border-b border-transparent hover:border-slate-300 focus:border-amber-500 focus:outline-none text-[10px] font-bold text-slate-700"/>
                                         </span>
                                         <span>Qty:
-                                          <input type="text" value={it.qty || it.quantity || it.identificationNo || '1 Nos.'}
-                                            onChange={e => setCertForm(prev => ({...prev, itemsList: prev.itemsList.map((item,i) => i===idx ? {...item, qty: e.target.value} : item)}))}
+                                          {/* Digits while typing, " Nos." reattached on blur — the
+                                              suffix cannot be edited away by accident. */}
+                                          <input type="text" inputMode="numeric"
+                                            value={it.qty || it.quantity || it.identificationNo || '1 Nos.'}
+                                            onChange={e => setCertForm(prev => ({...prev, itemsList: prev.itemsList.map((item,i) => i===idx ? {...item, qty: sanitizeQtyInput(e.target.value)} : item)}))}
                                             onBlur={e => setCertForm(prev => ({...prev, itemsList: prev.itemsList.map((item,i) => i===idx ? {...item, qty: formatQtyNos(e.target.value)} : item)}))}
                                             className="ml-1 w-16 bg-transparent border-b border-transparent hover:border-slate-300 focus:border-amber-500 focus:outline-none text-[10px] font-bold text-slate-700"/>
                                         </span>
@@ -2437,11 +2579,10 @@ export default function CertificateComplianceGeneratorPage() {
                                                 alert(certForm.formatType === 'HP Testing' ? "Item testing date cannot exceed Challan Date." : "Item refilling date cannot exceed Challan Date.");
                                                 refillDt = maxLimit;
                                               }
-                                              const years = certForm.validityDuration === '5 Years' ? 5 : certForm.validityDuration === '3 Years' ? 3 : 1;
+                                              const years = yearsForItem(it.itemName);
                                               const itemDue = new Date(new Date(refillDt).setFullYear(new Date(refillDt).getFullYear() + years)).toISOString().split('T')[0];
-                                              setCertForm(prev => ({
-                                                ...prev,
-                                                itemsList: prev.itemsList.map((item, i) =>
+                                              setCertForm(prev => {
+                                                const itemsList = prev.itemsList.map((item, i) =>
                                                   i === idx
                                                     ? {
                                                         ...item,
@@ -2449,14 +2590,33 @@ export default function CertificateComplianceGeneratorPage() {
                                                         nextDate: prev.validityDuration === 'Custom' ? item.nextDate : itemDue
                                                       }
                                                     : item
-                                                )
-                                              }));
+                                                );
+                                                return {
+                                                  ...prev,
+                                                  itemsList,
+                                                  validUntil: isPerTypeValidity ? computeCertValidUntil(itemsList, prev.validUntil) : prev.validUntil
+                                                };
+                                              });
                                             }}
                                             className="ml-1 bg-transparent border-b border-transparent hover:border-slate-300 focus:border-amber-500 focus:outline-none text-[10px] font-bold text-slate-700"/>
                                         </span>
                                         <span className="text-rose-600">{certForm.formatType === 'HP Testing' ? 'Next Testing' : 'Next Refilling'}:
                                           <input type="date" value={it.nextDate}
-                                            onChange={e => setCertForm(prev => ({...prev, itemsList: prev.itemsList.map((item,i) => i===idx ? {...item, nextDate:e.target.value} : item)}))}
+                                            onChange={e => {
+                                              const val = e.target.value;
+                                              setCertForm(prev => {
+                                                const itemsList = prev.itemsList.map((item,i) => i===idx ? {...item, nextDate: val} : item);
+                                                // A hand-typed row date must drag the header with it.
+                                                // Leaving them independent is what published a
+                                                // certificate whose table said 2031 and whose QR
+                                                // page said 2029.
+                                                return {
+                                                  ...prev,
+                                                  itemsList,
+                                                  validUntil: computeCertValidUntil(itemsList, prev.validUntil)
+                                                };
+                                              });
+                                            }}
                                             className="ml-1 bg-transparent border-b border-transparent hover:border-slate-300 focus:border-amber-500 focus:outline-none text-[10px] font-bold text-rose-700"/>
                                         </span>
                                       </>
@@ -2500,66 +2660,148 @@ export default function CertificateComplianceGeneratorPage() {
                 certSectionBlocks.itemMaster = (
                   <div>
                     <button type="button"
-                      onClick={() => { setShowItemMasterPanel(p => !p); setImEditId(null); setImName(''); setImVariants(''); }}
+                      onClick={() => { setShowItemMasterPanel(p => !p); setImEditId(null); setImName(''); setImVariants(''); setImRefillYears('1'); setImHptYears('3'); setImSearch(''); }}
                       className="w-full flex items-center justify-between px-3 py-2 bg-indigo-50 border border-indigo-200 rounded-xl hover:bg-indigo-100 transition">
                       <span className="font-bold text-indigo-800 text-[11px]">📦 Manage Item Master &amp; Variants ({equipmentMasterList.length} items)</span>
                       <span className="text-indigo-600 font-bold text-xs">{showItemMasterPanel ? '▲ Hide' : '▼ Manage'}</span>
                     </button>
                     {showItemMasterPanel && (
                       <div className="mt-2 border border-indigo-200 rounded-xl overflow-hidden">
-                        <div className="max-h-36 overflow-y-auto divide-y divide-slate-100 bg-white">
-                          {equipmentMasterList.map(eq => (
-                            <div key={eq.id} className="flex items-center justify-between px-3 py-1.5 hover:bg-slate-50 text-[11px]">
-                              <div className="flex-1 min-w-0">
-                                <div className="font-bold text-slate-900 truncate">{eq.type||eq.itemName}</div>
-                                <div className="text-[10px] text-slate-400 truncate">{(eq.capacities||[]).join(', ')}</div>
-                              </div>
-                              <div className="flex gap-1 shrink-0 ml-2">
-                                <button type="button"
-                                  onClick={() => { setImEditId(eq.id); setImName(eq.type||eq.itemName||''); setImVariants((eq.capacities||[]).join(', ')); }}
-                                  className="px-2 py-0.5 bg-indigo-100 hover:bg-indigo-200 text-indigo-800 rounded text-[10px] font-bold">Edit</button>
-                                <button type="button"
-                                  onClick={async () => {
-                                    if (!window.confirm(`Delete "${eq.type||eq.itemName}"?`)) return;
-                                    await fetch(`/api/equipment-master/${eq.id}`, {method:'DELETE', headers:{Authorization:`Bearer ${token}`}});
-                                    setEquipmentMasterList(prev => prev.filter(x => x.id !== eq.id));
-                                  }}
-                                  className="px-2 py-0.5 bg-rose-100 hover:bg-rose-200 text-rose-700 rounded text-[10px] font-bold">Del</button>
+                        {/* Search, because this list grows past what fits in the scroll box and the
+                            same item is easy to add twice when you cannot see it. */}
+                        <div className="bg-white border-b border-slate-200 p-2">
+                          <input type="text" value={imSearch} onChange={e => setImSearch(e.target.value)}
+                            placeholder="Search items…"
+                            className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-[11px] font-medium focus:outline-none focus:border-indigo-400"/>
+                        </div>
+                        <div className="max-h-48 overflow-y-auto divide-y divide-slate-100 bg-white">
+                          {filterByQuery(equipmentMasterList, imSearch, eq => [eq.type, eq.itemName, (eq.capacities||[]).join(' ')]).map(eq => {
+                            const dupe = equipmentMasterList.filter(x => equipmentNameKey(x.type||x.itemName) === equipmentNameKey(eq.type||eq.itemName)).length > 1;
+                            return (
+                            <div key={eq.id} className={`px-3 py-2 hover:bg-slate-50 text-[11px] ${imEditId === eq.id ? 'bg-indigo-50' : ''}`}>
+                              <div className="flex items-start justify-between gap-2">
+                                <div className="flex-1 min-w-0">
+                                  <div className="font-bold text-slate-900 flex items-center gap-1.5">
+                                    <span className="truncate">{eq.type||eq.itemName}</span>
+                                    {/* The live list already carries "Stored Pressure ABC" twice.
+                                        Flagged rather than auto-merged — only the office knows
+                                        which of the two rows is the one in use. */}
+                                    {dupe && <span title="Another item has this same name" className="shrink-0 px-1 py-0.5 bg-amber-100 text-amber-800 rounded text-[8px] font-black">DUPLICATE</span>}
+                                  </div>
+                                  <div className="text-[10px] text-slate-400 truncate">{(eq.capacities||[]).join(', ') || 'No capacities'}</div>
+                                  <div className="flex items-center gap-2 mt-1">
+                                    <span className="px-1.5 py-0.5 bg-amber-50 border border-amber-200 rounded text-[9px] font-bold text-amber-800">
+                                      Refill {Number(eq.refillValidityYears) > 0 ? eq.refillValidityYears : 1}y
+                                    </span>
+                                    <span className="px-1.5 py-0.5 bg-blue-50 border border-blue-200 rounded text-[9px] font-bold text-blue-800">
+                                      HPT {Number(eq.hptValidityYears) > 0 ? eq.hptValidityYears : 3}y
+                                    </span>
+                                  </div>
+                                </div>
+                                <div className="flex gap-1 shrink-0">
+                                  <button type="button"
+                                    onClick={() => {
+                                      setImEditId(eq.id); setImName(eq.type||eq.itemName||'');
+                                      setImVariants((eq.capacities||[]).join(', '));
+                                      setImRefillYears(String(Number(eq.refillValidityYears) > 0 ? eq.refillValidityYears : 1));
+                                      setImHptYears(String(Number(eq.hptValidityYears) > 0 ? eq.hptValidityYears : 3));
+                                    }}
+                                    className="px-2 py-1 bg-indigo-100 hover:bg-indigo-200 text-indigo-800 rounded text-[10px] font-bold">Edit</button>
+                                  <button type="button"
+                                    onClick={async () => {
+                                      if (!window.confirm(`Delete "${eq.type||eq.itemName}"?\n\nCertificates already issued keep the dates they were saved with.`)) return;
+                                      await fetch(`/api/equipment-master/${eq.id}`, {method:'DELETE', headers:{Authorization:`Bearer ${token}`}});
+                                      setEquipmentMasterList(prev => prev.filter(x => x.id !== eq.id));
+                                      if (imEditId === eq.id) { setImEditId(null); setImName(''); setImVariants(''); setImRefillYears('1'); setImHptYears('3'); }
+                                    }}
+                                    className="px-2 py-1 bg-rose-100 hover:bg-rose-200 text-rose-700 rounded text-[10px] font-bold">Del</button>
+                                </div>
                               </div>
                             </div>
-                          ))}
+                            );
+                          })}
                           {equipmentMasterList.length === 0 && <div className="px-3 py-4 text-xs text-slate-400 text-center">No items yet</div>}
+                          {equipmentMasterList.length > 0 && filterByQuery(equipmentMasterList, imSearch, eq => [eq.type, eq.itemName, (eq.capacities||[]).join(' ')]).length === 0 && (
+                            <div className="px-3 py-4 text-xs text-slate-400 text-center">No item matches “{imSearch}”</div>
+                          )}
                         </div>
                         <div className="bg-indigo-50 border-t border-indigo-200 p-2.5 space-y-2">
                           <div className="text-[10px] font-bold text-indigo-700 uppercase">{imEditId ? 'Edit Item' : 'Add New Item'}</div>
-                          <input type="text" placeholder="Item Name (e.g. DCP ABC Type Fire Extinguisher)" value={imName} onChange={e => setImName(e.target.value)}
-                            className="w-full px-2.5 py-1.5 bg-white border border-indigo-300 rounded-lg text-xs font-medium focus:outline-none"/>
-                          <input type="text" placeholder="Variants comma-separated (e.g. 1 Kg, 2 Kg, 4 Kg, 6 Kg, 9 Kg)" value={imVariants} onChange={e => setImVariants(e.target.value)}
-                            className="w-full px-2.5 py-1.5 bg-white border border-indigo-300 rounded-lg text-xs font-medium focus:outline-none"/>
+                          <div className="space-y-1">
+                            <label className="block text-[9px] font-bold text-slate-500 uppercase">Item</label>
+                            <input type="text" placeholder="e.g. DCP ABC Type Fire Extinguisher" value={imName} onChange={e => setImName(e.target.value)}
+                              className="w-full px-2.5 py-2 bg-white border border-indigo-300 rounded-lg text-xs font-medium focus:outline-none focus:border-indigo-500"/>
+                          </div>
+                          <div className="space-y-1">
+                            <label className="block text-[9px] font-bold text-slate-500 uppercase">Capacity</label>
+                            <input type="text" placeholder="Comma separated — e.g. 1 Kg, 2 Kg, 4 Kg, 6 Kg, 9 Kg" value={imVariants} onChange={e => setImVariants(e.target.value)}
+                              className="w-full px-2.5 py-2 bg-white border border-indigo-300 rounded-lg text-xs font-medium focus:outline-none focus:border-indigo-500"/>
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div className="space-y-1">
+                              <label className="block text-[9px] font-bold text-amber-700 uppercase">Refilling Validity</label>
+                              <div className="flex items-center gap-1">
+                                <input type="number" min="1" max="20" value={imRefillYears} onChange={e => setImRefillYears(e.target.value)}
+                                  className="w-full px-2.5 py-2 bg-white border border-amber-300 rounded-lg text-xs font-bold text-amber-800 focus:outline-none"/>
+                                <span className="text-[9px] font-bold text-slate-500 uppercase shrink-0">yrs</span>
+                              </div>
+                            </div>
+                            <div className="space-y-1">
+                              <label className="block text-[9px] font-bold text-blue-700 uppercase">HP Testing Validity</label>
+                              <div className="flex items-center gap-1">
+                                <input type="number" min="1" max="20" value={imHptYears} onChange={e => setImHptYears(e.target.value)}
+                                  className="w-full px-2.5 py-2 bg-white border border-blue-300 rounded-lg text-xs font-bold text-blue-800 focus:outline-none"/>
+                                <span className="text-[9px] font-bold text-slate-500 uppercase shrink-0">yrs</span>
+                              </div>
+                            </div>
+                          </div>
+                          <div className="text-[9px] font-semibold text-slate-500">
+                            Next date = date of testing/refilling + these years. CO2 is normally 5 for HP testing, other types 3.
+                          </div>
                           <div className="flex gap-2">
                             <button type="button" disabled={imSaving || !imName.trim()} onClick={async () => {
                               if (!imName.trim()) return;
+                              const name = imName.trim();
+                              // Blocked, not merely warned: a duplicate splits which record a
+                              // certificate reads its validity from. Matched on the same flattened
+                              // key the server uses, so "Stored Pressure - ABC" is caught as a copy
+                              // of "Stored Pressure ABC" rather than sneaking past an exact compare.
+                              const clash = equipmentMasterList.find(x =>
+                                x.id !== imEditId && equipmentNameKey(x.type || x.itemName) === equipmentNameKey(name));
+                              if (clash) {
+                                alert(`"${clash.type || clash.itemName}" is already in the list.\n\nEdit that item instead of adding it again.`);
+                                setImSearch(clash.type || clash.itemName || '');
+                                return;
+                              }
                               setImSaving(true);
                               try {
                                 const variantArr = imVariants.split(',').map(v => v.trim()).filter(Boolean);
+                                const refillYears = Math.min(Math.max(parseInt(imRefillYears, 10) || 1, 1), 20);
+                                const hptYears = Math.min(Math.max(parseInt(imHptYears, 10) || 3, 1), 20);
+                                const payload = {name, variants:variantArr, refillValidityYears:refillYears, hptValidityYears:hptYears};
                                 if (imEditId) {
-                                  const r = await fetch(`/api/equipment-master/${imEditId}`, {method:'PUT', headers:{'Content-Type':'application/json', Authorization:`Bearer ${token}`}, body:JSON.stringify({name:imName.trim(), variants:variantArr})});
+                                  const r = await fetch(`/api/equipment-master/${imEditId}`, {method:'PUT', headers:{'Content-Type':'application/json', Authorization:`Bearer ${token}`}, body:JSON.stringify(payload)});
                                   const data = await r.json();
-                                  if (data.success) setEquipmentMasterList(prev => prev.map(x => x.id === imEditId ? {...x, type:imName.trim(), capacities:variantArr} : x));
+                                  if (!r.ok || !data.success) throw new Error(data.error || 'Update failed');
+                                  setEquipmentMasterList(prev => prev.map(x => x.id === imEditId ? {...x, type:name, capacities:variantArr, refillValidityYears:refillYears, hptValidityYears:hptYears} : x));
+                                  // An interval that just changed must reach the rows already typed
+                                  // on this certificate, not only the next one added.
+                                  setCertForm(prev => applyPerItemValidity(prev));
                                 } else {
-                                  const r = await fetch('/api/equipment-master', {method:'POST', headers:{'Content-Type':'application/json', Authorization:`Bearer ${token}`}, body:JSON.stringify({name:imName.trim(), variants:variantArr})});
+                                  const r = await fetch('/api/equipment-master', {method:'POST', headers:{'Content-Type':'application/json', Authorization:`Bearer ${token}`}, body:JSON.stringify(payload)});
                                   const data = await r.json();
-                                  if (data.success) setEquipmentMasterList(prev => [...prev, data.item]);
+                                  if (!r.ok || !data.success) throw new Error(data.error || 'Create failed');
+                                  setEquipmentMasterList(prev => [...prev, data.item]);
                                 }
-                                setImEditId(null); setImName(''); setImVariants('');
+                                setImEditId(null); setImName(''); setImVariants(''); setImRefillYears('1'); setImHptYears('3');
                               } catch(e) { alert('Save failed: ' + e.message); }
                               setImSaving(false);
-                            }} className="flex-1 py-1.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-lg text-[11px] font-bold">
+                            }} className="flex-1 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-lg text-[11px] font-bold">
                               {imSaving ? 'Saving…' : imEditId ? '✔ Update' : '+ Add Item'}
                             </button>
                             {imEditId && (
-                              <button type="button" onClick={() => { setImEditId(null); setImName(''); setImVariants(''); }}
-                                className="px-3 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-lg text-[11px] font-bold">Cancel</button>
+                              <button type="button" onClick={() => { setImEditId(null); setImName(''); setImVariants(''); setImRefillYears('1'); setImHptYears('3'); }}
+                                className="px-3 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-lg text-[11px] font-bold">Cancel</button>
                             )}
                           </div>
                         </div>
@@ -2798,7 +3040,7 @@ export default function CertificateComplianceGeneratorPage() {
                         else if (dur === '3 Years') nextDt.setFullYear(nextDt.getFullYear()+3);
                         else if (dur === '5 Years') nextDt.setFullYear(nextDt.getFullYear()+5);
                         const nextDtStr = nextDt.toISOString().split('T')[0];
-                        setCertForm(prev => ({
+                        setCertForm(prev => applyPerItemValidity({
                           ...prev,
                           validityDuration: dur,
                           validUntil: dur === 'Custom' ? prev.validUntil : nextDtStr,
@@ -2813,7 +3055,7 @@ export default function CertificateComplianceGeneratorPage() {
                               nextDate: dur === 'Custom' ? item.nextDate : itemDue.toISOString().split('T')[0]
                             };
                           })
-                        }));
+                        }, dur));
                         if (dur !== 'Custom') {
                           setNewItemNextDate(nextDtStr);
                         }
@@ -2841,8 +3083,8 @@ export default function CertificateComplianceGeneratorPage() {
                           else if (dur === '3 Years') nextDt.setFullYear(nextDt.getFullYear()+3);
                           else if (dur === '5 Years') nextDt.setFullYear(nextDt.getFullYear()+5);
                           const nextDtStr = isNaN(nextDt.getTime()) ? prev.validUntil : nextDt.toISOString().split('T')[0];
-                          
-                          return {
+
+                          return applyPerItemValidity({
                             ...prev,
                             issueDate: newDt,
                             challanDate: nextChallanDate,
@@ -2859,7 +3101,7 @@ export default function CertificateComplianceGeneratorPage() {
                                 nextDate: dur === 'Custom' ? item.nextDate : itemDue.toISOString().split('T')[0]
                               };
                             })
-                          };
+                          }, dur);
                         });
                         const nextCappedChallan = certForm.challanDate > newDt ? newDt : certForm.challanDate;
                         setNewItemRefillDate(nextCappedChallan);

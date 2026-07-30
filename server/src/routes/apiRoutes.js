@@ -690,6 +690,31 @@ router.put('/field-visits/:id', async (req, res) => {
   }
 });
 
+/**
+ * A validity interval in whole years. Rejects junk ('', null, 0, negatives, 'abc') back to the
+ * caller's default rather than storing it: a 0-year interval would date a cylinder's next test to
+ * the day it was tested, and a NaN would render as "Invalid Date" on a customer's certificate.
+ * Capped at 20 so a typo'd 500 cannot push a retest date past any plausible service life.
+ */
+function sanitizeValidityYears(value, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.min(Math.round(n), 20);
+}
+
+/**
+ * Item names compared with case, punctuation and spacing flattened, so "Stored Pressure ABC",
+ * "Stored Pressure - ABC" and "stored  pressure abc" are recognised as one item. The live list had
+ * grown to four copies of the same extinguisher this way; each copy carries its own validity years,
+ * so which retest interval a certificate picked up depended on which row happened to match first.
+ */
+const equipmentNameKey = (n) => String(n || '')
+  .trim()
+  .toLowerCase()
+  .replace(/[^a-z0-9]+/g, ' ')
+  .replace(/\s+/g, ' ')
+  .trim();
+
 router.get('/equipment-master', async (req, res) => {
   try {
     const items = await sheetsService.getEquipmentMaster();
@@ -702,12 +727,29 @@ router.get('/equipment-master', async (req, res) => {
 router.post('/equipment-master', async (req, res) => {
   try {
     if (req.user.role !== 'Admin') return res.status(403).json({ error: 'Admin access required' });
-    const { name, variants } = req.body;
+    const { name, variants, refillValidityYears, hptValidityYears } = req.body;
     if (!name || !name.trim()) return res.status(400).json({ error: 'Item name is required' });
+
+    // Enforced server-side, not just in the UI: the client cannot be the only guard when an offline
+    // queue or a second open tab can post the same new item twice.
+    const existingItems = await sheetsService.getEquipmentMaster() || [];
+    const clash = existingItems.find(i => equipmentNameKey(i.type || i.itemName) === equipmentNameKey(name));
+    if (clash) {
+      return res.status(409).json({
+        error: `An item named "${clash.type || clash.itemName}" already exists.`,
+        duplicateOf: { id: clash.id, name: clash.type || clash.itemName }
+      });
+    }
+
     const newItem = {
       id: 'eq-' + Date.now(),
       type: name.trim(),
-      capacities: Array.isArray(variants) ? variants : (variants || '').split(',').map(v => v.trim()).filter(Boolean)
+      capacities: Array.isArray(variants) ? variants : (variants || '').split(',').map(v => v.trim()).filter(Boolean),
+      // Retest/refill intervals belong to the equipment, not the certificate: a CO2 cylinder is a
+      // 5-year hydro-test vessel and an ABC body a 3-year one, and one certificate routinely covers
+      // both. Stored per item so the date is looked up, never guessed from the typed name.
+      refillValidityYears: sanitizeValidityYears(refillValidityYears, 1),
+      hptValidityYears: sanitizeValidityYears(hptValidityYears, 3)
     };
     await sheetsService.insertRow('Equipment_Master', newItem);
     res.json({ success: true, item: newItem });
@@ -720,12 +762,31 @@ router.post('/equipment-master', async (req, res) => {
 router.put('/equipment-master/:id', async (req, res) => {
   try {
     if (req.user.role !== 'Admin') return res.status(403).json({ error: 'Admin access required' });
-    const { name, variants } = req.body;
+    const { name, variants, refillValidityYears, hptValidityYears } = req.body;
+
+    // Renaming one item onto another's name is the same collision as creating a duplicate.
+    if (name && name.trim()) {
+      const existingItems = await sheetsService.getEquipmentMaster() || [];
+      const clash = existingItems.find(i =>
+        String(i.id) !== String(req.params.id) &&
+        equipmentNameKey(i.type || i.itemName) === equipmentNameKey(name));
+      if (clash) {
+        return res.status(409).json({
+          error: `Another item is already named "${clash.type || clash.itemName}".`,
+          duplicateOf: { id: clash.id, name: clash.type || clash.itemName }
+        });
+      }
+    }
+
     const updateData = {
       type: name ? name.trim() : undefined,
       capacities: Array.isArray(variants) ? variants : (variants || '').split(',').map(v => v.trim()).filter(Boolean)
     };
     if (updateData.type === undefined) delete updateData.type;
+    // Only written when sent, so a caller that omits them cannot silently reset an item to the
+    // defaults — updateRow does a $set and would otherwise overwrite a configured interval.
+    if (refillValidityYears !== undefined) updateData.refillValidityYears = sanitizeValidityYears(refillValidityYears, 1);
+    if (hptValidityYears !== undefined) updateData.hptValidityYears = sanitizeValidityYears(hptValidityYears, 3);
     const updated = await sheetsService.updateRow('Equipment_Master', 'id', req.params.id, updateData);
     if (!updated) return res.status(404).json({ error: 'Item not found' });
     res.json({ success: true, item: updated });

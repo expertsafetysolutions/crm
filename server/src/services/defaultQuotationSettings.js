@@ -219,6 +219,24 @@ const DEFAULT_QUOTATION_SETTINGS = {
       whatsapp_template_name: '',
       whatsapp_template_status: 'not_submitted'
     },
+    // Both PO templates address a VENDOR, not a customer — {customer_name} resolves to the vendor's
+    // name for these two (see dispatchService.poVars), so the same {tokens} work everywhere without
+    // a vendor-specific variable set to remember.
+    po_email: {
+      subject: 'Purchase Order {document_no} from Expert Safety Solutions',
+      body: 'Dear {customer_name},\n\nPlease find attached our purchase order {document_no} dated {document_date} for {amount}.\n\nKindly supply the items as per the terms.\n\nRegards,\nExpert Safety Solutions',
+      whatsapp_template_name: '',
+      whatsapp_template_status: 'not_submitted'
+    },
+    // Auto-sent on whatever cadence Reminder_Interval_Days is set to on the PO (0 = off). Despatch
+    // fields print only when filled — {despatch_through}/{agent_name}/{vehicle_no} are blank on a PO
+    // where nothing has shipped yet, so the sentence should read fine either way.
+    po_reminder: {
+      subject: 'Gentle Reminder: Purchase Order {document_no}',
+      body: 'Dear {customer_name},\n\nA gentle follow-up on our purchase order {document_no} for {amount}. Kindly confirm the delivery timeline and despatch details at your earliest.\n\nRegards,\nExpert Safety Solutions',
+      whatsapp_template_name: '',
+      whatsapp_template_status: 'not_submitted'
+    },
     // No {view_link} in these two: the customer portal exists only for quotations, so a PI or
     // invoice has no Portal_Guid and the variable would render as the literal placeholder.
     pi_email: {
@@ -310,7 +328,10 @@ const DEFAULT_QUOTATION_SETTINGS = {
     quotation_followup: 11,   // Quotation follow-up reminders
     payment_due: 12,          // Invoice payment-due reminders
     refilling_due: 9,         // Generates refilling-due follow-up TASKS (no customer email)
-    annual_prospect: 9        // Generates annual renewal lead TASKS (no customer email)
+    annual_prospect: 9,       // Generates annual renewal lead TASKS (no customer email)
+    // Vendor chase-ups on open purchase orders. 10:00 so they land before the day's dispatches,
+    // and only orders with a Reminder_Interval_Days set are ever picked up.
+    po_reminder: 10
   }
 };
 

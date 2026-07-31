@@ -595,6 +595,12 @@ const QuotationPdfTemplate = React.forwardRef(({
                   {paymentTerm
                     ? <Meta k="Payment Terms" v={paymentTerm.label} />
                     : doc.Payment_Terms ? <Meta k="Payment Terms" v={doc.Payment_Terms} /> : null}
+                  {/* Despatch details. Each prints only when filled, so a document that does not
+                      need them looks exactly as it did before — this block is invisible until
+                      someone actually enters a transporter or an agent. */}
+                  {doc.Despatch_Through && <Meta k="Despatch Through" v={doc.Despatch_Through} />}
+                  {doc.Agent_Name && <Meta k="Agent" v={doc.Agent_Name} />}
+                  {doc.Vehicle_No && <Meta k="Vehicle No." v={doc.Vehicle_No} />}
                 </tbody>
               </table>
             </div>

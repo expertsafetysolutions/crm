@@ -212,9 +212,82 @@ async function generateAnnualProspectTasks() {
   return { createdCount, targetDate, todayStr };
 }
 
+/**
+ * Chases vendors on open purchase orders whose Next_Reminder_Date has arrived, then re-arms the
+ * next one. Mirrors runQuotationFollowUpReminders exactly — same due query, same re-arm-from-today
+ * rule — so the two behave identically and a reader only has to learn the pattern once.
+ *
+ * Only orders with a positive Reminder_Interval_Days participate: the interval is opt-in per PO,
+ * because most orders are delivered before anyone would chase them and a default cadence would
+ * mail every vendor in the book.
+ *
+ * Received and Cancelled orders fall out of the query on their own, which is what stops the
+ * reminders — there is no separate "stop" flag to forget to set.
+ */
+const PO_OPEN_STATUSES = ['Draft', 'Issued', 'Sent', 'Partially Received', 'Acknowledged'];
+
+async function runPurchaseOrderReminders() {
+  const todayStr = istToday();
+  const orders = await sheetsService.getTab('Purchase_Order');
+  const vendors = await sheetsService.getTab('Vendor_Master');
+  const vendorById = new Map(vendors.map(v => [v.Vendor_ID, v]));
+
+  const due = orders.filter(po =>
+    PO_OPEN_STATUSES.includes(po.Status)
+    && Number(po.Reminder_Interval_Days) > 0
+    && po.Next_Reminder_Date
+    && po.Next_Reminder_Date <= todayStr
+  );
+
+  let sentCount = 0;
+  let failedCount = 0;
+
+  for (const po of due) {
+    try {
+      const vendor = vendorById.get(po.Vendor_ID);
+      // No vendor row, or no way to reach them: re-arm anyway rather than retrying every single day
+      // for an order that can never send. The PO still shows its reminder settings on screen.
+      if (!vendor || (!vendor.Email && !vendor.Phone)) {
+        failedCount++;
+        await sheetsService.updateRow('Purchase_Order', 'PO_ID', po.PO_ID, {
+          Next_Reminder_Date: istDateOffset(Number(po.Reminder_Interval_Days) || 7)
+        });
+        continue;
+      }
+
+      const results = await dispatchService.sendPurchaseOrderReminder(po, vendor, { staffId: 'SYSTEM' });
+      if (results.some(r => r.ok)) sentCount++; else failedCount++;
+
+      const log = Array.isArray(po.Reminder_Log) ? po.Reminder_Log : [];
+      await sheetsService.updateRow('Purchase_Order', 'PO_ID', po.PO_ID, {
+        // Re-armed from today, not from the stale due date, so a backlog cannot fire a burst of
+        // same-day reminders once the cron catches up.
+        Next_Reminder_Date: istDateOffset(Number(po.Reminder_Interval_Days) || 7),
+        Last_Reminder_Sent_At: new Date().toISOString(),
+        Reminder_Count: (Number(po.Reminder_Count) || 0) + 1,
+        Reminder_Log: [...log, {
+          timestamp: new Date().toISOString(),
+          channels: results.map(r => ({
+            channel: r.channel,
+            status: r.ok ? 'sent' : 'failed',
+            error: r.ok ? '' : String(r.error || '')
+          }))
+        }]
+      });
+    } catch (e) {
+      failedCount++;
+      console.error(`PO reminder failed for ${po.PO_ID}:`, e.message);
+    }
+  }
+
+  return { dueCount: due.length, sentCount, failedCount, todayStr };
+}
+
 module.exports = {
   runQuotationFollowUpReminders,
   runPaymentDueReminders,
+  runPurchaseOrderReminders,
   generateAnnualProspectTasks,
-  ANNUAL_PROSPECT_LEAD_DAYS
+  ANNUAL_PROSPECT_LEAD_DAYS,
+  PO_OPEN_STATUSES
 };

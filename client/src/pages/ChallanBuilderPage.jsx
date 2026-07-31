@@ -2,8 +2,9 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom';
 import { ArrowLeft, Plus, Trash2, AlertTriangle, Check, Link2, FileText, Download, MapPin } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { matchesQuery, filterByQuery } from '../utils/searchUtils';
+import { filterByQuery } from '../utils/searchUtils';
 import QuotationPdfTemplate from '../components/QuotationPdfTemplate';
+import SmartSearchSelect from '../components/SmartSearchSelect';
 import DeliveryPODModal from '../components/DeliveryPODModal';
 import { downloadPdfFromElement, safeFileName } from '../utils/pdfGenerator';
 import { enqueueOfflineAction } from '../utils/offlineQueue';
@@ -581,6 +582,26 @@ export default function ChallanBuilderPage() {
             </summary>
             <div className="px-3 pb-3 space-y-2">
               <label className="block">
+                <span className="block text-[10px] font-extrabold uppercase tracking-wide text-slate-400 mb-0.5">Despatch through</span>
+                <input
+                  value={challan.Despatch_Through || ''}
+                  onChange={e => setChallan(c => ({ ...c, Despatch_Through: e.target.value }))}
+                  onBlur={e => persist({ Despatch_Through: e.target.value })}
+                  placeholder="e.g. By Road — Gati Transport"
+                  className="jc-input"
+                />
+              </label>
+              <label className="block">
+                <span className="block text-[10px] font-extrabold uppercase tracking-wide text-slate-400 mb-0.5">Agent name</span>
+                <input
+                  value={challan.Agent_Name || ''}
+                  onChange={e => setChallan(c => ({ ...c, Agent_Name: e.target.value }))}
+                  onBlur={e => persist({ Agent_Name: e.target.value })}
+                  placeholder="Transport agent / broker"
+                  className="jc-input"
+                />
+              </label>
+              <label className="block">
                 <span className="block text-[10px] font-extrabold uppercase tracking-wide text-slate-400 mb-0.5">Vehicle no</span>
                 <input
                   value={challan.Vehicle_No || ''}
@@ -1003,41 +1024,32 @@ export default function ChallanBuilderPage() {
   );
 }
 
+/**
+ * Was a hand-rolled list capped at 8 rows in a 160px box, searching Item_Name only. On a catalogue
+ * of hundreds that meant the item you wanted usually was not on screen and there was no way to tell.
+ * Now the shared picker: matches HSN and category too, in any word order, and expands full-screen.
+ */
 function ItemPicker({ items, onPick, onClose }) {
-  const [query, setQuery] = useState('');
-  const matches = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    const active = items.filter(i => i.Active !== false && !i.Is_Deleted);
-    if (!q) return active.slice(0, 8);
-    return active.filter(i => matchesQuery(q, [i.Item_Name])).slice(0, 8);
-  }, [query, items]);
+  const active = useMemo(
+    () => items.filter(i => i.Active !== false && !i.Is_Deleted),
+    [items]
+  );
 
   return (
     <div className="mt-2 rounded-xl border border-slate-200 bg-white p-2 space-y-1.5">
-      <input
-        autoFocus
-        value={query}
-        onChange={e => setQuery(e.target.value)}
-        placeholder="Search item master…"
-        className="jc-input"
+      <SmartSearchSelect
+        options={active}
+        value={null}
+        onChange={row => { if (row) onPick(row); }}
+        expandable
+        expandedTitle="Select an item"
+        placeholder="Search item name or HSN…"
+        getKey={i => i.Item_ID}
+        getLabel={i => i.Item_Name}
+        getSubtitle={i => [i.Category, i.HSN_Code ? `HSN ${i.HSN_Code}` : '', i.Unit || 'Nos'].filter(Boolean).join(' · ')}
+        getSearchable={i => [i.Item_Name, i.Category, i.HSN_Code, ...(i.Aliases || [])]}
+        emptyText="Nothing matches. Add it in Items & Inventory first."
       />
-      <div className="max-h-40 overflow-y-auto space-y-1">
-        {matches.map(m => (
-          <button
-            key={m.Item_ID}
-            onClick={() => onPick(m)}
-            className="w-full min-h-[40px] px-2.5 rounded-lg text-left text-xs font-bold text-slate-700 active:bg-slate-100 flex items-center justify-between gap-2"
-          >
-            <span className="truncate">{m.Item_Name}</span>
-            <span className="text-[10px] text-slate-400 shrink-0">{m.Unit || 'Nos'}</span>
-          </button>
-        ))}
-        {matches.length === 0 && (
-          <p className="text-[11px] text-slate-400 text-center py-3">
-            Nothing matches. Add it in Items &amp; Inventory first.
-          </p>
-        )}
-      </div>
       <button onClick={onClose} className="jc-btn-ghost w-full">Cancel</button>
     </div>
   );

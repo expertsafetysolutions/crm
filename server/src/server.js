@@ -638,6 +638,10 @@ const REMINDER_JOBS = {
   [reminderScheduler.JOBS.ANNUAL_PROSPECT]: {
     label: 'Annual prospect task generation',
     run: () => require('./services/quotationCronService').generateAnnualProspectTasks()
+  },
+  [reminderScheduler.JOBS.PO_REMINDER]: {
+    label: 'Purchase order vendor reminders',
+    run: () => require('./services/quotationCronService').runPurchaseOrderReminders()
   }
 };
 

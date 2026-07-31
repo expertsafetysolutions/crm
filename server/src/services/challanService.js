@@ -635,7 +635,11 @@ async function suggestNextChallanNo() {
   return template.replace(/(\d+)\s*$/, String(max + 1).padStart(tail.length, '0'));
 }
 
-const DRAFT_EDITABLE = ['Challan_Date', 'Notes', 'Vehicle_No', 'Received_By_Name', 'Is_Historical'];
+const DRAFT_EDITABLE = [
+  'Challan_Date', 'Notes', 'Vehicle_No', 'Received_By_Name', 'Is_Historical',
+  // Despatch details, same optional fields every other document type carries.
+  'Despatch_Through', 'Agent_Name'
+];
 
 /**
  * Canonical shape of ONE challan line. The single place that decides what a line's fields mean.

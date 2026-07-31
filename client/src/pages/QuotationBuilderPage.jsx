@@ -3,10 +3,9 @@ import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   ArrowLeft, Plus, Trash2, Save, Send, FileText, Download, CheckCircle2,
   AlertTriangle, History, Loader2, Copy, Building2, Eye, X, Printer, MoreHorizontal,
-  Image as ImageIcon, Mail, MessageCircle, Paperclip, Trophy, MessageSquarePlus
+  Image as ImageIcon, Mail, MessageCircle, Paperclip, Trophy, MessageSquarePlus, Settings
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { matchesQuery } from '../utils/searchUtils';
 import { useDocSettings } from '../context/DocSettingsContext';
 import QuotationPdfTemplate from '../components/QuotationPdfTemplate';
 import SmartSearchSelect from '../components/SmartSearchSelect';
@@ -16,6 +15,8 @@ import {
   formatMoney, formatDate, statusMeta, emptyLineItem,
   isEditable, isDispatchable, canRevise
 } from '../utils/quotationUtils';
+import { createSubjectOption, renameSubjectOption, deleteSubjectOption } from '../utils/subjectOptions';
+import SubjectCombo from '../components/SubjectCombo';
 import { stateOptions, extractStateCode, detectStateCode, getStateName } from '../utils/gstinUtils';
 
 // Must match ORDER_LOST_REASONS in server/src/routes/apiRoutes.js — the server rejects anything
@@ -95,6 +96,9 @@ export default function QuotationBuilderPage() {
     taskId: searchParams.get('taskId') || '',
     subject: '',
     notes: '',
+    despatchThrough: '',
+    agentName: '',
+    vehicleNo: '',
     paymentTermsId: '',
     selectedTncIds: [],
     followUpIntervalDays: '',
@@ -178,6 +182,9 @@ export default function QuotationBuilderPage() {
           taskId: q.Task_ID || '',
           subject: q.Subject || '',
           notes: q.Notes || '',
+          despatchThrough: q.Despatch_Through || '',
+          agentName: q.Agent_Name || '',
+          vehicleNo: q.Vehicle_No || '',
           paymentTermsId: q.Payment_Terms_ID || '',
           selectedTncIds: q.Selected_TNC_IDs || [],
           followUpIntervalDays: q.Follow_Up_Interval_Days,
@@ -411,6 +418,32 @@ export default function QuotationBuilderPage() {
     setTimeout(() => { setNotice(''); setError(''); }, 6000);
   };
 
+  // Subject-list edits patch `settings` in place. Re-fetching would be wasteful and, worse, would
+  // race the in-progress document — the only thing that changed is one array of suggestions.
+  const applySubjects = rows => setSettings(s => ({ ...(s || {}), subject_options: rows }));
+
+  const subjectActions = readOnly ? {} : {
+    onCreate: async (text) => {
+      try {
+        applySubjects(await createSubjectOption(authHeaders, text));
+        flash(`“${text}” added to the subject list.`);
+      } catch (e) { flash(e.message, true); }
+    },
+    onRename: async (id, text) => {
+      try {
+        applySubjects(await renameSubjectOption(authHeaders, id, text));
+      } catch (e) { flash(e.message, true); }
+    },
+    onDelete: async (id, text) => {
+      // Confirmed because the list is shared: removing one takes the shortcut away from everybody,
+      // even though documents already issued keep their subject text untouched.
+      if (!window.confirm(`Remove “${text}” from the subject list?\n\nDocuments already using it keep their subject.`)) return;
+      try {
+        applySubjects(await deleteSubjectOption(authHeaders, id));
+      } catch (e) { flash(e.message, true); }
+    }
+  };
+
   const payload = () => ({
     customerId: form.customerId,
     taskId: form.taskId || undefined,
@@ -419,6 +452,9 @@ export default function QuotationBuilderPage() {
     destinationStateCode: resolvedStateCode || form.destinationStateCode,
     subject: form.subject,
     notes: form.notes,
+    despatchThrough: form.despatchThrough,
+    agentName: form.agentName,
+    vehicleNo: form.vehicleNo,
     paymentTermsId: form.paymentTermsId,
     selectedTncIds: form.selectedTncIds,
     followUpIntervalDays: Number(form.followUpIntervalDays) || undefined,
@@ -772,6 +808,21 @@ export default function QuotationBuilderPage() {
               <History className="w-4 h-4" /> {history.length}
             </button>
           )}
+          {/* Shortcut to the lists this document draws on — subject options, payment terms, T&C,
+              numbering. Admin-only because saving them is. Opens in a new tab so a half-built
+              quotation is never lost to a navigation. */}
+          {isAdmin && (
+            <a
+              href="/settings/quotations"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="qt-appbar-btn shrink-0"
+              title="Document settings — subject options, payment terms, terms & conditions, numbering"
+              aria-label="Document settings"
+            >
+              <Settings className="w-5 h-5" />
+            </a>
+          )}
         </div>
       </div>
 
@@ -931,6 +982,7 @@ export default function QuotationBuilderPage() {
                 disabled={readOnly}
                 options={settings?.subject_options || []}
                 onChange={v => setForm(f => ({ ...f, subject: v }))}
+                {...subjectActions}
               />
               <div className="qt-field">
                 <select value={form.paymentTermsId} disabled={readOnly}
@@ -943,6 +995,22 @@ export default function QuotationBuilderPage() {
                 </select>
                 <label>Payment terms</label>
               </div>
+              {/* Unlike Subject, a payment term is a rate/credit-days commitment, not a one-line
+                  label — adding one mid-document without a moment's thought is how a customer ends
+                  up with "45 Days Credit" nobody meant to offer. So this stays Admin-only in
+                  Quotation Settings rather than an inline add here; this is just the shortcut to
+                  it, so a missing term does not mean abandoning the document to go find the gear
+                  at the top of the page. */}
+              {isAdmin && !readOnly && (
+                <a
+                  href="/settings/quotations"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 text-[11px] font-bold text-slate-500 hover:text-slate-800 -mt-2"
+                >
+                  <Settings className="w-3 h-3" /> Add / edit payment terms
+                </a>
+              )}
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <div className="qt-field">
@@ -968,7 +1036,11 @@ export default function QuotationBuilderPage() {
         </div>
 
         {/* Line items */}
-        <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+        {/* NOT overflow-hidden: the item picker's dropdown is absolutely positioned inside this
+            card, and clipping it cut the suggestion list off at the card edge — the list appeared
+            to be a few pixels tall with no way to see the rest. isolate keeps the rounded corners
+            behaving without trapping the dropdown. */}
+        <div className="bg-white border border-slate-200 rounded-xl isolate">
           <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between">
             <span className="qt-section-label">Items</span>
             {/* Creating a catalogue entry belongs beside the product list; adding a ROW to this
@@ -1127,13 +1199,14 @@ export default function QuotationBuilderPage() {
             </table>
           </div>
 
-          {/* Adds the next line where the eye already is — directly under the last row, in both
-              layouts. Full-width, so it reads as "continue the list" rather than a toolbar action. */}
+          {/* Left-aligned and only as wide as its label, so an open item dropdown from the row
+              above lands on empty space instead of under a full-width target. Still 44px tall,
+              which is the size a row you tap deserves — it just no longer claims the width. */}
           {!readOnly && (
-            <div className="border-t border-slate-100 p-3">
+            <div className="border-t border-slate-100 p-2.5">
               <button
                 onClick={addLine}
-                className="w-full min-h-[48px] rounded-xl border border-dashed border-slate-300 text-xs font-extrabold uppercase tracking-wide text-slate-600 flex items-center justify-center gap-2 hover:bg-slate-50 active:bg-slate-100 transition"
+                className="min-h-[44px] px-4 rounded-xl border border-dashed border-slate-300 text-xs font-extrabold uppercase tracking-wide text-slate-600 inline-flex items-center justify-center gap-2 hover:bg-slate-50 active:bg-slate-100 transition"
               >
                 <Plus className="w-4 h-4" /> ADD ITEM
               </button>
@@ -1256,10 +1329,33 @@ export default function QuotationBuilderPage() {
                 </label>
               ))}
             </div>
-            <div className="qt-field mt-4">
+            {/* Despatch details — optional, printed only when filled. Carried onto the PI and the
+                invoice by conversionService, so they are entered once. */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mt-4">
+              <div className="qt-field">
+                <input value={form.despatchThrough} disabled={readOnly} placeholder=" "
+                  onChange={e => setForm(f => ({ ...f, despatchThrough: e.target.value }))}
+                  className="qt-input" />
+                <label>Despatch through</label>
+              </div>
+              <div className="qt-field">
+                <input value={form.agentName} disabled={readOnly} placeholder=" "
+                  onChange={e => setForm(f => ({ ...f, agentName: e.target.value }))}
+                  className="qt-input" />
+                <label>Agent name</label>
+              </div>
+              <div className="qt-field">
+                <input value={form.vehicleNo} disabled={readOnly} placeholder=" "
+                  onChange={e => setForm(f => ({ ...f, vehicleNo: e.target.value }))}
+                  className="qt-input" />
+                <label>Vehicle no.</label>
+              </div>
+            </div>
+
+            <div className="qt-field mt-3">
               <textarea value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))}
                 rows={2} placeholder=" " className="qt-textarea" />
-              <label>Notes</label>
+              <label>Remarks / notes</label>
             </div>
           </div>
         )}
@@ -1651,64 +1747,6 @@ function Row({ label, value }) {
   );
 }
 
-/**
- * Subject field: a free-text input with a type-to-filter dropdown of saved suggestions.
- *
- * Deliberately NOT a <select> — an unusual subject must still be typeable without an Admin first
- * editing Quotation Settings, so the typed value is always authoritative and the list only offers
- * shortcuts. Options come from settings.subject_options.
- *
- * Blur closes the list on a timeout rather than immediately: a mousedown on an option fires blur
- * before click, so closing synchronously would unmount the option before its click registers.
- */
-function SubjectCombo({ value, onChange, options, disabled }) {
-  const [open, setOpen] = useState(false);
-  const closeTimer = useRef(null);
-
-  const query = String(value || '').toLowerCase().trim();
-  const list = (options || []).map(o => (typeof o === 'string' ? o : o.text)).filter(Boolean);
-  // An exact match means the user has already picked; show the whole list again rather than a
-  // single redundant row.
-  const filtered = query && !list.some(t => t.toLowerCase() === query)
-    ? list.filter(t => matchesQuery(query, [t]))
-    : list;
-
-  useEffect(() => () => clearTimeout(closeTimer.current), []);
-
-  return (
-    <div className="relative">
-      <div className="qt-field">
-        <input
-          value={value ?? ''}
-          disabled={disabled}
-          placeholder=" "
-          autoComplete="off"
-          onChange={e => { onChange(e.target.value); setOpen(true); }}
-          onFocus={() => setOpen(true)}
-          onBlur={() => { closeTimer.current = setTimeout(() => setOpen(false), 120); }}
-          className="qt-input"
-        />
-        <label>Subject</label>
-      </div>
-
-      {open && !disabled && filtered.length > 0 && (
-        <div className="absolute z-20 left-0 right-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-lg max-h-56 overflow-y-auto">
-          {filtered.map(text => (
-            <button
-              key={text}
-              type="button"
-              onMouseDown={e => e.preventDefault()}
-              onClick={() => { onChange(text); setOpen(false); }}
-              className="w-full text-left px-3 py-2.5 text-sm hover:bg-slate-50 active:bg-slate-100"
-            >
-              {text}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
 
 /**
  * Per-line remark, printed under the item on the PDF.
@@ -1778,6 +1816,8 @@ function ItemPicker({ items, line, onPick }) {
       options={items}
       value={selected}
       onChange={onPick}
+      expandable
+      expandedTitle="Select an item"
       placeholder="Search item name or HSN…"
       getKey={i => i.Item_ID}
       getLabel={i => i.Item_Name}

@@ -21,7 +21,8 @@ const JOBS = {
   QUOTATION_FOLLOWUP: 'quotation_followup',
   PAYMENT_DUE: 'payment_due',
   REFILLING_DUE: 'refilling_due',
-  ANNUAL_PROSPECT: 'annual_prospect'
+  ANNUAL_PROSPECT: 'annual_prospect',
+  PO_REMINDER: 'po_reminder'
 };
 
 /** Current hour (0-23) on the office's clock, regardless of where the server runs. */

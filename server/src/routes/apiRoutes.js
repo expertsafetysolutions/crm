@@ -3446,6 +3446,79 @@ router.post('/item-categories', async (req, res) => {
   }
 });
 
+/**
+ * Subject-line suggestions, editable from the document builders themselves.
+ *
+ * These are the same `settings.subject_options` the Quotation Settings screen edits, but reachable
+ * without leaving a half-built quotation — sending someone to a settings page mid-document means
+ * abandoning what they typed.
+ *
+ * Gated on `quotation:edit` rather than Admin: the people writing quotations are the ones who know
+ * what the subject should say, and PUT /quotation-settings (Admin-only, whole-object) stays the
+ * place to change anything else. Each route rewrites ONLY subject_options for that reason — saving
+ * the whole settings blob from here would let a stale client clobber SMTP or seller details.
+ */
+router.post('/subject-options', requirePermission('quotation', 'edit'), async (req, res) => {
+  try {
+    const text = String(req.body.text || '').trim();
+    if (!text) return res.status(400).json({ error: 'Subject text is required' });
+
+    const settings = await quotationEngine.getSettings();
+    const existing = settings.subject_options || [];
+    if (existing.some(o => String(o.text || '').toLowerCase() === text.toLowerCase())) {
+      return res.status(409).json({ error: 'That subject already exists' });
+    }
+    const row = { id: `SUB_${Date.now()}${Math.random().toString(36).slice(2, 4)}`, text };
+    settings.subject_options = [...existing, row];
+    await sheetsService.saveQuotationSettings('DEFAULT', settings);
+    res.json({ success: true, option: row, subject_options: settings.subject_options });
+  } catch (err) {
+    console.error('POST /subject-options error:', err);
+    res.status(500).json({ error: 'Could not add subject' });
+  }
+});
+
+router.put('/subject-options/:id', requirePermission('quotation', 'edit'), async (req, res) => {
+  try {
+    const text = String(req.body.text || '').trim();
+    if (!text) return res.status(400).json({ error: 'Subject text is required' });
+
+    const settings = await quotationEngine.getSettings();
+    const existing = settings.subject_options || [];
+    if (!existing.some(o => o.id === req.params.id)) {
+      return res.status(404).json({ error: 'Subject not found' });
+    }
+    // A rename that collides with a DIFFERENT row would leave two identical suggestions.
+    if (existing.some(o => o.id !== req.params.id && String(o.text || '').toLowerCase() === text.toLowerCase())) {
+      return res.status(409).json({ error: 'That subject already exists' });
+    }
+    settings.subject_options = existing.map(o => (o.id === req.params.id ? { ...o, text } : o));
+    await sheetsService.saveQuotationSettings('DEFAULT', settings);
+    res.json({ success: true, subject_options: settings.subject_options });
+  } catch (err) {
+    console.error('PUT /subject-options error:', err);
+    res.status(500).json({ error: 'Could not update subject' });
+  }
+});
+
+router.delete('/subject-options/:id', requirePermission('quotation', 'edit'), async (req, res) => {
+  try {
+    const settings = await quotationEngine.getSettings();
+    const existing = settings.subject_options || [];
+    const next = existing.filter(o => o.id !== req.params.id);
+    if (next.length === existing.length) return res.status(404).json({ error: 'Subject not found' });
+
+    settings.subject_options = next;
+    await sheetsService.saveQuotationSettings('DEFAULT', settings);
+    // Documents store the subject as TEXT, so removing a suggestion never alters an existing
+    // quotation, PI or invoice — it only stops offering it on new ones.
+    res.json({ success: true, subject_options: next });
+  } catch (err) {
+    console.error('DELETE /subject-options error:', err);
+    res.status(500).json({ error: 'Could not delete subject' });
+  }
+});
+
 // --- QUOTATIONS (Module B) ---
 router.get('/quotations', requirePermission('quotation','view'), async (req, res) => {
   try {

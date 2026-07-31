@@ -55,6 +55,11 @@ function carryForwardFields(source) {
     Selected_TNC_IDs: source.Selected_TNC_IDs,
     Subject: source.Subject,
     Notes: source.Notes,
+    // Despatch details follow the document through PI and invoice — the goods and the transporter
+    // do not change because the paperwork was converted.
+    Despatch_Through: source.Despatch_Through || '',
+    Agent_Name: source.Agent_Name || '',
+    Vehicle_No: source.Vehicle_No || '',
     Assigned_Staff: source.Assigned_Staff,
     Task_ID: source.Task_ID
   };

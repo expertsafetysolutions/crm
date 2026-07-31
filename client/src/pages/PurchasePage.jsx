@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, Plus, Trash2, Loader2, AlertTriangle, CheckCircle2,
   Building2, FileQuestion, ShoppingCart, PackageCheck, Star, TrendingDown,
-  IndianRupee, ArrowRight, Search, X
+  IndianRupee, ArrowRight, Search, X, PhoneCall, MessageCircle, Mail, Bell, MessageSquare
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import SmartSearchSelect from '../components/SmartSearchSelect';
@@ -58,6 +58,8 @@ export default function PurchasePage() {
   const [payments, setPayments] = useState([]);
   const [match, setMatch] = useState(null);
   const [margin, setMargin] = useState(null);
+  const [remarkModal, setRemarkModal] = useState(null); // { po, vendor }
+  const [dispatchBusyId, setDispatchBusyId] = useState(null);
 
   const headers = useMemo(
     () => ({ 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }),
@@ -73,6 +75,94 @@ export default function PurchasePage() {
     ]),
     [orders, poQuery]
   );
+
+  const vendorById = useMemo(() => new Map(vendors.map(v => [v.Vendor_ID, v])), [vendors]);
+
+  /**
+   * "ABC 6kg - 5 Nos, Hose Reel - 1 Nos" for the Material Details column. Matches the wording
+   * dispatchService.summarizeItems uses for the same purpose in an email body, so the register and
+   * the mail a vendor actually receives describe the order identically.
+   */
+  const materialSummary = (po) => (po.Lines || [])
+    .map(l => `${l.Item_Name || ''} - ${Number(l.Qty) || 0} ${l.Unit || 'Nos'}`.trim())
+    .join(', ');
+
+  /**
+   * Writes one row into the SAME discussion-log table the customer-facing Call/WhatsApp buttons
+   * use (Customer_Interactions). interactionLogger.customerIdOf already falls back to Vendor_ID for
+   * a document that carries one, so a PO's dispatch/reminder emails land in this exact log already
+   * — this just gives the manual Call/WhatsApp taps on this page the same trail.
+   */
+  const logVendorInteraction = async (vendor, type, remarks) => {
+    try {
+      await fetch('/api/customer-interactions', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ customerId: vendor.Vendor_ID, type, remarks })
+      });
+    } catch (e) { /* the call/chat itself already happened; a lost log entry must not block it */ }
+  };
+
+  const cleanPhone = (phone) => String(phone || '').replace(/\D/g, '');
+  const dialerNumber = (phone) => {
+    const num = cleanPhone(phone);
+    if (num.length === 10) return `+91${num}`;
+    if (num.startsWith('91') && num.length === 12) return `+${num}`;
+    return num ? (num.startsWith('+') ? num : `+${num}`) : '';
+  };
+
+  const callVendor = (po, vendor) => {
+    if (!vendor?.Phone) return flash('This vendor has no phone number on file.', 'err');
+    logVendorInteraction(vendor, 'Call Logged', `Call Button Pressed — Contacted ${vendor.Vendor_Name} at ${vendor.Phone} re. ${po.PO_No}`);
+    window.location.href = `tel:${dialerNumber(vendor.Phone)}`;
+  };
+
+  const whatsappVendor = (po, vendor) => {
+    if (!vendor?.Phone) return flash('This vendor has no phone number on file.', 'err');
+    const num = cleanPhone(vendor.Phone);
+    const waNumber = num.length === 10 ? `91${num}` : num;
+    const text = encodeURIComponent(`Regarding Purchase Order ${po.PO_No} dated ${po.PO_Date} — `);
+    logVendorInteraction(vendor, 'Whatsapp', `WhatsApp opened re. ${po.PO_No}`);
+    window.open(`https://wa.me/${waNumber}?text=${text}`, '_blank', 'noopener');
+  };
+
+  /**
+   * Email and Reminder both hit the routes wired to dispatchService.sendPurchaseOrder /
+   * sendPurchaseOrderReminder — the exact functions this session made template-driven and
+   * self-logging (they call interactionLogger.logDispatch on every send). No separate log call is
+   * needed here; asking loadAll() to refetch is enough for the row to reflect what just happened.
+   */
+  const emailPo = async (po, vendor) => {
+    if (!vendor?.Email) return flash('This vendor has no email address on file.', 'err');
+    setDispatchBusyId(po.PO_ID);
+    try {
+      const res = await fetch(`/api/purchase-orders/${po.PO_ID}/dispatch`, { method: 'POST', headers, body: '{}' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Could not send the purchase order email');
+      const ok = (data.results || []).some(r => r.ok);
+      flash(ok ? `Purchase order emailed to ${vendor.Vendor_Name}.` : 'Email attempt finished but nothing was confirmed sent — check Dispatch Log.', ok ? 'ok' : 'err');
+    } catch (e) {
+      flash(e.message, 'err');
+    } finally {
+      setDispatchBusyId(null);
+    }
+  };
+
+  const remindPo = async (po, vendor) => {
+    if (!vendor?.Email && !vendor?.Phone) return flash('This vendor has no email or phone on file.', 'err');
+    setDispatchBusyId(po.PO_ID);
+    try {
+      const res = await fetch(`/api/purchase-orders/${po.PO_ID}/reminder`, { method: 'POST', headers, body: '{}' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Could not send the reminder');
+      const ok = (data.results || []).some(r => r.ok);
+      flash(ok ? `Reminder sent to ${vendor.Vendor_Name}.` : 'Reminder attempt finished but nothing was confirmed sent — check Dispatch Log.', ok ? 'ok' : 'err');
+    } catch (e) {
+      flash(e.message, 'err');
+    } finally {
+      setDispatchBusyId(null);
+    }
+  };
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -125,6 +215,30 @@ export default function PurchasePage() {
       flash(e.message, 'err');
       return null;
     } finally { setBusy(false); }
+  };
+
+  /**
+   * Adds a typed category to the shared master list.
+   *
+   * Deliberately NOT routed through `post()`: that calls loadAll(), and refetching every vendor,
+   * RFQ and order while someone is mid-way through the vendor form would blow away what they have
+   * typed. The list is updated locally instead, so the new chip appears immediately.
+   *
+   * Silent on failure by design. The category is already applied to the vendor being edited, and
+   * only an Admin may write the master list — a buyer without that right should not be handed a
+   * "403" for a background nicety they never asked for.
+   */
+  const createCategory = async (name) => {
+    setCategories(prev => (
+      prev.some(c => c.toLowerCase() === name.toLowerCase())
+        ? prev
+        : [...prev, name].sort((a, b) => a.localeCompare(b))
+    ));
+    try {
+      await fetch('/api/item-categories', {
+        method: 'POST', headers, body: JSON.stringify({ name })
+      });
+    } catch { /* stays on this vendor either way */ }
   };
 
   const openCompare = async (rfq) => {
@@ -282,31 +396,109 @@ export default function PurchasePage() {
                 <Empty text="No purchase orders yet. Compare quotes on an enquiry to raise one." />
               ) : visibleOrders.length === 0 ? (
                 <Empty text="No purchase order matches that search." />
-              ) : visibleOrders.map(po => (
-                <div key={po.PO_ID} onClick={() => navigate(`/purchase-orders/${po.PO_ID}`)}
-                  className="bg-white border border-slate-200 rounded-xl p-3 hover:border-slate-300 active:bg-slate-50 transition cursor-pointer">
-                  <div className="flex items-start gap-2">
-                    <div className="flex-1 min-w-0">
-                      <p className="text-xs font-extrabold text-slate-900 truncate">{po.PO_No}</p>
-                      <p className="text-[11px] text-slate-500 truncate">{po.Vendor_Name} · {po.PO_Date}</p>
-                    </div>
-                    <StatusChip status={po.Status} />
+              ) : (
+                <>
+                  {/* MOBILE: one card per order. A dense table forces horizontal scroll and shrinks
+                      the action buttons below a tappable size on a phone. */}
+                  <div className="md:hidden space-y-2">
+                    {visibleOrders.map(po => {
+                      const vendor = vendorById.get(po.Vendor_ID);
+                      return (
+                        <div key={po.PO_ID} onClick={() => navigate(`/purchase-orders/${po.PO_ID}`)}
+                          className="bg-white border border-slate-200 rounded-xl p-3 hover:border-slate-300 active:bg-slate-50 transition cursor-pointer">
+                          <div className="flex items-start gap-2">
+                            <div className="flex-1 min-w-0">
+                              <p className="text-xs font-extrabold text-slate-900 truncate">{po.PO_No}</p>
+                              <p className="text-[11px] text-slate-500 truncate">{po.Vendor_Name} · {po.PO_Date}</p>
+                              <p className="text-[11px] text-slate-400 truncate mt-0.5">{materialSummary(po) || '—'}</p>
+                            </div>
+                            <StatusChip status={po.Status} />
+                          </div>
+                          <div className="mt-2 flex items-center justify-between gap-2 flex-wrap" onClick={e => e.stopPropagation()}>
+                            <PoActionBar po={po} vendor={vendor} busy={dispatchBusyId === po.PO_ID}
+                              onCall={callVendor} onWhatsapp={whatsappVendor} onEmail={emailPo}
+                              onReminder={remindPo} onRemark={() => setRemarkModal({ po, vendor })} />
+                            {po.Status !== 'Received' && po.Status !== 'Cancelled' && (
+                              <button onClick={(e) => { e.stopPropagation(); setReceiving({ po, lines: {}, totalCharges: '', vendorInvoiceNo: '', rating: 0 }); setTab('RECEIVE'); }}
+                                className="px-3 min-h-[40px] rounded-xl bg-slate-900 text-white text-[11px] font-extrabold active:bg-slate-800">
+                                Receive
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
-                  <div className="mt-2 flex items-center justify-between gap-2" onClick={e => e.stopPropagation()}>
-                    <span className="text-[11px] text-slate-500">
-                      {(po.Lines || []).length} line(s)
-                      {canSeeMoney && po.Subtotal !== undefined && <> · <b className="text-slate-700">{money(po.Subtotal)}</b></>}
-                    </span>
-                    {po.Status !== 'Received' && po.Status !== 'Cancelled' && (
-                      <button onClick={(e) => { e.stopPropagation(); setReceiving({ po, lines: {}, totalCharges: '', vendorInvoiceNo: '', rating: 0 }); setTab('RECEIVE'); }}
-                        className="px-3 min-h-[40px] rounded-xl bg-slate-900 text-white text-[11px] font-extrabold active:bg-slate-800">
-                        Receive
-                      </button>
-                    )}
+
+                  {/* DESKTOP: a register — Company / Material Details / PO Date / PO No / Remark,
+                      one row per order, the way the office reads this list on paper/Excel today. */}
+                  <div className="hidden md:block bg-white border border-slate-200 rounded-xl overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="border-b border-slate-200 text-left text-[10px] font-extrabold uppercase tracking-wide text-slate-400">
+                          <th className="px-3 py-2">Company Name</th>
+                          <th className="px-3 py-2">Material Details</th>
+                          <th className="px-3 py-2">PO Date</th>
+                          <th className="px-3 py-2">PO No.</th>
+                          <th className="px-3 py-2">Remark</th>
+                          <th className="px-3 py-2">Status</th>
+                          <th className="px-3 py-2 text-right">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {visibleOrders.map(po => {
+                          const vendor = vendorById.get(po.Vendor_ID);
+                          return (
+                            <tr key={po.PO_ID} className="border-b border-slate-100 last:border-0 hover:bg-slate-50">
+                              <td className="px-3 py-2 font-bold text-slate-900 cursor-pointer" onClick={() => navigate(`/purchase-orders/${po.PO_ID}`)}>
+                                {po.Vendor_Name}
+                              </td>
+                              <td className="px-3 py-2 text-slate-600 max-w-[280px] truncate" title={materialSummary(po)}>
+                                {materialSummary(po) || '—'}
+                              </td>
+                              <td className="px-3 py-2 text-slate-600 whitespace-nowrap">{po.PO_Date}</td>
+                              <td className="px-3 py-2 font-bold text-slate-900 whitespace-nowrap cursor-pointer" onClick={() => navigate(`/purchase-orders/${po.PO_ID}`)}>
+                                {po.PO_No}
+                              </td>
+                              <td className="px-3 py-2 text-slate-500 max-w-[200px] truncate" title={po.Notes || ''}>
+                                {po.Notes || '—'}
+                              </td>
+                              <td className="px-3 py-2"><StatusChip status={po.Status} /></td>
+                              <td className="px-3 py-2">
+                                <div className="flex items-center justify-end gap-1.5">
+                                  <PoActionBar po={po} vendor={vendor} busy={dispatchBusyId === po.PO_ID}
+                                    onCall={callVendor} onWhatsapp={whatsappVendor} onEmail={emailPo}
+                                    onReminder={remindPo} onRemark={() => setRemarkModal({ po, vendor })} />
+                                  {po.Status !== 'Received' && po.Status !== 'Cancelled' && (
+                                    <button onClick={() => { setReceiving({ po, lines: {}, totalCharges: '', vendorInvoiceNo: '', rating: 0 }); setTab('RECEIVE'); }}
+                                      className="px-2.5 h-8 rounded-lg bg-slate-900 text-white text-[11px] font-extrabold active:bg-slate-800 shrink-0">
+                                      Receive
+                                    </button>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
                   </div>
-                </div>
-              ))}
+                </>
+              )}
             </>
+        )}
+
+        {/* Discussion-log modal for a vendor Call/WhatsApp/Email/Reminder button — same
+            Customer_Interactions table the customer-facing task cards write to (keyed on
+            Vendor_ID), so a PO's contact history lives in one place with everything else. */}
+        {remarkModal && (
+          <VendorRemarkModal
+            po={remarkModal.po}
+            vendor={remarkModal.vendor}
+            headers={headers}
+            onClose={() => setRemarkModal(null)}
+            onLogged={() => flash('Logged.')}
+          />
         )}
 
         {/* ── RECEIVE ── */}
@@ -420,6 +612,7 @@ export default function PurchasePage() {
             {vendorForm ? (
               <VendorForm form={vendorForm} setForm={setVendorForm} busy={busy} customers={customers}
                 categories={categories}
+                onCreateCategory={createCategory}
                 onCancel={() => setVendorForm(null)}
                 onSubmit={async () => {
                   const isNew = !vendorForm.Vendor_ID;
@@ -609,6 +802,136 @@ function StatusChip({ status }) {
     : /Cancelled/.test(status) ? 'bg-slate-100 text-slate-500'
     : 'bg-blue-100 text-blue-700';
   return <span className={`px-2 py-0.5 rounded text-[10px] font-extrabold shrink-0 ${tone}`}>{status}</span>;
+}
+
+/**
+ * The four contact actions for one purchase order, identical across the mobile card and the
+ * desktop register row. 32px icon buttons — CLAUDE.md's toolbar-row size: six to eight of these
+ * sit side by side, so spacing and colour carry the meaning, not a bigger target.
+ *
+ * Call and WhatsApp act immediately (dialer / wa.me) and log a row themselves. Email and Reminder
+ * go through the server routes wired to dispatchService, which already write their own log entry
+ * on every send — so those two do not double-log here.
+ */
+function PoActionBar({ po, vendor, busy, onCall, onWhatsapp, onEmail, onReminder, onRemark }) {
+  const iconBtn = 'w-8 h-8 rounded-lg flex items-center justify-center transition shrink-0 disabled:opacity-40';
+  return (
+    <div className="flex items-center gap-1">
+      <button type="button" title="Discussion log" disabled={!vendor}
+        onClick={(e) => { e.stopPropagation(); onRemark(); }}
+        className={`${iconBtn} bg-amber-50 hover:bg-amber-100 active:bg-amber-200 text-amber-700`}>
+        <MessageSquare className="w-4 h-4" />
+      </button>
+      <button type="button" title={vendor?.Phone ? `Call ${vendor.Phone}` : 'No phone on file'} disabled={!vendor?.Phone}
+        onClick={(e) => { e.stopPropagation(); onCall(po, vendor); }}
+        className={`${iconBtn} bg-emerald-50 hover:bg-emerald-100 active:bg-emerald-200 text-emerald-700`}>
+        <PhoneCall className="w-4 h-4" />
+      </button>
+      <button type="button" title={vendor?.Phone ? 'WhatsApp' : 'No phone on file'} disabled={!vendor?.Phone}
+        onClick={(e) => { e.stopPropagation(); onWhatsapp(po, vendor); }}
+        className={`${iconBtn} bg-green-50 hover:bg-green-100 active:bg-green-200 text-green-600`}>
+        <MessageCircle className="w-4 h-4" />
+      </button>
+      <button type="button" title={vendor?.Email ? `Email ${vendor.Email}` : 'No email on file'} disabled={!vendor?.Email || busy}
+        onClick={(e) => { e.stopPropagation(); onEmail(po, vendor); }}
+        className={`${iconBtn} bg-sky-50 hover:bg-sky-100 active:bg-sky-200 text-sky-700`}>
+        {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mail className="w-4 h-4" />}
+      </button>
+      <button type="button" title="Send a follow-up reminder now" disabled={(!vendor?.Email && !vendor?.Phone) || busy}
+        onClick={(e) => { e.stopPropagation(); onReminder(po, vendor); }}
+        className={`${iconBtn} bg-indigo-50 hover:bg-indigo-100 active:bg-indigo-200 text-indigo-700`}>
+        {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Bell className="w-4 h-4" />}
+      </button>
+    </div>
+  );
+}
+
+/**
+ * A small, self-contained discussion log for one purchase order's vendor — the PO equivalent of
+ * the customer "Add Remark" modal in AdminDashboard, minus that file's tag picker and task-modal
+ * plumbing (which is customer-shaped and does not exist on this page). Writes to the exact same
+ * Customer_Interactions table via POST /api/customer-interactions, keyed on Vendor_ID, so these
+ * rows sit in the same history as everything logged from the task board.
+ */
+function VendorRemarkModal({ po, vendor, headers, onClose, onLogged }) {
+  const [history, setHistory] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [text, setText] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/customer-interactions', { headers });
+        const all = await res.json();
+        if (!cancelled) setHistory((Array.isArray(all) ? all : []).filter(i => i.Customer_ID === po.Vendor_ID));
+      } catch (e) { /* history stays empty; the log itself still works */ }
+      finally { if (!cancelled) setLoading(false); }
+    })();
+    return () => { cancelled = true; };
+  }, [po.Vendor_ID, headers]);
+
+  const save = async () => {
+    if (!text.trim() || saving) return;
+    setSaving(true);
+    try {
+      const res = await fetch('/api/customer-interactions', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ customerId: po.Vendor_ID, type: 'Call Logged', remarks: text.trim() })
+      });
+      const row = await res.json();
+      if (res.ok) {
+        setHistory(h => [row, ...h]);
+        setText('');
+        onLogged?.();
+      }
+    } catch (e) { /* leave the draft so nothing typed is lost */ }
+    finally { setSaving(false); }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="bg-white w-full sm:max-w-md sm:rounded-2xl rounded-t-2xl max-h-[85vh] flex flex-col">
+        <div className="p-3.5 border-b border-slate-200 flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            <p className="text-xs font-extrabold text-slate-900 truncate">{po.PO_No}</p>
+            <p className="text-[11px] text-slate-500 truncate">{vendor?.Vendor_Name || po.Vendor_Name}</p>
+          </div>
+          <button onClick={onClose} className="w-8 h-8 rounded-lg text-slate-400 hover:bg-slate-100 flex items-center justify-center shrink-0">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="p-3.5 space-y-2">
+          <textarea value={text} onChange={e => setText(e.target.value)} rows={3} autoFocus
+            placeholder="Add a note about this order or conversation…"
+            className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-slate-400" />
+          <button onClick={save} disabled={!text.trim() || saving}
+            className="w-full min-h-[44px] rounded-xl bg-slate-900 text-white text-xs font-extrabold active:bg-slate-800 disabled:opacity-40">
+            {saving ? 'Saving…' : 'Save note'}
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-3.5 pb-3.5 space-y-2 border-t border-slate-100 pt-2.5">
+          {loading ? (
+            <p className="text-[11px] text-slate-400 text-center py-4">Loading history…</p>
+          ) : history.length === 0 ? (
+            <p className="text-[11px] text-slate-400 text-center py-4">No notes yet for this vendor.</p>
+          ) : history.slice().reverse().map((item, idx) => (
+            <div key={item.Interaction_ID || idx} className="p-2.5 rounded-lg bg-slate-50 border border-slate-200 space-y-1">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[10px] font-extrabold uppercase text-slate-500">{item.Type || 'Remark'}</span>
+                <span className="text-[10px] text-slate-400">{item.Staff_Name || item.Staff_ID || 'Staff'}</span>
+              </div>
+              <p className="text-xs text-slate-700 whitespace-pre-wrap">{item.Remarks}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 /** Quantity-first receiving. Costs never appear here unless the viewer is allowed to see them. */
@@ -981,7 +1304,7 @@ function RfqForm({ form, setForm, vendors, items, categories = [], busy, onCance
   );
 }
 
-function VendorForm({ form, setForm, busy, customers = [], categories = [], onCancel, onSubmit }) {
+function VendorForm({ form, setForm, busy, customers = [], categories = [], onCreateCategory, onCancel, onSubmit }) {
   const F = ({ label, field, type = 'text', placeholder }) => (
     <label className="block">
       <span className="block text-[10px] font-extrabold uppercase tracking-wide text-slate-400 mb-0.5">{label}</span>
@@ -1048,6 +1371,7 @@ function VendorForm({ form, setForm, busy, customers = [], categories = [], onCa
       <VendorCategoryPicker
         selected={form.productCategories || []}
         options={categories}
+        onCreate={onCreateCategory}
         onChange={next => setForm(f => ({ ...f, productCategories: next }))}
       />
 
@@ -1137,15 +1461,25 @@ function VendorExtraContacts({ contacts = [], onChange }) {
  * next one, and a vendor with three categories should not cost three screens of scrolling.
  * Free text is allowed on purpose — the buyer needing a category at 6pm cannot wait for an admin to
  * add it to a master list, and `/api/item-categories` picks it up once an item uses it.
+ *
+ * `onCreate` additionally promotes a typed category into the shared master list, so the next vendor
+ * form offers it as a chip instead of the buyer retyping it (and spelling it differently, which is
+ * what quietly splits "Fire Alarm" from "Fire alarm system" and breaks the enquiry filter). It is
+ * best-effort: a non-Admin gets a 403 there, and the category still applies to THIS vendor either
+ * way — saving the vendor is what the buyer actually came to do.
  */
-function VendorCategoryPicker({ selected = [], options = [], onChange }) {
+function VendorCategoryPicker({ selected = [], options = [], onChange, onCreate }) {
   const [query, setQuery] = useState('');
 
   const has = name => selected.some(s => s.toLowerCase() === name.toLowerCase());
-  const add = (name) => {
+  const add = (name, { persist = false } = {}) => {
     const clean = String(name || '').trim();
     if (!clean || has(clean)) return setQuery('');
     onChange([...selected, clean]);
+    // Only a genuinely new name is worth saving — picking an existing suggestion must not re-POST.
+    if (persist && onCreate && !options.some(o => o.toLowerCase() === clean.toLowerCase())) {
+      onCreate(clean);
+    }
     setQuery('');
   };
   const remove = name => onChange(selected.filter(s => s !== name));
@@ -1187,7 +1521,9 @@ function VendorCategoryPicker({ selected = [], options = [], onChange }) {
         onKeyDown={e => {
           if (e.key !== 'Enter') return;
           e.preventDefault();   // this sits inside a form-ish card; Enter must not submit the vendor
-          add(suggestions[0] || query);
+          // Enter on a highlighted suggestion picks it; Enter on unmatched text creates it.
+          if (suggestions[0]) add(suggestions[0]);
+          else add(query, { persist: true });
         }}
       />
 
@@ -1200,16 +1536,16 @@ function VendorCategoryPicker({ selected = [], options = [], onChange }) {
             </button>
           ))}
           {canCreate && (
-            <button type="button" onClick={() => add(query)}
-              className="px-2 py-1 rounded-lg border border-dashed border-slate-300 text-[11px] font-bold text-slate-500 active:bg-slate-100">
-              + Add “{query.trim()}”
+            <button type="button" onClick={() => add(query, { persist: true })}
+              className="px-2 py-1 rounded-lg border border-dashed border-slate-400 bg-slate-50 text-[11px] font-bold text-slate-700 active:bg-slate-200">
+              + Add “{query.trim()}” as new category
             </button>
           )}
         </div>
       )}
 
       <p className="text-[10px] text-slate-400 mt-0.5">
-        Used to filter vendors when you raise an enquiry.
+        Used to filter vendors when you raise an enquiry. Type a new name and press Enter to add it.
       </p>
     </div>
   );

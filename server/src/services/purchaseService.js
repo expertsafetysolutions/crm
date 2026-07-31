@@ -29,6 +29,13 @@ function istToday() {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
 }
 
+/** Calendar date `days` from now on the office's clock. Never toISOString — the server may not be IST. */
+function istDateOffset(days) {
+  const d = new Date();
+  d.setDate(d.getDate() + Number(days || 0));
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(d);
+}
+
 /** Hand-rolled ids, matching the convention used across the rest of the app. */
 function newId(prefix) {
   return `${prefix}${Date.now().toString().slice(-6)}${Math.floor(Math.random() * 100).toString().padStart(2, '0')}`;
@@ -324,7 +331,13 @@ function priceLines(payload, vendor, seller, existingLines = []) {
     };
   }).filter(l => l.Item_Name);
 
-  const vendorState = extractStateCode(vendor?.GSTIN || '');
+  // The vendor's GSTIN encodes their state in its first two digits, and that is the right answer
+  // whenever it exists. An explicit sourceStateCode is the fallback for an unregistered supplier:
+  // without it a vendor with no GSTIN silently priced as intra-state CGST/SGST, which is the wrong
+  // tax on a real purchase order and there was no way to correct it. Mirrors the quotation
+  // builder's "Place of supply", which solves the identical problem for a B2C customer.
+  const vendorState = extractStateCode(vendor?.GSTIN || '')
+    || String(payload.sourceStateCode || '').trim();
   const sellerState = extractStateCode(seller?.gstin || '');
   const gstType = (vendorState && sellerState && vendorState !== sellerState) ? 'IGST' : 'CGST_SGST';
 
@@ -335,14 +348,35 @@ function priceLines(payload, vendor, seller, existingLines = []) {
     documentDiscountAmt: Number(payload.documentDiscountAmt) || 0
   });
 
-  return { lines: totals.lineItems, totals, gstType };
+  return { lines: totals.lineItems, totals, gstType, sourceStateCode: vendorState };
+}
+
+/**
+ * When the next vendor chase-up should fire.
+ *
+ * Must NOT simply re-arm from today on every save: editing a PO would push the date forward each
+ * time and a reminder on a 7-day cadence would never fire for anyone who touches the order weekly.
+ * An existing date is therefore preserved untouched, and only a CHANGED interval re-arms it —
+ * which is what someone adjusting the cadence is asking for.
+ */
+function nextReminderDate(payload, existing) {
+  const days = Math.max(0, Number(payload.reminderIntervalDays) || 0);
+  if (days === 0) return '';                       // turned off — stop chasing
+
+  const prevDays = Math.max(0, Number(existing?.Reminder_Interval_Days) || 0);
+  const prevDate = String(existing?.Next_Reminder_Date || '').trim();
+  if (prevDate && prevDays === days) return prevDate;
+
+  // Armed from TODAY, never from the PO date, so switching this on for an order raised last month
+  // does not fire an immediate backlog of overdue reminders.
+  return istDateOffset(days);
 }
 
 /**
  * The document fields a PO shares with a quotation — subject, terms, notes — so the two builders
  * write the same shape and `QuotationPdfTemplate` needs no PO-specific branch to render them.
  */
-function documentFields(payload, vendor, totals, gstType) {
+function documentFields(payload, vendor, totals, gstType, existing = null) {
   return {
     Subject: String(payload.subject || '').trim(),
     Payment_Terms: String(payload.paymentTerms || vendor.Payment_Terms || '').trim(),
@@ -350,7 +384,24 @@ function documentFields(payload, vendor, totals, gstType) {
     Selected_TNC_IDs: Array.isArray(payload.selectedTncIds) ? payload.selectedTncIds : [],
     Expected_Date: String(payload.expectedDate || '').trim(),
     Notes: String(payload.notes || '').trim(),
+    /*
+     * Auto-chase cadence, opt-in per order. 0 (the default) means never — most orders arrive before
+     * anyone would chase them, and a blanket default would mail every vendor in the book.
+     *
+     * Next_Reminder_Date is armed from TODAY rather than the PO date, so setting an interval on an
+     * order raised last month does not fire an immediate backlog of overdue reminders.
+     */
+    Reminder_Interval_Days: Math.max(0, Number(payload.reminderIntervalDays) || 0),
+    Next_Reminder_Date: nextReminderDate(payload, existing),
+    // Despatch details. Optional everywhere and printed only when filled, so an order that needs
+    // none looks exactly as it did before these existed.
+    Despatch_Through: String(payload.despatchThrough || '').trim(),
+    Agent_Name: String(payload.agentName || '').trim(),
+    Vehicle_No: String(payload.vehicleNo || '').trim(),
     GST_Type: gstType,
+    // Recorded so a saved PO keeps the basis its tax was split on, even if the vendor's GSTIN is
+    // added or corrected later — the same reason a quotation stores Destination_State_Code.
+    Source_State_Code: String(payload.sourceStateCode || '').trim(),
     Subtotal: totals.Subtotal,
     Gross_Total: totals.Gross_Total,
     Line_Discount_Total: totals.Line_Discount_Total,
@@ -930,7 +981,7 @@ async function updatePurchaseOrder(poId, payload, actor) {
     Vendor_Name: vendor.Vendor_Name,
     Vendor_GSTIN: vendor.GSTIN || '',
     Lines: lines,
-    ...documentFields(payload, vendor, totals, gstType),
+    ...documentFields(payload, vendor, totals, gstType, existing),
     Updated_At: new Date().toISOString()
   };
 

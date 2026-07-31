@@ -291,6 +291,11 @@ async function createQuotation(payload, actor) {
 
     Subject: payload.subject || '',
     Notes: payload.notes || '',
+    // Despatch details, optional and printed only when filled. Copied onto the PI and invoice by
+    // conversionService so they are entered once and travel with the document.
+    Despatch_Through: String(payload.despatchThrough || '').trim(),
+    Agent_Name: String(payload.agentName || '').trim(),
+    Vehicle_No: String(payload.vehicleNo || '').trim(),
     Assigned_Staff: payload.assignedStaff || actor?.staffId || '',
     Task_ID: payload.taskId || '',
     Created_By: actor?.staffId || 'SYSTEM',
@@ -482,6 +487,10 @@ async function createRevision(quotationId, payload, actor) {
     Expiry_Date: istDatePlusDays(expiryDays),
     Follow_Up_Interval_Days: Number(payload?.followUpIntervalDays ?? parent.Follow_Up_Interval_Days),
     Notes: payload?.notes !== undefined ? payload.notes : parent.Notes,
+    // Inherited from the parent unless the revision explicitly changes them, same rule as Notes.
+    Despatch_Through: payload?.despatchThrough !== undefined ? String(payload.despatchThrough).trim() : (parent.Despatch_Through || ''),
+    Agent_Name: payload?.agentName !== undefined ? String(payload.agentName).trim() : (parent.Agent_Name || ''),
+    Vehicle_No: payload?.vehicleNo !== undefined ? String(payload.vehicleNo).trim() : (parent.Vehicle_No || ''),
     Revision_Reason: payload?.revisionReason || '',
 
     // Each revision is independently dispatchable and gets its own portal link/history.

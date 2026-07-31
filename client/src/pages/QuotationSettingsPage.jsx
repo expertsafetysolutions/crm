@@ -33,13 +33,18 @@ const EMAIL_TEMPLATES = [
   { key: 'pi_email', label: 'Proforma Invoice Dispatch', hint: 'Sent when you press Send Email on a proforma invoice in Sales Documents. No {view_link} — the customer portal exists only for quotations.' },
   { key: 'invoice_email', label: 'Tax Invoice Dispatch', hint: 'Sent when you press Send Email on a sales invoice in Sales Documents. No {view_link} — the customer portal exists only for quotations.' },
   { key: 'challan_email', label: 'Delivery Challan Dispatch', hint: 'Sent when you press Send Email on an issued challan in the Challan register. Off by default.' },
-  { key: 'certificate_email', label: 'Certificate Dispatch', hint: 'Sent when you press Email to Customer on a saved certificate. Supports {certificate_type}, {certificate_no} and {verification_link} — the public QR verification page. Off by default.' }
+  { key: 'certificate_email', label: 'Certificate Dispatch', hint: 'Sent when you press Email to Customer on a saved certificate. Supports {certificate_type}, {certificate_no} and {verification_link} — the public QR verification page. Off by default.' },
+  // Both address a VENDOR — {customer_name} etc. resolve to the vendor's own details for these two.
+  { key: 'po_email', label: 'Purchase Order Dispatch', hint: 'Sent when you press Send Email on an issued purchase order.' },
+  { key: 'po_reminder', label: 'Purchase Order Reminder', hint: 'Auto-sent per PO on the "Auto-reminder every (days)" cadence set on that order (0 = off — most orders never reach this). Also sendable manually.' }
 ];
 
 const WHATSAPP_TEMPLATES = [
   { key: 'quotation_whatsapp', label: 'Quotation Dispatch', hint: 'Sent when you dispatch a quotation, if WhatsApp is an enabled channel.' },
   { key: 'followup_reminder', label: 'Quotation Follow-up Reminder', hint: 'Shares the follow-up template body with email; the WhatsApp template name below is what Meta actually sends.' },
-  { key: 'invoice_payment_due', label: 'Invoice Payment Due', hint: 'Shares the payment-reminder body with email; Meta sends via the approved template named below.' }
+  { key: 'invoice_payment_due', label: 'Invoice Payment Due', hint: 'Shares the payment-reminder body with email; Meta sends via the approved template named below.' },
+  { key: 'po_email', label: 'Purchase Order Dispatch', hint: 'Sent to the vendor if WhatsApp is an enabled channel.' },
+  { key: 'po_reminder', label: 'Purchase Order Reminder', hint: 'Auto-sent on the PO\'s own cadence when the vendor has a phone number. Body params: vendor name, PO number, amount.' }
 ];
 
 /**
@@ -106,6 +111,16 @@ const TEMPLATE_VARIABLES = [
       { token: '{item_count}', label: 'Item Count' },
       { token: '{sales_person}', label: 'Sales Person' },
       { token: '{payment_status}', label: 'Payment Status' }
+    ]
+  },
+  {
+    // Blank on any document with nothing entered yet, so phrase the sentence around them to still
+    // read sensibly empty (see the Purchase Order Reminder default body for the pattern).
+    group: 'Despatch',
+    items: [
+      { token: '{despatch_through}', label: 'Despatch Through' },
+      { token: '{agent_name}', label: 'Agent Name' },
+      { token: '{vehicle_no}', label: 'Vehicle No.' }
     ]
   },
   {

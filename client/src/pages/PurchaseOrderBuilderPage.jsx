@@ -3,16 +3,19 @@ import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   ArrowLeft, Plus, Trash2, Save, FileText, Download, CheckCircle2,
   AlertTriangle, Loader2, Building2, Eye, X, Printer, MoreHorizontal,
-  Mail, Bell, MessageSquarePlus, PackageCheck, Star, IndianRupee
+  Mail, Bell, MessageSquarePlus, PackageCheck, Star, IndianRupee, Settings
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { matchesQuery } from '../utils/searchUtils';
 import { useDocSettings } from '../context/DocSettingsContext';
 import QuotationPdfTemplate from '../components/QuotationPdfTemplate';
 import SmartSearchSelect from '../components/SmartSearchSelect';
 import GstinInput from '../components/GstinInput';
+import { stateOptions, extractStateCode, detectStateCode, getStateName } from '../utils/gstinUtils';
 import { downloadPdfFromElement, fetchAsBase64, safeFileName } from '../utils/pdfGenerator';
 import { formatMoney, formatDate } from '../utils/quotationUtils';
+import { createSubjectOption } from '../utils/subjectOptions';
+import SubjectCombo from '../components/SubjectCombo';
+import CollapsibleSection from '../components/CollapsibleSection';
 
 const istToday = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
 
@@ -86,9 +89,15 @@ export default function PurchaseOrderBuilderPage() {
     discountMode: 'PCT',
     documentDiscountPct: 0,
     documentDiscountAmt: 0,
+    sourceStateCode: '',
+    reminderIntervalDays: 0,
+    despatchThrough: '',
+    agentName: '',
+    vehicleNo: '',
     lines: [emptyPoLine()]
   });
   const [totals, setTotals] = useState(null);
+  const [priceError, setPriceError] = useState('');
 
   const authHeaders = useMemo(() => ({
     'Content-Type': 'application/json',
@@ -163,6 +172,11 @@ export default function PurchaseOrderBuilderPage() {
             ? 'AMT' : 'PCT',
           documentDiscountPct: p.Document_Level_Discount_Pct || 0,
           documentDiscountAmt: p.Document_Level_Discount_Amt || 0,
+          sourceStateCode: p.Source_State_Code || '',
+          reminderIntervalDays: Number(p.Reminder_Interval_Days) || 0,
+          despatchThrough: p.Despatch_Through || '',
+          agentName: p.Agent_Name || '',
+          vehicleNo: p.Vehicle_No || '',
           lines: (p.Lines || []).length
             ? p.Lines.map(l => ({
                 lineId: l.lineId,
@@ -214,6 +228,15 @@ export default function PurchaseOrderBuilderPage() {
   }, [showPreview]);
 
   const selectedVendor = vendors.find(v => v.Vendor_ID === form.vendorId);
+
+  // The supplier's state, from their GSTIN where they have one. Same precedence as the quotation
+  // builder's resolvedStateCode: a GSTIN beats a stored code, which beats reading the address.
+  const resolvedStateCode = useMemo(() => {
+    if (!selectedVendor) return '';
+    return extractStateCode(selectedVendor.GSTIN || '')
+      || String(selectedVendor.State_Code || '')
+      || detectStateCode(selectedVendor.Address || '');
+  }, [selectedVendor]);
   // Goods already received freeze the order: the shelf and the ledger have to keep agreeing.
   const readOnly = po ? ['Received', 'Cancelled'].includes(po.Status) : false;
 
@@ -223,8 +246,13 @@ export default function PurchaseOrderBuilderPage() {
       : { documentDiscountPct: Number(form.documentDiscountPct) || 0, documentDiscountAmt: 0 }
   ), [form.discountMode, form.documentDiscountPct, form.documentDiscountAmt]);
 
+  // The ONE definition of "this line gets priced". pricedLine() counts skipped rows with the same
+  // predicate, so the two can never disagree — when they did, a row with a name but no quantity
+  // shifted every amount below it by one and lines showed each other's money.
+  const isPriceable = l => Boolean(String(l.itemName || '').trim()) && Number(l.qty) > 0;
+
   const payloadLines = useCallback(() => form.lines
-    .filter(l => String(l.itemName || '').trim() && Number(l.qty) > 0)
+    .filter(isPriceable)
     .map(l => ({
       lineId: l.lineId || undefined,
       itemId: l.itemId || '',
@@ -248,11 +276,25 @@ export default function PurchaseOrderBuilderPage() {
       const res = await fetch('/api/purchase-orders/preview', {
         method: 'POST',
         headers: authHeaders,
-        body: JSON.stringify({ vendorId: form.vendorId, lines: valid, ...discountFields })
+        body: JSON.stringify({
+          vendorId: form.vendorId,
+          lines: valid,
+          ...discountFields,
+          // The vendor's own GSTIN wins on the server; this only fills the gap for a supplier
+          // without one, where the tax split would otherwise be a silent guess.
+          sourceStateCode: resolvedStateCode || form.sourceStateCode
+        })
       });
-      if (res.ok) setTotals(await res.json());
-    } catch (e) { /* keep last good totals */ }
-  }, [form.vendorId, payloadLines, discountFields, authHeaders]);
+      if (res.ok) { setTotals(await res.json()); setPriceError(''); return; }
+      // A failed re-price used to be swallowed entirely: totals silently stayed null and the panel
+      // read "add an item to see totals" with a full line on screen, which looks like the totals
+      // are broken rather than like the request failed. Say so instead.
+      const data = await res.json().catch(() => ({}));
+      setPriceError(data.error || `Could not price this order (HTTP ${res.status}).`);
+    } catch (e) {
+      setPriceError('Could not reach the server to price this order.');
+    }
+  }, [form.vendorId, payloadLines, discountFields, form.sourceStateCode, resolvedStateCode, authHeaders]);
 
   useEffect(() => {
     if (readOnly) return;
@@ -339,6 +381,20 @@ export default function PurchaseOrderBuilderPage() {
     setTimeout(() => { setNotice(''); setError(''); }, 6000);
   };
 
+  // Add only — no rename or delete here. The list is shared with quotations, and editing it from
+  // inside a PO would silently change what every other document offers. Managing the master list
+  // belongs in Quotation Settings, which the gear in the app bar opens. Adding stays because a
+  // buyer meeting a new subject mid-order should not have to abandon the order to record it.
+  const subjectActions = readOnly ? {} : {
+    onCreate: async (text) => {
+      try {
+        const rows = await createSubjectOption(authHeaders, text);
+        setSettings(s => ({ ...(s || {}), subject_options: rows }));
+        flash(`“${text}” added to the subject list.`);
+      } catch (e) { flash(e.message, true); }
+    }
+  };
+
   const payload = () => ({
     vendorId: form.vendorId,
     poNo: form.poNo || undefined,
@@ -349,6 +405,11 @@ export default function PurchaseOrderBuilderPage() {
     paymentTermsId: form.paymentTermsId,
     paymentTerms: form.paymentTerms,
     selectedTncIds: form.selectedTncIds,
+    sourceStateCode: resolvedStateCode || form.sourceStateCode,
+    reminderIntervalDays: Number(form.reminderIntervalDays) || 0,
+    despatchThrough: form.despatchThrough,
+    agentName: form.agentName,
+    vehicleNo: form.vehicleNo,
     ...discountFields,
     lines: payloadLines()
   });
@@ -566,6 +627,29 @@ export default function PurchaseOrderBuilderPage() {
   }
 
   const displayTotals = totals || po;
+
+  /**
+   * The priced counterpart of a rendered line.
+   *
+   * Cannot index by position: priceLines() drops lines with no Item_Name, so a single blank row
+   * above a filled one shifts every amount up by one — each item then displays the NEXT item's
+   * money. Match on lineId, which survives the filter, and fall back to position only for lines
+   * saved before ids existed.
+   */
+  const pricedLine = (line, idx) => {
+    // Only `totals` — never the saved `po`. displayTotals falls back to the stored order, whose
+    // Lines are whatever was last SAVED; showing those against rows being edited puts a stale
+    // amount (or ₹0.00 from an emptied line) next to what is actually on screen.
+    if (!isPriceable(line)) return null;
+    const rows = totals?.lineItems || totals?.Lines || [];
+    if (line?.lineId) {
+      const hit = rows.find(r => r.lineId === line.lineId);
+      if (hit) return hit;
+    }
+    // Positional fallback, counting skipped rows with the SAME predicate the payload uses.
+    const skippedAbove = form.lines.slice(0, idx).filter(l => !isPriceable(l)).length;
+    return rows[idx - skippedAbove];
+  };
   // Money is stripped server-side for anyone without finance:view; this only decides whether the
   // columns are drawn, so a store-keeper raising an order sees quantities and nothing else.
   const showMoney = canSeeMoney;
@@ -590,6 +674,22 @@ export default function PurchaseOrderBuilderPage() {
               </div>
             )}
           </div>
+          {/* Shortcut to the lists this document draws on — subject options, payment terms, T&C,
+              the PO number prefix. Admin-only because saving them is: showing it to anyone else
+              would just walk them into a 403 on a screen they cannot use. Opens in a new tab so a
+              half-built order is never lost to a navigation. */}
+          {isAdmin && (
+            <a
+              href="/settings/quotations"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="qt-appbar-btn shrink-0"
+              title="Document settings — subject options, payment terms, terms & conditions, numbering"
+              aria-label="Document settings"
+            >
+              <Settings className="w-5 h-5" />
+            </a>
+          )}
         </div>
       </div>
 
@@ -616,8 +716,25 @@ export default function PurchaseOrderBuilderPage() {
           </div>
         )}
 
-        {/* Vendor + document meta */}
-        <div className="qt-card">
+        {/* Vendor + document meta.
+            Folds itself once the supplier and subject are set — the items table is where the rest
+            of the work happens, and on a phone this block otherwise costs most of the screen for
+            details that are already decided. Tapping the summary row reopens it. */}
+        <CollapsibleSection
+          isComplete={Boolean(form.vendorId && String(form.subject || '').trim())}
+          autoCollapse={!readOnly}
+          summary={
+            <div className="min-w-0">
+              <div className="text-[10px] font-extrabold uppercase tracking-wide text-slate-400">
+                Supplier &amp; document
+              </div>
+              <div className="text-xs font-bold text-slate-800 truncate">
+                {selectedVendor?.Vendor_Name || po?.Vendor_Name || 'Select a supplier'}
+                {String(form.subject || '').trim() && ` · ${form.subject}`}
+              </div>
+            </div>
+          }
+        >
           <div className="grid md:grid-cols-2 gap-5">
             <div>
               {readOnly ? (
@@ -688,6 +805,13 @@ export default function PurchaseOrderBuilderPage() {
                       ? <span className="font-semibold text-emerald-700">GSTIN {selectedVendor.GSTIN}</span>
                       : <span className="text-amber-700 font-semibold">No GSTIN on file — tap to add</span>}
                   </div>
+                  {resolvedStateCode && (
+                    <div className="text-slate-500">
+                      Place of supply: <span className="font-semibold text-slate-700">
+                        {resolvedStateCode} — {getStateName(resolvedStateCode)}
+                      </span>
+                    </div>
+                  )}
                   {displayTotals?.GST_Type && (
                     <div className="text-slate-500">
                       Supply type: <span className="font-semibold text-slate-700">
@@ -700,6 +824,27 @@ export default function PurchaseOrderBuilderPage() {
                   )}
                 </div>
               )}
+
+              {/* Only asked for when it genuinely cannot be derived — a GSTIN encodes the state in
+                  its first two digits, and a saved State_Code or an address naming the state
+                  resolves it too. Without this an unregistered supplier silently priced as
+                  intra-state CGST/SGST, which is the wrong tax on an inter-state purchase. */}
+              {selectedVendor && !readOnly && !resolvedStateCode && (
+                <div className="qt-field mt-3">
+                  <select
+                    value={form.sourceStateCode}
+                    onChange={e => setForm(f => ({ ...f, sourceStateCode: e.target.value }))}
+                    className="qt-select"
+                  >
+                    <option value="">— Select state —</option>
+                    {stateOptions().map(s => <option key={s.code} value={s.code}>{s.code} — {s.name}</option>)}
+                  </select>
+                  <label>Place of supply</label>
+                  <div className="text-[11px] text-amber-700 mt-1">
+                    This vendor has no GSTIN, so the state could not be determined — select it, or CGST/SGST is assumed.
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="space-y-4">
@@ -708,6 +853,7 @@ export default function PurchaseOrderBuilderPage() {
                 disabled={readOnly}
                 options={settings?.subject_options || []}
                 onChange={v => setForm(f => ({ ...f, subject: v }))}
+                {...subjectActions}
               />
               <div className="qt-field">
                 <select value={form.paymentTermsId} disabled={readOnly}
@@ -729,6 +875,19 @@ export default function PurchaseOrderBuilderPage() {
                 </select>
                 <label>Payment terms</label>
               </div>
+              {/* Shortcut to the same Admin-only editor the quotation builder links to — payment
+                  terms stay a managed list rather than a free-text add, since a rate/credit-days
+                  commitment typed in haste is exactly how the wrong terms end up on a live PO. */}
+              {isAdmin && !readOnly && (
+                <a
+                  href="/settings/quotations"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 text-[11px] font-bold text-slate-500 hover:text-slate-800 -mt-2"
+                >
+                  <Settings className="w-3 h-3" /> Add / edit payment terms
+                </a>
+              )}
               <div className="grid grid-cols-2 gap-3">
                 <div className="qt-field">
                   <input type="date" value={form.poDate} disabled={readOnly} placeholder=" "
@@ -753,12 +912,44 @@ export default function PurchaseOrderBuilderPage() {
                   <label>PO number (leave blank to auto-generate)</label>
                 </div>
               )}
+
+              {/* Auto-chase cadence. Opt-in per order: most deliveries arrive before anyone would
+                  chase them, so a default would mail every vendor in the book. */}
+              <div className="qt-field">
+                <input
+                  type="number" min="0" step="1" placeholder=" "
+                  value={form.reminderIntervalDays}
+                  disabled={readOnly}
+                  onChange={e => setForm(f => ({ ...f, reminderIntervalDays: e.target.value }))}
+                  className="qt-input"
+                />
+                <label>Auto-reminder every (days) — 0 = off</label>
+                <div className="text-[11px] text-slate-500 mt-1">
+                  {Number(form.reminderIntervalDays) > 0 ? (
+                    <>
+                      Reminds {selectedVendor?.Vendor_Name || 'the vendor'} every{' '}
+                      <strong>{Number(form.reminderIntervalDays)}</strong>{' '}
+                      {Number(form.reminderIntervalDays) === 1 ? 'day' : 'days'} until the order is received or cancelled.
+                      {po?.Next_Reminder_Date && <> Next: <strong>{formatDate(po.Next_Reminder_Date)}</strong>.</>}
+                      {!selectedVendor?.Email && !selectedVendor?.Phone && (
+                        <span className="text-amber-700"> This vendor has no email or phone on file, so nothing can be sent.</span>
+                      )}
+                    </>
+                  ) : (
+                    'Leave at 0 to chase this vendor manually.'
+                  )}
+                </div>
+              </div>
             </div>
           </div>
-        </div>
+        </CollapsibleSection>
 
         {/* Line items */}
-        <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+        {/* NOT overflow-hidden: the item picker's dropdown is absolutely positioned inside this
+            card, and clipping it cut the suggestion list off at the card edge — the list appeared
+            to be a few pixels tall with no way to see the rest. isolate keeps the rounded corners
+            behaving without trapping the dropdown. */}
+        <div className="bg-white border border-slate-200 rounded-xl isolate">
           <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between">
             <span className="qt-section-label">Items</span>
             {!readOnly && canAddItem && (
@@ -773,7 +964,7 @@ export default function PurchaseOrderBuilderPage() {
               phone and shrinks the inputs below a tappable size. */}
           <div className="md:hidden divide-y divide-slate-100">
             {form.lines.map((line, idx) => {
-              const computed = displayTotals?.lineItems?.[idx] || displayTotals?.Lines?.[idx];
+              const computed = pricedLine(line, idx);
               return (
                 <div key={idx} className="p-3 space-y-2.5">
                   <div className="flex items-start gap-2">
@@ -857,7 +1048,7 @@ export default function PurchaseOrderBuilderPage() {
               </thead>
               <tbody>
                 {form.lines.map((line, idx) => {
-                  const computed = displayTotals?.lineItems?.[idx] || displayTotals?.Lines?.[idx];
+                  const computed = pricedLine(line, idx);
                   return (
                     <tr key={idx} className="border-t border-slate-100">
                       <td className="px-3 py-2">
@@ -931,11 +1122,14 @@ export default function PurchaseOrderBuilderPage() {
           </div>
 
           {/* Adds the next line where the eye already is — directly under the last row. */}
+          {/* Left-aligned and only as wide as its label, so an open item dropdown from the row
+              above lands on empty space instead of under a full-width target. Still 44px tall,
+              which is the size a row you tap deserves — it just no longer claims the width. */}
           {!readOnly && (
-            <div className="border-t border-slate-100 p-3">
+            <div className="border-t border-slate-100 p-2.5">
               <button
                 onClick={addLine}
-                className="w-full min-h-[48px] rounded-xl border border-dashed border-slate-300 text-xs font-extrabold uppercase tracking-wide text-slate-600 flex items-center justify-center gap-2 hover:bg-slate-50 active:bg-slate-100 transition"
+                className="min-h-[44px] px-4 rounded-xl border border-dashed border-slate-300 text-xs font-extrabold uppercase tracking-wide text-slate-600 inline-flex items-center justify-center gap-2 hover:bg-slate-50 active:bg-slate-100 transition"
               >
                 <Plus className="w-4 h-4" /> ADD ITEM
               </button>
@@ -1027,7 +1221,20 @@ export default function PurchaseOrderBuilderPage() {
                       </div>
                     </>
                   ) : (
-                    <div className="text-slate-400 text-xs">Select a vendor and add items to see totals.</div>
+                    // Naming the ONE thing that is missing: a buyer who has filled in every line
+                    // and still sees "select a vendor and add items" reads it as the totals being
+                    // broken, not as a step they have not done yet. GST cannot be split until the
+                    // vendor's state is known, so pricing genuinely cannot run before then.
+                    <div className={`rounded-xl px-3 py-2 text-xs font-semibold border ${
+                      priceError
+                        ? 'text-rose-700 bg-rose-50 border-rose-200'
+                        : 'text-amber-700 bg-amber-50 border-amber-200'
+                    }`}>
+                      {priceError
+                        || (!form.vendorId
+                          ? 'Select a vendor above to see totals — GST depends on their state.'
+                          : 'Add an item with a quantity to see totals.')}
+                    </div>
                   )}
                 </div>
               </div>
@@ -1037,8 +1244,23 @@ export default function PurchaseOrderBuilderPage() {
 
         {/* T&C + notes */}
         {!readOnly && (
-          <div className="qt-card">
-            <div className="qt-section-label mb-2.5">Terms &amp; Conditions</div>
+          <CollapsibleSection
+            // Terms are picked once and rarely revisited, but the list runs to eight-plus lines.
+            // Complete as soon as one is ticked, so it folds out of the way after the choice.
+            isComplete={form.selectedTncIds.length > 0}
+            summary={
+              <div className="min-w-0">
+                <div className="text-[10px] font-extrabold uppercase tracking-wide text-slate-400">
+                  Terms &amp; conditions
+                </div>
+                <div className="text-xs font-bold text-slate-800 truncate">
+                  {form.selectedTncIds.length > 0
+                    ? `${form.selectedTncIds.length} selected${String(form.notes || '').trim() ? ' · notes added' : ''}`
+                    : 'None selected'}
+                </div>
+              </div>
+            }
+          >
             <div className="space-y-1">
               {(settings?.tnc_checklist || []).map(t => (
                 <label key={t.id} className="flex items-start gap-2.5 text-sm cursor-pointer px-2 py-1.5 -mx-2 rounded-lg hover:bg-slate-50">
@@ -1059,12 +1281,36 @@ export default function PurchaseOrderBuilderPage() {
                 </p>
               )}
             </div>
-            <div className="qt-field mt-4">
+            {/* Despatch details — optional on every document type, printed only when filled.
+                Kept beside the terms rather than up in the header: they are known at dispatch
+                time, not when the order is being priced. */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mt-4">
+              <div className="qt-field">
+                <input value={form.despatchThrough} placeholder=" "
+                  onChange={e => setForm(f => ({ ...f, despatchThrough: e.target.value }))}
+                  className="qt-input" />
+                <label>Despatch through</label>
+              </div>
+              <div className="qt-field">
+                <input value={form.agentName} placeholder=" "
+                  onChange={e => setForm(f => ({ ...f, agentName: e.target.value }))}
+                  className="qt-input" />
+                <label>Agent name</label>
+              </div>
+              <div className="qt-field">
+                <input value={form.vehicleNo} placeholder=" "
+                  onChange={e => setForm(f => ({ ...f, vehicleNo: e.target.value }))}
+                  className="qt-input" />
+                <label>Vehicle no.</label>
+              </div>
+            </div>
+
+            <div className="qt-field mt-3">
               <textarea value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))}
                 rows={2} placeholder=" " className="qt-textarea" />
-              <label>Notes</label>
+              <label>Remarks / notes</label>
             </div>
-          </div>
+          </CollapsibleSection>
         )}
 
         {/* Receive / pay on save — creation only. An existing order is received from the Receive tab,
@@ -1393,60 +1639,6 @@ function Row({ label, value }) {
   );
 }
 
-/**
- * Subject field: free text with a type-to-filter dropdown of the saved suggestions, shared with the
- * quotation builder. Deliberately NOT a <select> — an unusual subject must still be typeable without
- * an Admin first editing settings, so the typed value is always authoritative.
- *
- * Blur closes the list on a timeout rather than immediately: a mousedown on an option fires blur
- * before click, so closing synchronously would unmount the option before its click registers.
- */
-function SubjectCombo({ value, onChange, options, disabled }) {
-  const [open, setOpen] = useState(false);
-  const closeTimer = useRef(null);
-
-  const query = String(value || '').toLowerCase().trim();
-  const list = (options || []).map(o => (typeof o === 'string' ? o : o.text)).filter(Boolean);
-  const filtered = query && !list.some(t => t.toLowerCase() === query)
-    ? list.filter(t => matchesQuery(query, [t]))
-    : list;
-
-  useEffect(() => () => clearTimeout(closeTimer.current), []);
-
-  return (
-    <div className="relative">
-      <div className="qt-field">
-        <input
-          value={value ?? ''}
-          disabled={disabled}
-          placeholder=" "
-          autoComplete="off"
-          onChange={e => { onChange(e.target.value); setOpen(true); }}
-          onFocus={() => setOpen(true)}
-          onBlur={() => { closeTimer.current = setTimeout(() => setOpen(false), 120); }}
-          className="qt-input"
-        />
-        <label>Subject</label>
-      </div>
-
-      {open && !disabled && filtered.length > 0 && (
-        <div className="absolute z-20 left-0 right-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-lg max-h-56 overflow-y-auto">
-          {filtered.map(text => (
-            <button
-              key={text}
-              type="button"
-              onMouseDown={e => e.preventDefault()}
-              onClick={() => { onChange(text); setOpen(false); }}
-              className="w-full text-left px-3 py-2.5 text-sm hover:bg-slate-50 active:bg-slate-100"
-            >
-              {text}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
 
 /**
  * Per-line note, printed under the item on the PDF.
@@ -1509,6 +1701,8 @@ function ItemPicker({ items, line, onPick }) {
       options={items}
       value={selected}
       onChange={onPick}
+      expandable
+      expandedTitle="Select an item"
       placeholder="Search item name or HSN…"
       getKey={i => (typeof i === 'string' ? i : i.Item_ID)}
       getLabel={i => (typeof i === 'string' ? i : i.Item_Name)}

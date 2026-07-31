@@ -230,8 +230,11 @@ router.post('/purchase-orders/:id/reminder', requirePermission('purchase', 'edit
     const vendor = vendors.find(v => v.Vendor_ID === po.Vendor_ID);
     if (!vendor) return res.status(404).json({ error: 'Vendor not found' });
 
-    if (!vendor.Email) {
-      return res.status(400).json({ error: 'This vendor has no email address on file.' });
+    // A phone-only vendor can still be reminded on WhatsApp — sendPurchaseOrderReminder already
+    // picks the channel from whichever contact details actually exist. Blocking on Email here would
+    // make the manual reminder button stricter than the automatic cron that calls the same function.
+    if (!vendor.Email && !vendor.Phone) {
+      return res.status(400).json({ error: 'This vendor has no email address or phone number on file.' });
     }
 
     const dispatchService = require('../services/dispatchService');

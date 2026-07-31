@@ -154,6 +154,13 @@ function buildVars(doc, extra = {}) {
     item_count: String((doc.Line_Items || doc.itemsList || []).length),
     view_link: doc.Portal_Guid ? quotePortalLink(doc) : '',
 
+    // Despatch details — optional on every document type. Substitute() leaves an unmatched
+    // {token} as literal text, so a template built around these must phrase the sentence to still
+    // read sensibly when one is blank (see po_reminder's default body).
+    despatch_through: doc.Despatch_Through || '',
+    agent_name: doc.Agent_Name || '',
+    vehicle_no: doc.Vehicle_No || '',
+
     // Assigned staff / seller
     sales_person: doc.Assigned_Staff || '',
     payment_status: doc.Payment_Status || '',
@@ -459,6 +466,36 @@ async function sendPaymentDueReminder(invoice) {
   });
 }
 
+/**
+ * Both PO senders used to hard-code their subject/body directly in JS — the only two document
+ * types in the file that did not go through dispatchTemplated. That meant nothing here was
+ * editable from Quotation Settings the way every other document's wording is: the office could
+ * change what a customer email says but never what a vendor email or reminder says. Both now
+ * resolve `po_email` / `po_reminder` from settings.draft_templates, same as everything else.
+ *
+ * Returns just the vars dispatchTemplated cannot derive alone: buildVars' generic PO branch does
+ * NOT know who is being addressed, so {customer_name} etc. must be pointed at the vendor here, and
+ * a PO's amount/tax split is computed from doc.Lines rather than doc.Grand_Total (a PO never gets
+ * that field written — see priceLines in purchaseService).
+ */
+function poExtraVars(po, vendor) {
+  let totalTaxable = 0;
+  let totalTax = 0;
+  for (const l of (po.Lines || [])) {
+    const taxable = l.Line_Total || 0;
+    totalTaxable += taxable;
+    totalTax += taxable * ((l.GST_Rate || 0) / 100);
+  }
+  return {
+    customer_name: vendor.Vendor_Name || po.Vendor_Name,
+    company_name: vendor.Vendor_Name || po.Vendor_Name,
+    customer_email: vendor.Email || '',
+    amount: formatCurrency(totalTaxable + totalTax),
+    taxable_amount: formatCurrency(totalTaxable),
+    tax_amount: formatCurrency(totalTax)
+  };
+}
+
 async function sendPurchaseOrder(po, vendor, attachments, channel, actor) {
   const settings = await getSettings();
 
@@ -471,43 +508,17 @@ async function sendPurchaseOrder(po, vendor, attachments, channel, actor) {
     });
   }
 
-  // We build custom vars for PO
-  const vars = buildVars(po, {
-    customer_name: vendor.Vendor_Name || po.Vendor_Name,
-    company_name: vendor.Vendor_Name || po.Vendor_Name,
-    customer_email: vendor.Email || ''
+  const results = await dispatchTemplated({
+    doc: po,
+    templateKey: 'po_email',
+    recipientEmail: vendor.Email || '',
+    recipientPhone: vendor.Phone || '',
+    attachments: resolved && resolved.length ? resolved : undefined,
+    settings,
+    channel,
+    extraVars: poExtraVars(po, vendor),
+    actor
   });
-
-  // Calculate dynamic PO totals
-  let totalTaxable = 0;
-  let totalTax = 0;
-  const isIgst = po.Vendor_GSTIN && settings.seller_profile?.gstin && po.Vendor_GSTIN.slice(0, 2) !== settings.seller_profile.gstin.slice(0, 2);
-  for (const l of (po.Lines || [])) {
-    const taxable = l.Line_Total || 0;
-    const gstPct = l.GST_Rate || 0;
-    const gstAmt = taxable * (gstPct / 100);
-    totalTaxable += taxable;
-    totalTax += gstAmt;
-  }
-  const amount = totalTaxable + totalTax;
-  vars.amount = formatCurrency(amount);
-  vars.taxable_amount = formatCurrency(totalTaxable);
-  vars.tax_amount = formatCurrency(totalTax);
-
-  // We can write a custom template for PO
-  const body = `Dear ${vendor.Vendor_Name || po.Vendor_Name},\n\nPlease find attached our purchase order ${po.PO_No} dated ${formatDateDMY(po.PO_Date)} for ${vars.amount}.\n\nKindly supply the items as per the terms.\n\nRegards,\n${settings.seller_profile?.legal_name || 'Expert Safety Solutions'}`;
-  const subject = `Purchase Order ${po.PO_No} from ${settings.seller_profile?.legal_name || 'Expert Safety Solutions'}`;
-
-  const results = [];
-  results.push(await emailService.sendEmail(settings.smtp_config, {
-    to: vendor.Email || '',
-    subject,
-    body,
-    html: `<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.6;white-space:pre-wrap">${body
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-      .replace(/(https?:\/\/[^\s]+)/g, '<a href="$1">$1</a>')}</div>`,
-    attachments: resolved && resolved.length ? resolved : undefined
-  }));
 
   try {
     await interactionLogger.logDispatch({ doc: po, templateKey: 'po_email', results, actor });
@@ -521,36 +532,18 @@ async function sendPurchaseOrder(po, vendor, attachments, channel, actor) {
 async function sendPurchaseOrderReminder(po, vendor, actor) {
   const settings = await getSettings();
 
-  const vars = buildVars(po, {
-    customer_name: vendor.Vendor_Name || po.Vendor_Name,
-    company_name: vendor.Vendor_Name || po.Vendor_Name,
-    customer_email: vendor.Email || ''
+  const results = await dispatchTemplated({
+    doc: po,
+    templateKey: 'po_reminder',
+    recipientEmail: vendor.Email || '',
+    recipientPhone: vendor.Phone || '',
+    settings,
+    // Reminders go by whatever channels are actually usable for this vendor, not the global
+    // dispatch_mode — a vendor with a phone but a bounced email should still get chased on WhatsApp.
+    channel: vendor.Email && vendor.Phone ? 'Both' : (vendor.Phone ? 'WhatsApp' : 'Email'),
+    extraVars: poExtraVars(po, vendor),
+    actor
   });
-
-  // Calculate dynamic PO totals
-  let totalTaxable = 0;
-  let totalTax = 0;
-  for (const l of (po.Lines || [])) {
-    const taxable = l.Line_Total || 0;
-    const gstPct = l.GST_Rate || 0;
-    const gstAmt = taxable * (gstPct / 100);
-    totalTaxable += taxable;
-    totalTax += gstAmt;
-  }
-  vars.amount = formatCurrency(totalTaxable + totalTax);
-
-  const body = `Dear ${vendor.Vendor_Name || po.Vendor_Name},\n\nThis is a gentle follow-up regarding our purchase order ${po.PO_No} dated ${formatDateDMY(po.PO_Date)} for ${vars.amount}.\n\nKindly confirm the delivery timeline at your earliest.\n\nRegards,\n${settings.seller_profile?.legal_name || 'Expert Safety Solutions'}`;
-  const subject = `Gentle Reminder: Purchase Order ${po.PO_No}`;
-
-  const results = [];
-  results.push(await emailService.sendEmail(settings.smtp_config, {
-    to: vendor.Email || '',
-    subject,
-    body,
-    html: `<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.6;white-space:pre-wrap">${body
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-      .replace(/(https?:\/\/[^\s]+)/g, '<a href="$1">$1</a>')}</div>`
-  }));
 
   try {
     await interactionLogger.logDispatch({ doc: po, templateKey: 'po_reminder', results, actor });

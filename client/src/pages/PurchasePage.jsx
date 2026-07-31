@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, Plus, Trash2, Loader2, AlertTriangle, CheckCircle2,
   Building2, FileQuestion, ShoppingCart, PackageCheck, Star, TrendingDown,
-  IndianRupee, ArrowRight, Search
+  IndianRupee, ArrowRight, Search, X
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import SmartSearchSelect from '../components/SmartSearchSelect';
@@ -15,6 +15,10 @@ import { filterByQuery } from '../utils/searchUtils';
  * One page rather than four routes because the four steps are one errand: you compare quotes, raise
  * the order, and receive against it in a single sitting, and splitting that across routes would mean
  * re-finding the same enquiry three times.
+ *
+ * Raising or editing an ORDER is the exception: it opens PurchaseOrderBuilderPage, which is the
+ * quotation builder's layout applied to the buying side, so staff meet one document screen rather
+ * than two. This page keeps the register, the receiving and the payment queue.
  *
  * Costs are hidden from anyone without finance:view. The server strips them from the response too,
  * so this only decides whether the column is drawn — a store-keeper counting cartons at the door
@@ -40,6 +44,8 @@ export default function PurchasePage() {
   const [rfqs, setRfqs] = useState([]);
   const [orders, setOrders] = useState([]);
   const [items, setItems] = useState([]);
+  const [customers, setCustomers] = useState([]);
+  const [categories, setCategories] = useState([]);
   const [lowStock, setLowStock] = useState([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -71,13 +77,17 @@ export default function PurchasePage() {
   const loadAll = useCallback(async () => {
     setLoading(true);
     try {
-      const [v, r, o, i, l, p] = await Promise.all([
+      // Customers come along because many suppliers are already on the books as customers — the
+      // vendor form prefills from that row rather than making someone retype a name and GSTIN.
+      const [v, r, o, i, l, p, c, cat] = await Promise.all([
         fetch('/api/vendors', { headers }).then(x => (x.ok ? x.json() : [])),
         fetch('/api/rfqs', { headers }).then(x => (x.ok ? x.json() : [])),
         fetch('/api/purchase-orders', { headers }).then(x => (x.ok ? x.json() : [])),
         fetch('/api/items', { headers }).then(x => (x.ok ? x.json() : [])),
         fetch('/api/purchase-orders/reorder-suggestions', { headers }).then(x => (x.ok ? x.json() : [])),
-        fetch('/api/purchase-orders/pending-payment', { headers }).then(x => (x.ok ? x.json() : []))
+        fetch('/api/purchase-orders/pending-payment', { headers }).then(x => (x.ok ? x.json() : [])),
+        fetch('/api/customers', { headers }).then(x => (x.ok ? x.json() : [])),
+        fetch('/api/item-categories', { headers }).then(x => (x.ok ? x.json() : []))
       ]);
       setVendors(Array.isArray(v) ? v : []);
       setRfqs(Array.isArray(r) ? r : []);
@@ -85,6 +95,16 @@ export default function PurchasePage() {
       setItems(Array.isArray(i) ? i : []);
       setLowStock(Array.isArray(l) ? l : []);
       setPayments(Array.isArray(p) ? p : []);
+      setCustomers(Array.isArray(c) ? c : []);
+      // Merge the item catalogue's categories with whatever vendors already carry. A category typed
+      // on a vendor before any item used it would otherwise vanish from the suggestions.
+      const fromVendors = (Array.isArray(v) ? v : []).flatMap(x => x.Product_Categories || []);
+      const seen = new Map();
+      for (const name of [...(Array.isArray(cat) ? cat : []), ...fromVendors]) {
+        const clean = String(name || '').trim();
+        if (clean && !seen.has(clean.toLowerCase())) seen.set(clean.toLowerCase(), clean);
+      }
+      setCategories([...seen.values()].sort((a, b) => a.localeCompare(b)));
     } catch {
       flash('Could not load purchase data', 'err');
     } finally { setLoading(false); }
@@ -219,68 +239,74 @@ export default function PurchasePage() {
 
         {/* ── ORDERS ── */}
         {tab === 'ORDERS' && (
-          <>
-            {lowStock.length > 0 && (
-              <div className="rounded-xl border border-amber-200 bg-amber-50 p-3">
-                <p className="text-xs font-extrabold text-amber-900 flex items-center gap-1.5">
-                  <TrendingDown className="w-3.5 h-3.5" /> {lowStock.length} item(s) at or below reorder level
-                </p>
-                <ul className="mt-1.5 space-y-0.5">
-                  {lowStock.slice(0, 5).map(s => (
-                    <li key={s.Item_ID} className="text-[11px] text-amber-800">
-                      · <b>{s.Item_Name}</b> — {s.Current_Qty} left, suggest {s.Suggested_Qty} {s.Unit}
-                      {s.Last_Vendor_Name && <span className="text-amber-600"> from {s.Last_Vendor_Name}</span>}
-                    </li>
-                  ))}
-                </ul>
-                <button onClick={() => { setRfqForm({ lines: lowStock.slice(0, 5).map(s => ({ itemId: s.Item_ID, itemName: s.Item_Name, qty: s.Suggested_Qty, unit: s.Unit })), vendorIds: [] }); setTab('RFQ'); }}
-                  className="mt-2 w-full min-h-[44px] rounded-xl bg-amber-600 text-white text-xs font-extrabold active:bg-amber-700">
-                  Raise an enquiry for these
-                </button>
-              </div>
-            )}
+            <>
+              {lowStock.length > 0 && (
+                <div className="rounded-xl border border-amber-200 bg-amber-50 p-3">
+                  <p className="text-xs font-extrabold text-amber-900 flex items-center gap-1.5">
+                    <TrendingDown className="w-3.5 h-3.5" /> {lowStock.length} item(s) at or below reorder level
+                  </p>
+                  <ul className="mt-1.5 space-y-0.5">
+                    {lowStock.slice(0, 5).map(s => (
+                      <li key={s.Item_ID} className="text-[11px] text-amber-800">
+                        · <b>{s.Item_Name}</b> — {s.Current_Qty} left, suggest {s.Suggested_Qty} {s.Unit}
+                        {s.Last_Vendor_Name && <span className="text-amber-600"> from {s.Last_Vendor_Name}</span>}
+                      </li>
+                    ))}
+                  </ul>
+                  <button onClick={() => { setRfqForm({ lines: lowStock.slice(0, 5).map(s => ({ itemId: s.Item_ID, itemName: s.Item_Name, qty: s.Suggested_Qty, unit: s.Unit })), vendorIds: [] }); setTab('RFQ'); }}
+                    className="mt-2 w-full min-h-[44px] rounded-xl bg-amber-600 text-white text-xs font-extrabold active:bg-amber-700">
+                    Raise an enquiry for these
+                  </button>
+                </div>
+              )}
 
-            {orders.length > 0 && (
-              <div className="relative">
-                <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                <input
-                  type="text"
-                  value={poQuery}
-                  onChange={e => setPoQuery(e.target.value)}
-                  placeholder="Search PO no, vendor or item…"
-                  className="w-full pl-9 pr-3 min-h-[44px] bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-900 focus:ring-2 focus:ring-slate-400 focus:outline-none"
-                />
-              </div>
-            )}
+              <button onClick={() => navigate('/purchase-orders/new')}
+                className="w-full min-h-[48px] rounded-xl border-2 border-dashed border-slate-300 text-sm font-bold text-slate-500 active:bg-slate-100 flex items-center justify-center gap-2 mb-2">
+                <Plus className="w-4 h-4" /> New purchase order / Record local purchase
+              </button>
 
-            {orders.length === 0 ? (
-              <Empty text="No purchase orders yet. Compare quotes on an enquiry to raise one." />
-            ) : visibleOrders.length === 0 ? (
-              <Empty text="No purchase order matches that search." />
-            ) : visibleOrders.map(po => (
-              <div key={po.PO_ID} className="bg-white border border-slate-200 rounded-xl p-3">
-                <div className="flex items-start gap-2">
-                  <div className="flex-1 min-w-0">
-                    <p className="text-xs font-extrabold text-slate-900 truncate">{po.PO_No}</p>
-                    <p className="text-[11px] text-slate-500 truncate">{po.Vendor_Name} · {po.PO_Date}</p>
+              {orders.length > 0 && (
+                <div className="relative">
+                  <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={poQuery}
+                    onChange={e => setPoQuery(e.target.value)}
+                    placeholder="Search PO no, vendor or item…"
+                    className="w-full pl-9 pr-3 min-h-[44px] bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-900 focus:ring-2 focus:ring-slate-400 focus:outline-none"
+                  />
+                </div>
+              )}
+
+              {orders.length === 0 ? (
+                <Empty text="No purchase orders yet. Compare quotes on an enquiry to raise one." />
+              ) : visibleOrders.length === 0 ? (
+                <Empty text="No purchase order matches that search." />
+              ) : visibleOrders.map(po => (
+                <div key={po.PO_ID} onClick={() => navigate(`/purchase-orders/${po.PO_ID}`)}
+                  className="bg-white border border-slate-200 rounded-xl p-3 hover:border-slate-300 active:bg-slate-50 transition cursor-pointer">
+                  <div className="flex items-start gap-2">
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs font-extrabold text-slate-900 truncate">{po.PO_No}</p>
+                      <p className="text-[11px] text-slate-500 truncate">{po.Vendor_Name} · {po.PO_Date}</p>
+                    </div>
+                    <StatusChip status={po.Status} />
                   </div>
-                  <StatusChip status={po.Status} />
+                  <div className="mt-2 flex items-center justify-between gap-2" onClick={e => e.stopPropagation()}>
+                    <span className="text-[11px] text-slate-500">
+                      {(po.Lines || []).length} line(s)
+                      {canSeeMoney && po.Subtotal !== undefined && <> · <b className="text-slate-700">{money(po.Subtotal)}</b></>}
+                    </span>
+                    {po.Status !== 'Received' && po.Status !== 'Cancelled' && (
+                      <button onClick={(e) => { e.stopPropagation(); setReceiving({ po, lines: {}, totalCharges: '', vendorInvoiceNo: '', rating: 0 }); setTab('RECEIVE'); }}
+                        className="px-3 min-h-[40px] rounded-xl bg-slate-900 text-white text-[11px] font-extrabold active:bg-slate-800">
+                        Receive
+                      </button>
+                    )}
+                  </div>
                 </div>
-                <div className="mt-2 flex items-center justify-between gap-2">
-                  <span className="text-[11px] text-slate-500">
-                    {(po.Lines || []).length} line(s)
-                    {canSeeMoney && po.Subtotal !== undefined && <> · <b className="text-slate-700">{money(po.Subtotal)}</b></>}
-                  </span>
-                  {po.Status !== 'Received' && po.Status !== 'Cancelled' && (
-                    <button onClick={() => { setReceiving({ po, lines: {}, totalCharges: '', vendorInvoiceNo: '', rating: 0 }); setTab('RECEIVE'); }}
-                      className="px-3 min-h-[40px] rounded-xl bg-slate-900 text-white text-[11px] font-extrabold active:bg-slate-800">
-                      Receive
-                    </button>
-                  )}
-                </div>
-              </div>
-            ))}
-          </>
+              ))}
+            </>
         )}
 
         {/* ── RECEIVE ── */}
@@ -355,6 +381,7 @@ export default function PurchasePage() {
               margin={margin} onPrice={priceForCustomer} onClearMargin={() => setMargin(null)} />
           ) : rfqForm ? (
             <RfqForm form={rfqForm} setForm={setRfqForm} vendors={vendors} items={items} busy={busy}
+              categories={categories}
               onCancel={() => setRfqForm(null)}
               onSubmit={async () => {
                 const out = await post('/api/rfqs', rfqForm, 'Enquiry created.');
@@ -391,7 +418,8 @@ export default function PurchasePage() {
         {tab === 'VENDORS' && (
           <>
             {vendorForm ? (
-              <VendorForm form={vendorForm} setForm={setVendorForm} busy={busy}
+              <VendorForm form={vendorForm} setForm={setVendorForm} busy={busy} customers={customers}
+                categories={categories}
                 onCancel={() => setVendorForm(null)}
                 onSubmit={async () => {
                   const isNew = !vendorForm.Vendor_ID;
@@ -408,13 +436,19 @@ export default function PurchasePage() {
                   } catch (e) { flash(e.message, 'err'); } finally { setBusy(false); }
                 }} />
             ) : (
-              <button onClick={() => setVendorForm({ vendorName: '', gstin: '', phone: '', email: '', leadTimeDays: 0 })}
+              <button onClick={() => setVendorForm({ vendorName: '', gstin: '', contactPerson: '', phone: '', email: '', address: '', paymentTerms: '', leadTimeDays: 0, productCategories: [], extraContacts: [] })}
                 className="w-full min-h-[48px] rounded-xl border-2 border-dashed border-slate-300 text-sm font-bold text-slate-500 active:bg-slate-100 flex items-center justify-center gap-2">
                 <Plus className="w-4 h-4" /> Add vendor
               </button>
             )}
             {vendors.map(v => (
-              <button key={v.Vendor_ID} onClick={() => setVendorForm({ ...v, vendorName: v.Vendor_Name, gstin: v.GSTIN, phone: v.Phone, email: v.Email, leadTimeDays: v.Lead_Time_Days })}
+              <button key={v.Vendor_ID} onClick={() => setVendorForm({
+                ...v, vendorName: v.Vendor_Name, gstin: v.GSTIN, contactPerson: v.Contact_Person,
+                phone: v.Phone, email: v.Email, address: v.Address,
+                paymentTerms: v.Payment_Terms, leadTimeDays: v.Lead_Time_Days,
+                productCategories: v.Product_Categories || [],
+                extraContacts: v.Extra_Contacts || []
+              })}
                 className="w-full text-left bg-white border border-slate-200 rounded-xl p-3 active:bg-slate-50">
                 <div className="flex items-center gap-2">
                   <div className="flex-1 min-w-0">
@@ -429,6 +463,13 @@ export default function PurchasePage() {
                     </span>
                   )}
                 </div>
+                {(v.Product_Categories || []).length > 0 && (
+                  <div className="mt-1.5 flex flex-wrap gap-1">
+                    {v.Product_Categories.map(c => (
+                      <span key={c} className="px-1.5 py-0.5 rounded bg-slate-100 text-[10px] font-bold text-slate-600">{c}</span>
+                    ))}
+                  </div>
+                )}
               </button>
             ))}
           </>
@@ -800,11 +841,32 @@ function CompareView({ data, canSeeMoney, busy, onClose, onOrder, margin, onPric
   );
 }
 
-function RfqForm({ form, setForm, vendors, items, busy, onCancel, onSubmit }) {
+function RfqForm({ form, setForm, vendors, items, categories = [], busy, onCancel, onSubmit }) {
   const [vendorQuery, setVendorQuery] = useState('');
+  const [catFilter, setCatFilter] = useState('');
   const setLine = (i, patch) => setForm(f => ({
     ...f, lines: f.lines.map((l, n) => (n === i ? { ...l, ...patch } : l))
   }));
+
+  // Category first, then the text filter — narrowing to "Valves" is the point of the feature, and
+  // the free-text box still works inside that subset.
+  //
+  // A vendor with NO categories set stays visible under every filter rather than disappearing.
+  // Existing vendors all start out that way, so hiding them would empty this list on day one and
+  // look like the enquiry screen had broken.
+  const visibleVendors = useMemo(() => {
+    const byCat = catFilter
+      ? vendors.filter(v => {
+          const cats = v.Product_Categories || [];
+          return cats.length === 0 || cats.some(c => c.toLowerCase() === catFilter.toLowerCase());
+        })
+      : vendors;
+    return filterByQuery(byCat, vendorQuery, v => [v.Vendor_Name, v.GSTIN, v.Contact_Person]);
+  }, [vendors, catFilter, vendorQuery]);
+
+  const uncategorised = catFilter
+    ? visibleVendors.filter(v => (v.Product_Categories || []).length === 0).length
+    : 0;
   return (
     <div className="space-y-3">
       <div className="bg-white border border-slate-200 rounded-xl p-3 space-y-2">
@@ -819,14 +881,20 @@ function RfqForm({ form, setForm, vendors, items, busy, onCancel, onSubmit }) {
           </span>
           {/* A filter rather than a dropdown: this is multi-select, and hiding the ticks behind a
               popover would mean losing sight of who is already chosen. */}
+          {categories.length > 0 && (
+            <select className="jc-input mb-1" value={catFilter} onChange={e => setCatFilter(e.target.value)}>
+              <option value="">All product categories</option>
+              {categories.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          )}
           {vendors.length > 6 && (
             <input className="jc-input mb-1" value={vendorQuery}
               placeholder="Filter vendors" onChange={e => setVendorQuery(e.target.value)} />
           )}
           <div className="space-y-1 max-h-64 overflow-y-auto">
-            {filterByQuery(vendors, vendorQuery, v => [v.Vendor_Name, v.GSTIN, v.Contact_Person]).map(v => (
-              <label key={v.Vendor_ID} className="flex items-center gap-2 min-h-[48px] px-2 rounded-lg border border-slate-200 active:bg-slate-50">
-                <input type="checkbox" className="w-4 h-4"
+            {visibleVendors.map(v => (
+              <label key={v.Vendor_ID} className="flex items-center gap-2 min-h-[48px] px-2 py-1 rounded-lg border border-slate-200 active:bg-slate-50">
+                <input type="checkbox" className="w-4 h-4 shrink-0"
                   checked={form.vendorIds.includes(v.Vendor_ID)}
                   onChange={() => setForm(f => ({
                     ...f,
@@ -834,11 +902,26 @@ function RfqForm({ form, setForm, vendors, items, busy, onCancel, onSubmit }) {
                       ? f.vendorIds.filter(x => x !== v.Vendor_ID)
                       : [...f.vendorIds, v.Vendor_ID]
                   }))} />
-                <span className="text-xs font-bold text-slate-700 truncate">{v.Vendor_Name}</span>
+                <span className="min-w-0 flex-1">
+                  <span className="block text-xs font-bold text-slate-700 truncate">{v.Vendor_Name}</span>
+                  {(v.Product_Categories || []).length > 0 && (
+                    <span className="block text-[10px] text-slate-400 truncate">
+                      {v.Product_Categories.join(' · ')}
+                    </span>
+                  )}
+                </span>
               </label>
             ))}
             {vendors.length === 0 && <p className="text-[11px] text-slate-400">Add a vendor first.</p>}
+            {vendors.length > 0 && visibleVendors.length === 0 && (
+              <p className="text-[11px] text-slate-400">No vendor matches that.</p>
+            )}
           </div>
+          {uncategorised > 0 && (
+            <p className="text-[10px] text-slate-400 mt-1">
+              Includes {uncategorised} vendor{uncategorised > 1 ? 's' : ''} with no categories set yet.
+            </p>
+          )}
         </div>
       </div>
 
@@ -898,7 +981,7 @@ function RfqForm({ form, setForm, vendors, items, busy, onCancel, onSubmit }) {
   );
 }
 
-function VendorForm({ form, setForm, busy, onCancel, onSubmit }) {
+function VendorForm({ form, setForm, busy, customers = [], categories = [], onCancel, onSubmit }) {
   const F = ({ label, field, type = 'text', placeholder }) => (
     <label className="block">
       <span className="block text-[10px] font-extrabold uppercase tracking-wide text-slate-400 mb-0.5">{label}</span>
@@ -906,17 +989,80 @@ function VendorForm({ form, setForm, busy, onCancel, onSubmit }) {
         onChange={e => setForm(f => ({ ...f, [field]: e.target.value }))} />
     </label>
   );
+
+  // A supplier is very often already on the books as a customer — the same firm we sell refills to
+  // sells us valves. Copying that row beats retyping a name, GSTIN and address that already exist
+  // (and mistyping the GSTIN). It COPIES only: the vendor is its own row from here on, so editing
+  // it never reaches back into Customer_Master.
+  const prefillFromCustomer = (c) => {
+    if (!c) return;
+    setForm(f => ({
+      ...f,
+      Source_Customer_ID: c.Customer_ID,
+      vendorName: c.Company_Name || f.vendorName,
+      gstin: c.GSTIN || c.Gst_No || f.gstin,
+      contactPerson: c.Auth_Person || f.contactPerson,
+      phone: c.Contact || f.phone,
+      email: c.Email || f.email,
+      address: c.Address || f.address,
+      // Customers created from the public inquiry form already carry their extra people.
+      extraContacts: (c.Extra_Contacts || []).length ? c.Extra_Contacts : (f.extraContacts || [])
+    }));
+  };
+
   return (
     <div className="bg-white border border-slate-200 rounded-xl p-3 space-y-2">
+      {/* Only offered when creating. On an existing vendor, re-copying a customer row would quietly
+          overwrite details someone has already corrected here. */}
+      {!form.Vendor_ID && (
+        <div className="rounded-xl bg-slate-50 border border-slate-200 p-2 space-y-1">
+          <SmartSearchSelect
+            label="Copy from an existing customer (optional)"
+            placeholder="Search name, mobile, city…"
+            options={customers}
+            value={null}
+            onChange={prefillFromCustomer}
+            getKey={c => c.Customer_ID}
+            getLabel={c => c.Company_Name}
+            getSubtitle={c => [
+              c.GSTIN || c.Gst_No ? `GSTIN ${c.GSTIN || c.Gst_No}` : 'No GSTIN',
+              c.Contact,
+              c.Address
+            ].filter(Boolean).join(' · ')}
+            getSearchable={c => [c.Company_Name, c.Auth_Person, c.Contact, c.Email, c.Address, c.GSTIN || c.Gst_No]}
+            emptyText="No customer matches that."
+          />
+          <p className="text-[10px] text-slate-400">
+            {form.Source_Customer_ID
+              ? `Copied from ${form.Source_Customer_ID}. Edit anything below before saving.`
+              : 'Fills the fields below. You can still edit every one of them.'}
+          </p>
+        </div>
+      )}
+
       <F label="Vendor name" field="vendorName" placeholder="Acme Fire Services" />
       <div className="grid grid-cols-2 gap-2">
         <F label="GSTIN" field="gstin" placeholder="24ABCDE1234F1Z5" />
         <F label="Lead time (days)" field="leadTimeDays" type="number" placeholder="7" />
       </div>
+      <VendorCategoryPicker
+        selected={form.productCategories || []}
+        options={categories}
+        onChange={next => setForm(f => ({ ...f, productCategories: next }))}
+      />
+
+      <F label="Contact person" field="contactPerson" />
       <div className="grid grid-cols-2 gap-2">
         <F label="Phone" field="phone" />
         <F label="Email" field="email" type="email" />
       </div>
+
+      <VendorExtraContacts
+        contacts={form.extraContacts || []}
+        onChange={next => setForm(f => ({ ...f, extraContacts: next }))}
+      />
+
+      <F label="Address" field="address" />
       <F label="Payment terms" field="paymentTerms" placeholder="30 days" />
       <div className="flex gap-2 pt-1">
         <button onClick={onCancel} disabled={busy}
@@ -924,6 +1070,147 @@ function VendorForm({ form, setForm, busy, onCancel, onSubmit }) {
         <button onClick={onSubmit} disabled={busy}
           className="flex-1 min-h-[48px] rounded-xl bg-slate-900 text-white text-sm font-extrabold active:bg-slate-800 disabled:opacity-40">Save vendor</button>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Additional people at the vendor, beyond the main contact above — same idea as the inquiry form's
+ * multiple contact people. Sales quotes, accounts chases payment, the driver calls about the gate,
+ * and writing all three into one "Phone" box means nobody can be reached without asking around.
+ *
+ * Rows are added on demand rather than rendered upfront: most vendors need none, and per the UI
+ * standard a screen must not open with twenty empty fields on it.
+ */
+function VendorExtraContacts({ contacts = [], onChange }) {
+  const set = (i, patch) => onChange(contacts.map((c, n) => (n === i ? { ...c, ...patch } : c)));
+  const add = () => onChange([...contacts, { name: '', designation: '', phone: '', email: '' }]);
+  const remove = i => onChange(contacts.filter((_, n) => n !== i));
+
+  return (
+    <div>
+      <span className="block text-[10px] font-extrabold uppercase tracking-wide text-slate-400 mb-0.5">
+        Other contacts {contacts.length > 0 && <span className="text-slate-600">· {contacts.length}</span>}
+      </span>
+
+      <div className="space-y-2">
+        {contacts.map((c, i) => (
+          <div key={i} className="rounded-xl border border-slate-200 bg-slate-50 p-2 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-extrabold uppercase tracking-wide text-slate-400">
+                Contact {i + 2}
+              </span>
+              <button type="button" onClick={() => remove(i)} aria-label={`Remove contact ${i + 2}`}
+                className="w-8 h-8 rounded-lg flex items-center justify-center text-slate-400 active:bg-rose-50 active:text-rose-600">
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <input className="jc-input" placeholder="Name" value={c.name || ''}
+                onChange={e => set(i, { name: e.target.value })} />
+              <input className="jc-input" placeholder="Designation" value={c.designation || ''}
+                onChange={e => set(i, { designation: e.target.value })} />
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <input className="jc-input" type="tel" inputMode="tel" placeholder="Phone" value={c.phone || ''}
+                onChange={e => set(i, { phone: e.target.value })} />
+              <input className="jc-input" type="email" placeholder="Email" value={c.email || ''}
+                onChange={e => set(i, { email: e.target.value })} />
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <button type="button" onClick={add}
+        className="mt-1 w-full min-h-[44px] rounded-xl border border-dashed border-slate-300 text-[11px] font-extrabold text-slate-500 flex items-center justify-center gap-1 active:bg-slate-50">
+        <Plus className="w-3.5 h-3.5" /> Add another contact
+      </button>
+    </div>
+  );
+}
+
+/**
+ * What this vendor supplies. Multi-select, because most suppliers carry several lines — the same
+ * firm sells you valves and hoses — and the enquiry filter is only as good as this list.
+ *
+ * Chips rather than a checkbox column: the chosen set has to stay visible while you search for the
+ * next one, and a vendor with three categories should not cost three screens of scrolling.
+ * Free text is allowed on purpose — the buyer needing a category at 6pm cannot wait for an admin to
+ * add it to a master list, and `/api/item-categories` picks it up once an item uses it.
+ */
+function VendorCategoryPicker({ selected = [], options = [], onChange }) {
+  const [query, setQuery] = useState('');
+
+  const has = name => selected.some(s => s.toLowerCase() === name.toLowerCase());
+  const add = (name) => {
+    const clean = String(name || '').trim();
+    if (!clean || has(clean)) return setQuery('');
+    onChange([...selected, clean]);
+    setQuery('');
+  };
+  const remove = name => onChange(selected.filter(s => s !== name));
+
+  // Already-picked categories drop out of the suggestions — they are shown as chips above.
+  // Not capped: the item master carries ~17 categories and a buyer must be able to SEE the one they
+  // want without guessing its spelling. A silent slice(0,8) hid nine of them and read as "missing".
+  const suggestions = useMemo(
+    () => filterByQuery(options.filter(o => !has(o)), query, o => [o]),
+    [options, query, selected]
+  );
+  const canCreate = query.trim() && !options.some(o => o.toLowerCase() === query.trim().toLowerCase()) && !has(query.trim());
+
+  return (
+    <div>
+      <span className="block text-[10px] font-extrabold uppercase tracking-wide text-slate-400 mb-0.5">
+        Product categories {selected.length > 0 && <span className="text-slate-600">· {selected.length}</span>}
+      </span>
+
+      {selected.length > 0 && (
+        <div className="flex flex-wrap gap-1 mb-1">
+          {selected.map(c => (
+            <span key={c} className="pl-2 pr-1 py-0.5 rounded-lg bg-slate-900 text-white text-[11px] font-bold flex items-center gap-1">
+              {c}
+              <button type="button" onClick={() => remove(c)} aria-label={`Remove ${c}`}
+                className="w-6 h-6 rounded flex items-center justify-center active:bg-white/20">
+                <X className="w-3 h-3" />
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+
+      <input
+        className="jc-input"
+        value={query}
+        placeholder="Search or type a category, then Enter"
+        onChange={e => setQuery(e.target.value)}
+        onKeyDown={e => {
+          if (e.key !== 'Enter') return;
+          e.preventDefault();   // this sits inside a form-ish card; Enter must not submit the vendor
+          add(suggestions[0] || query);
+        }}
+      />
+
+      {(suggestions.length > 0 || canCreate) && (
+        <div className="mt-1 flex flex-wrap gap-1 max-h-32 overflow-y-auto">
+          {suggestions.map(o => (
+            <button key={o} type="button" onClick={() => add(o)}
+              className="px-2 py-1 rounded-lg border border-slate-200 bg-white text-[11px] font-bold text-slate-600 active:bg-slate-100">
+              + {o}
+            </button>
+          ))}
+          {canCreate && (
+            <button type="button" onClick={() => add(query)}
+              className="px-2 py-1 rounded-lg border border-dashed border-slate-300 text-[11px] font-bold text-slate-500 active:bg-slate-100">
+              + Add “{query.trim()}”
+            </button>
+          )}
+        </div>
+      )}
+
+      <p className="text-[10px] text-slate-400 mt-0.5">
+        Used to filter vendors when you raise an enquiry.
+      </p>
     </div>
   );
 }

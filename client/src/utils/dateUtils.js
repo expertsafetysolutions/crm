@@ -290,6 +290,22 @@ export function formatDateTimeDDMMYYYYHHMMSS(input) {
 }
 
 /**
+ * Does this remark/interaction belong to this task?
+ *
+ * Task id wins. A customer match is allowed ONLY for rows carrying no Task_ID — the customer-card
+ * Call button and manual challans write those, and they would otherwise be invisible on every task.
+ *
+ * Deliberately NOT a plain `Customer_ID ===` OR: that matches every remark the customer has, which
+ * is what used to merge a customer's separate jobs into one indistinguishable timeline. Use the
+ * Master Search for the company-wide view.
+ */
+export function interactionMatchesTask(interaction, task) {
+  if (!interaction || !task) return false;
+  if (task.Task_ID && interaction.Task_ID === task.Task_ID) return true;
+  return !interaction.Task_ID && !!task.Customer_ID && interaction.Customer_ID === task.Customer_ID;
+}
+
+/**
  * Returns true when a task's set/scheduled date is 2+ days old (configurable via `days`) and no
  * interaction/remark has been logged for it since that date. Rescheduling the task (which updates
  * Scheduled_Date) resets the window — the 2-day clock restarts from the new date. Completed/Closed
@@ -307,9 +323,7 @@ export function isTaskOverdueNoInteraction(task, interactions, days = 2) {
   if (daysSinceSet < days) return false;
 
   const hasInteractionSinceSet = (interactions || []).some(i => {
-    const matchesTask = (task.Task_ID && i.Task_ID === task.Task_ID) ||
-      (!i.Task_ID && task.Customer_ID && i.Customer_ID === task.Customer_ID);
-    if (!matchesTask) return false;
+    if (!interactionMatchesTask(i, task)) return false;
     const ts = parseSafeDate(i.Timestamp || i.Created_At);
     return !isNaN(ts) && ts >= setDate;
   });

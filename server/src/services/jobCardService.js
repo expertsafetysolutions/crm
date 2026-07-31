@@ -67,20 +67,10 @@ function norm(value) {
 /**
  * Canonical capacity label: '6kg', '6 KG' and '6.0 Kg' all become '6 Kg'.
  *
- * Not optional. The capacity field is free text, so the same product reaches the challan under
- * several spellings; without this the grouping emits three lines where the paper challan has one,
- * which is the most likely real-world failure of the whole feature. Applied on write here and again
- * when grouping, so legacy rows normalise too.
+ * Moved to utils/capacity.js so itemClassifier can use it without a util requiring a service.
+ * Re-exported below, so every existing caller (including challanService) is unaffected.
  */
-function normalizeCapacity(raw) {
-  const s = String(raw || '').trim();
-  if (!s) return '';
-  const m = s.match(/^([\d.]+)\s*(kg|ltr|l|litre|liter)?/i);
-  if (!m) return s;
-  const unit = (m[2] || 'kg').toLowerCase();
-  const label = unit.startsWith('l') ? 'Ltr' : 'Kg';
-  return `${parseFloat(m[1])} ${label}`;
-}
+const { normalizeCapacity } = require('../utils/capacity');
 
 /**
  * "(8 ABC 6 Kg, 2 CO2 4.5 Kg)" from recomputeSummary's byType map, whose keys are "TYPE|Capacity".
@@ -960,6 +950,9 @@ module.exports = {
   RECHECK,
   normalizeCapacity,
   istToday,
+  // Exported so challanService can build the same five snapshot fields for a manual challan —
+  // re-implementing them would lose the Contact/Address fallbacks documented above.
+  buildCustomerSnapshot,
   createJobCard,
   getJobCardFull,
   getJobCardByTask,

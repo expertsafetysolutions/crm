@@ -2,7 +2,7 @@ const sheetsService = require('./sheetsService');
 const inventoryService = require('./inventoryService');
 const landedCostService = require('./landedCostService');
 const quotationEngine = require('./quotationEngine');
-const { round2 } = require('../utils/gstUtils');
+const { round2, computeDocumentTotals, extractStateCode } = require('../utils/gstUtils');
 
 /**
  * purchaseService — the buying side: vendors, enquiries, orders and goods receipt.
@@ -44,6 +44,38 @@ async function getVendors({ includeInactive = false } = {}) {
   return [...list].sort((a, b) => String(a.Vendor_Name || '').localeCompare(String(b.Vendor_Name || '')));
 }
 
+// What a vendor actually supplies, so an enquiry for valves is not sent to the uniform supplier.
+// Free text rather than a fixed enum: it merges with the item catalogue's own categories, and a
+// buyer who needs a new one at 6pm must not have to wait for an admin to add it to a master list.
+// De-duplicated case-insensitively — "Valves" and "valves" from two typists is one category.
+function normalizeCategories(input) {
+  const raw = Array.isArray(input)
+    ? input
+    : String(input || '').split(',');
+  const seen = new Map();
+  for (const c of raw) {
+    const name = String(c || '').trim();
+    if (!name) continue;
+    const key = name.toLowerCase();
+    if (!seen.has(key)) seen.set(key, name);
+  }
+  return [...seen.values()];
+}
+
+// A supplier is rarely one phone number: sales quotes, accounts chases the payment, the driver
+// calls about the gate. Same shape as the inquiry form's Extra_Contacts so both read alike.
+// Rows with no name AND no phone are dropped — an empty row someone tabbed past is not a contact.
+function normalizeContacts(input) {
+  return (Array.isArray(input) ? input : [])
+    .map(c => ({
+      name: String(c?.name || '').trim(),
+      designation: String(c?.designation || '').trim(),
+      phone: String(c?.phone || '').trim(),
+      email: String(c?.email || '').trim()
+    }))
+    .filter(c => c.name || c.phone);
+}
+
 async function createVendor(payload, actor) {
   const name = String(payload.vendorName || '').trim();
   if (!name) throw new Error('Vendor name is required');
@@ -61,6 +93,8 @@ async function createVendor(payload, actor) {
     Phone: String(payload.phone || '').trim(),
     Email: String(payload.email || '').trim(),
     Address: String(payload.address || '').trim(),
+    Product_Categories: normalizeCategories(payload.productCategories),
+    Extra_Contacts: normalizeContacts(payload.extraContacts),
     Payment_Terms: String(payload.paymentTerms || '').trim(),
     Lead_Time_Days: Number(payload.leadTimeDays) || 0,
     Notes: String(payload.notes || '').trim(),
@@ -84,6 +118,13 @@ async function updateVendor(vendorId, payload) {
   }
   if (payload.leadTimeDays !== undefined) patch.Lead_Time_Days = Number(payload.leadTimeDays) || 0;
   if (payload.active !== undefined) patch.Active = Boolean(payload.active);
+  // Not in the map above: that loop String()s every value, which would turn the array into "a,b".
+  if (payload.productCategories !== undefined) {
+    patch.Product_Categories = normalizeCategories(payload.productCategories);
+  }
+  if (payload.extraContacts !== undefined) {
+    patch.Extra_Contacts = normalizeContacts(payload.extraContacts);
+  }
 
   const saved = await sheetsService.updateRow('Vendor_Master', 'Vendor_ID', vendorId, patch);
   if (!saved) throw new Error(`Vendor ${vendorId} not found`);
@@ -246,6 +287,92 @@ async function compareQuotes(rfqId) {
  * The number comes from the atomic Counter_Master sequence, like every other number the company
  * issues outward: a PO goes to a vendor and must never repeat or a payment can be claimed twice.
  */
+/**
+ * Prices a purchase order exactly the way a quotation is priced.
+ *
+ * A PO is a tax document we ISSUE — the vendor bills against it — so the same
+ * `computeDocumentTotals` that produces a quotation's figures produces these, including line
+ * discounts and a document-level discount. Before this, the PDF re-derived GST from `Lines` in the
+ * browser, which meant the printed total and the stored `Subtotal` were computed by two different
+ * pieces of code, and only one of them knew about discounts.
+ *
+ * Place of supply comes from the VENDOR's GSTIN, not the customer's: on a purchase we are the
+ * recipient, so an out-of-state supplier charges IGST. Falls back to intra-state when either GSTIN
+ * is missing, which is the same assumption the old client-side maths made.
+ */
+function priceLines(payload, vendor, seller, existingLines = []) {
+  const receivedByLineId = new Map(
+    (existingLines || []).map(l => [l.lineId, Number(l.Received_Qty) || 0])
+  );
+
+  const raw = (Array.isArray(payload.lines) ? payload.lines : []).map((l, i) => {
+    const lineId = l.lineId || `PL${i}${Date.now().toString(36)}`;
+    return {
+      lineId,
+      Item_ID: String(l.itemId || l.Item_ID || '').trim(),
+      Item_Name: String(l.itemName || l.Item_Name || '').trim(),
+      HSN_Code: String(l.hsnCode || l.HSN_Code || '').trim(),
+      Specification: String(l.specification || l.Specification || '').trim(),
+      Remarks: String(l.remarks || l.Remarks || '').trim(),
+      Qty: Number(l.qty ?? l.Qty) || 0,
+      Unit: String(l.unit || l.Unit || 'Nos').trim(),
+      Rate: Number(l.rate ?? l.Rate) || 0,
+      Discount_Pct: Number(l.discountPct ?? l.Discount_Pct) || 0,
+      GST_Rate: Number(l.gstRate ?? l.GST_Rate) || 0,
+      // Carried through pricing so an edit cannot reset what has already arrived.
+      Received_Qty: Number(l.Received_Qty) || receivedByLineId.get(lineId) || 0
+    };
+  }).filter(l => l.Item_Name);
+
+  const vendorState = extractStateCode(vendor?.GSTIN || '');
+  const sellerState = extractStateCode(seller?.gstin || '');
+  const gstType = (vendorState && sellerState && vendorState !== sellerState) ? 'IGST' : 'CGST_SGST';
+
+  const totals = computeDocumentTotals({
+    lineItems: raw,
+    gstType,
+    documentDiscountPct: Number(payload.documentDiscountPct) || 0,
+    documentDiscountAmt: Number(payload.documentDiscountAmt) || 0
+  });
+
+  return { lines: totals.lineItems, totals, gstType };
+}
+
+/**
+ * The document fields a PO shares with a quotation — subject, terms, notes — so the two builders
+ * write the same shape and `QuotationPdfTemplate` needs no PO-specific branch to render them.
+ */
+function documentFields(payload, vendor, totals, gstType) {
+  return {
+    Subject: String(payload.subject || '').trim(),
+    Payment_Terms: String(payload.paymentTerms || vendor.Payment_Terms || '').trim(),
+    Payment_Terms_ID: String(payload.paymentTermsId || '').trim(),
+    Selected_TNC_IDs: Array.isArray(payload.selectedTncIds) ? payload.selectedTncIds : [],
+    Expected_Date: String(payload.expectedDate || '').trim(),
+    Notes: String(payload.notes || '').trim(),
+    GST_Type: gstType,
+    Subtotal: totals.Subtotal,
+    Gross_Total: totals.Gross_Total,
+    Line_Discount_Total: totals.Line_Discount_Total,
+    Document_Level_Discount_Pct: totals.Document_Level_Discount_Pct,
+    Document_Level_Discount_Amt: totals.Document_Level_Discount_Amt,
+    Total_CGST: totals.Total_CGST,
+    Total_SGST: totals.Total_SGST,
+    Total_IGST: totals.Total_IGST,
+    Total_GST: totals.Total_GST,
+    Grand_Total: totals.Grand_Total
+  };
+}
+
+/** Live totals for the builder, computed by the same code that will save them. */
+async function previewPurchaseOrder(payload) {
+  const vendors = await sheetsService.getTab('Vendor_Master');
+  const vendor = vendors.find(v => v.Vendor_ID === String(payload.vendorId || '').trim()) || {};
+  const settings = await quotationEngine.getSettings();
+  const { lines, totals, gstType } = priceLines(payload, vendor, settings.seller_profile || {});
+  return { ...totals, Lines: lines, GST_Type: gstType };
+}
+
 async function createPurchaseOrder(payload, actor) {
   const vendorId = String(payload.vendorId || '').trim();
   if (!vendorId) throw new Error('A vendor is required');
@@ -254,32 +381,24 @@ async function createPurchaseOrder(payload, actor) {
   const vendor = vendors.find(v => v.Vendor_ID === vendorId);
   if (!vendor) throw new Error(`Vendor ${vendorId} not found`);
 
-  const lines = (Array.isArray(payload.lines) ? payload.lines : []).map((l, i) => {
-    const qty = Number(l.qty ?? l.Qty) || 0;
-    const rate = Number(l.rate ?? l.Rate) || 0;
-    return {
-      lineId: l.lineId || `PL${i}${Date.now().toString(36)}`,
-      Item_ID: String(l.itemId || l.Item_ID || '').trim(),
-      Item_Name: String(l.itemName || l.Item_Name || '').trim(),
-      Specification: String(l.specification || l.Specification || '').trim(),
-      Qty: qty,
-      Unit: String(l.unit || l.Unit || 'Nos').trim(),
-      Rate: rate,
-      GST_Rate: Number(l.gstRate ?? l.GST_Rate) || 0,
-      Line_Total: round2(qty * rate),
-      Received_Qty: 0
-    };
-  }).filter(l => l.Item_Name);
+  const settings = await quotationEngine.getSettings();
+  const { lines, totals, gstType } = priceLines(payload, vendor, settings.seller_profile || {});
 
   if (lines.length === 0) throw new Error('A purchase order needs at least one line');
 
-  const settings = await quotationEngine.getSettings();
   const existing = await sheetsService.getTab('Purchase_Order');
-  const poNo = await quotationEngine.nextDocumentNumber(
-    settings.defaults?.po_no_prefix || 'PO',
-    settings.defaults?.number_reset,
-    { existing, field: 'PO_No' }
-  );
+  let poNo = String(payload.poNo || '').trim();
+  if (poNo) {
+    if (existing.some(p => String(p.PO_No || '').trim().toLowerCase() === poNo.toLowerCase())) {
+      throw new Error(`Purchase order number "${poNo}" already exists`);
+    }
+  } else {
+    poNo = await quotationEngine.nextDocumentNumber(
+      settings.defaults?.po_no_prefix || 'PO',
+      settings.defaults?.number_reset,
+      { existing, field: 'PO_No' }
+    );
+  }
 
   const row = {
     PO_ID: newId('PO'),
@@ -291,10 +410,7 @@ async function createPurchaseOrder(payload, actor) {
     RFQ_ID: String(payload.rfqId || '').trim(),
     PQ_ID: String(payload.quoteId || '').trim(),
     Lines: lines,
-    Subtotal: round2(lines.reduce((s, l) => s + l.Line_Total, 0)),
-    Payment_Terms: String(payload.paymentTerms || vendor.Payment_Terms || '').trim(),
-    Expected_Date: String(payload.expectedDate || '').trim(),
-    Notes: String(payload.notes || '').trim(),
+    ...documentFields(payload, vendor, totals, gstType),
     Status: PO_STATUS.ISSUED,
     Created_By: actor?.staffId || 'SYSTEM',
     Created_At: new Date().toISOString()
@@ -793,6 +909,36 @@ async function getReorderSuggestions() {
   });
 }
 
+async function updatePurchaseOrder(poId, payload, actor) {
+  const vendorId = String(payload.vendorId || '').trim();
+  if (!vendorId) throw new Error('Vendor is required');
+  const vendors = await getVendors({ includeInactive: true });
+  const vendor = vendors.find(v => v.Vendor_ID === vendorId);
+  if (!vendor) throw new Error('Vendor not found');
+
+  const existing = await getPurchaseOrderById(poId);
+  const settings = await quotationEngine.getSettings();
+  const { lines, totals, gstType } = priceLines(
+    payload, vendor, settings.seller_profile || {}, existing?.Lines || []
+  );
+
+  if (lines.length === 0) throw new Error('A purchase order needs at least one line');
+
+  const patch = {
+    PO_Date: payload.poDate || istToday(),
+    Vendor_ID: vendorId,
+    Vendor_Name: vendor.Vendor_Name,
+    Vendor_GSTIN: vendor.GSTIN || '',
+    Lines: lines,
+    ...documentFields(payload, vendor, totals, gstType),
+    Updated_At: new Date().toISOString()
+  };
+
+  const saved = await sheetsService.updateRow('Purchase_Order', 'PO_ID', poId, patch);
+  if (!saved) throw new Error(`Purchase order ${poId} not found`);
+  return saved;
+}
+
 module.exports = {
   RFQ_STATUS,
   PO_STATUS,
@@ -811,7 +957,9 @@ module.exports = {
   getRfqById,
   recordQuote,
   compareQuotes,
+  previewPurchaseOrder,
   createPurchaseOrder,
+  updatePurchaseOrder,
   getPurchaseOrders,
   getPurchaseOrderById,
   cancelPurchaseOrder,

@@ -23,6 +23,23 @@ import { stateOptions, extractStateCode, detectStateCode, getStateName } from '.
 const ORDER_LOST_REASONS = ['Price High', 'Competitor', 'Delay', 'Requirement Cancelled', 'Other'];
 
 /**
+ * Strips the computed discount off a line loaded from a saved quotation.
+ *
+ * `Discount_Amt` is BOTH an input the pricing engine accepts and an output it writes back
+ * (gstUtils.computeLineItem sets it from Discount_Pct, and a document-level discount lands on the
+ * line as well). The builder only ever binds Discount_Pct — there is no rupee field per line — so a
+ * saved Discount_Amt was invisible on screen yet still deducted on every re-price. The result was a
+ * quotation showing "DISC % 0" on every row while quietly billing thousands less than qty x rate.
+ *
+ * Discount_Pct is the only per-line discount the user can actually see and edit, so it is the one
+ * kept; the engine recomputes the amount from it. Zeroing it here also lets someone clear a bad
+ * discount by setting the percent to 0, which previously did nothing to a rupee-valued one.
+ */
+function sanitizeLoadedLine(line) {
+  return { ...line, Discount_Amt: 0 };
+}
+
+/**
  * Quotation builder — a dedicated route (not an AdminDashboard tab) because it's a stateful
  * multi-step flow: pick customer -> build line items -> review server-computed tax -> dispatch.
  *
@@ -172,7 +189,7 @@ export default function QuotationBuilderPage() {
             ? 'AMT' : 'PCT',
           documentDiscountPct: q.Document_Level_Discount_Pct || 0,
           documentDiscountAmt: q.Document_Level_Discount_Amt || 0,
-          lineItems: (q.Line_Items || []).length ? q.Line_Items : [emptyLineItem()]
+          lineItems: (q.Line_Items || []).length ? q.Line_Items.map(sanitizeLoadedLine) : [emptyLineItem()]
         }));
         setTotals(q);
 

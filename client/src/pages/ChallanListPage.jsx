@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, Search, FileText, Mail, Loader2 } from 'lucide-react';
+import { ArrowLeft, Plus, Search, FileText, Mail, Loader2 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { matchesQuery } from '../utils/searchUtils';
 
@@ -98,6 +98,15 @@ export default function ChallanListPage() {
             <ArrowLeft className="w-4 h-4 text-slate-600" />
           </button>
           <p className="flex-1 text-sm font-extrabold text-slate-900">Delivery Challans</p>
+          {/* 44px, not 48: this is a register, not a form. The primary interaction is tapping a row
+              (already a full-width target below), so a sticky bottom bar would eat thumb space the
+              list needs. */}
+          <button
+            onClick={() => navigate('/challans/manual')}
+            className="shrink-0 min-h-[44px] px-3 rounded-xl bg-slate-900 text-white text-xs font-extrabold flex items-center gap-1.5 active:bg-slate-800"
+          >
+            <Plus className="w-4 h-4" /> New
+          </button>
         </div>
         <div className="max-w-4xl mx-auto px-3 pb-2 space-y-2">
           <div className="relative">
@@ -138,7 +147,22 @@ export default function ChallanListPage() {
         {loading && <p className="text-center text-xs text-slate-400 py-8 animate-pulse">Loading…</p>}
         {error && <p className="text-center text-xs font-bold text-rose-600 py-8">{error}</p>}
         {!loading && !error && visible.length === 0 && (
-          <p className="text-center text-xs text-slate-400 py-10">No challans yet.</p>
+          /* An empty register is exactly when someone does not know where to start, so the empty
+             state carries the action. Suppressed when the emptiness is only a filter or a search —
+             offering "create" because a search found nothing misreads the intent. */
+          rows.length === 0 && !query.trim() && filter === 'ALL' ? (
+            <div className="py-12 text-center space-y-3">
+              <p className="text-xs text-slate-400">No challans yet.</p>
+              <button
+                onClick={() => navigate('/challans/manual')}
+                className="min-h-[48px] px-5 rounded-xl bg-slate-900 text-white text-sm font-extrabold inline-flex items-center gap-2 active:bg-slate-800"
+              >
+                <Plus className="w-4 h-4" /> Create the first challan
+              </button>
+            </div>
+          ) : (
+            <p className="text-center text-xs text-slate-400 py-10">No challan matches that.</p>
+          )
         )}
 
         {/* Row is a div, not a button: the Send action is a second control and a button cannot

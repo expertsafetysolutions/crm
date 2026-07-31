@@ -115,6 +115,14 @@ router.get('/purchase-orders/pending-payment', requirePermission('purchase', 'vi
   } catch (err) { fail(res, err, 'Failed to load pending payments', 'GET /pending-payment error:'); }
 });
 
+// LITERAL — ahead of /purchase-orders/:id. Live totals for the builder, priced by the same code
+// that will save them, so the figure on screen is the figure on the PDF.
+router.post('/purchase-orders/preview', requirePermission('purchase', 'view'), async (req, res) => {
+  try {
+    res.json(await purchaseService.previewPurchaseOrder(req.body));
+  } catch (err) { fail(res, err, 'Failed to price the purchase order', 'POST /purchase-orders/preview error:'); }
+});
+
 router.post('/purchase-orders', requirePermission('purchase', 'add'), async (req, res) => {
   try {
     res.json(await purchaseService.createPurchaseOrder(req.body, req.user));
@@ -175,6 +183,63 @@ router.post('/grns', requirePermission('purchase', 'add'), requirePermission('in
   try {
     res.json(await purchaseService.postGoodsReceipt(req.body, req.user));
   } catch (err) { fail(res, err, 'Failed to post goods receipt', 'POST /grns error:'); }
+});
+
+router.put('/purchase-orders/:id', requirePermission('purchase', 'edit'), async (req, res) => {
+  try {
+    res.json(await purchaseService.updatePurchaseOrder(req.params.id, req.body, req.user));
+  } catch (err) { fail(res, err, 'Failed to update purchase order', 'PUT /purchase-orders error:'); }
+});
+
+router.post('/purchase-orders/:id/dispatch', requirePermission('purchase', 'edit'), async (req, res) => {
+  try {
+    const po = await purchaseService.getPurchaseOrderById(req.params.id);
+    if (!po) return res.status(404).json({ error: 'Purchase order not found' });
+
+    const vendors = await purchaseService.getVendors({ includeInactive: true });
+    const vendor = vendors.find(v => v.Vendor_ID === po.Vendor_ID);
+    if (!vendor) return res.status(404).json({ error: 'Vendor not found' });
+
+    if (!vendor.Email) {
+      return res.status(400).json({ error: 'This vendor has no email address on file.' });
+    }
+
+    const dispatchService = require('../services/dispatchService');
+    let attachments;
+    if (Array.isArray(req.body.attachments)) {
+      attachments = req.body.attachments;
+    } else if (req.body.inlineAttachments) {
+      attachments = {
+        inline: req.body.inlineAttachments
+      };
+    }
+
+    const results = await dispatchService.sendPurchaseOrder(po, vendor, attachments, 'Email', req.user);
+    res.json({ results });
+  } catch (err) {
+    fail(res, err, 'Failed to dispatch purchase order', 'POST /purchase-orders/:id/dispatch error:');
+  }
+});
+
+router.post('/purchase-orders/:id/reminder', requirePermission('purchase', 'edit'), async (req, res) => {
+  try {
+    const po = await purchaseService.getPurchaseOrderById(req.params.id);
+    if (!po) return res.status(404).json({ error: 'Purchase order not found' });
+
+    const vendors = await purchaseService.getVendors({ includeInactive: true });
+    const vendor = vendors.find(v => v.Vendor_ID === po.Vendor_ID);
+    if (!vendor) return res.status(404).json({ error: 'Vendor not found' });
+
+    if (!vendor.Email) {
+      return res.status(400).json({ error: 'This vendor has no email address on file.' });
+    }
+
+    const dispatchService = require('../services/dispatchService');
+    const results = await dispatchService.sendPurchaseOrderReminder(po, vendor, req.user);
+    res.json({ results });
+  } catch (err) {
+    fail(res, err, 'Failed to send purchase order reminder', 'POST /purchase-orders/:id/reminder error:');
+  }
 });
 
 module.exports = router;

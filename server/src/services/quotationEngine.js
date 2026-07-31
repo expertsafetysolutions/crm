@@ -167,6 +167,21 @@ function buildCustomerSnapshot(customer) {
  * Computes GST + totals for a set of line items against a buyer, and decides whether the
  * resulting discount needs Admin sign-off.
  */
+/**
+ * Re-pricing an existing document must start from its INPUTS, not its outputs.
+ *
+ * `computeLineItem` writes the discount it computed back onto each line as `Discount_Amt`, and a
+ * document-level discount is apportioned onto the lines too. Feeding those stored lines straight
+ * back into pricing therefore re-applies a discount that was already accounted for — the document
+ * quietly loses value on every edit while every visible DISC % field still reads 0.
+ *
+ * Discount_Pct is the input; the amount is always derived from it. Stripping the computed amount
+ * makes a re-price idempotent, which is what a save that changes nothing should be.
+ */
+function stripComputedDiscounts(lineItems) {
+  return (Array.isArray(lineItems) ? lineItems : []).map(l => ({ ...l, Discount_Amt: 0 }));
+}
+
 async function priceQuotation({ customer, lineItems, documentDiscountPct, documentDiscountAmt, destinationStateCode }) {
   const settings = await getSettings();
   const sellerStateCode = settings.seller_profile.state_code
@@ -326,7 +341,9 @@ async function updateQuotation(quotationId, payload, actor) {
 
   const priced = await priceQuotation({
     customer: customer || {},
-    lineItems: payload.lineItems !== undefined ? payload.lineItems : existing.Line_Items,
+    lineItems: payload.lineItems !== undefined
+      ? payload.lineItems
+      : stripComputedDiscounts(existing.Line_Items),
     documentDiscountPct: payload.documentDiscountPct ?? existing.Document_Level_Discount_Pct,
     documentDiscountAmt: payload.documentDiscountAmt ?? existing.Document_Level_Discount_Amt,
     destinationStateCode: payload.destinationStateCode || existing.Destination_State_Code
@@ -419,7 +436,11 @@ async function createRevision(quotationId, payload, actor) {
 
   const priced = await priceQuotation({
     customer: customer || {},
-    lineItems: payload?.lineItems !== undefined ? payload.lineItems : parent.Line_Items,
+    // Without the strip, every revision would re-deduct the parent's already-applied discount, so a
+    // rev-3 quotation could sit thousands below rev-1 with nothing on screen explaining why.
+    lineItems: payload?.lineItems !== undefined
+      ? payload.lineItems
+      : stripComputedDiscounts(parent.Line_Items),
     documentDiscountPct: payload?.documentDiscountPct ?? parent.Document_Level_Discount_Pct,
     documentDiscountAmt: payload?.documentDiscountAmt ?? parent.Document_Level_Discount_Amt,
     destinationStateCode: payload?.destinationStateCode || parent.Destination_State_Code

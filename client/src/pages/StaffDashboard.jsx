@@ -16,6 +16,7 @@ import {
   getGoogleDirectionsUrl,
   getAvailableContacts,
   isTaskOverdueNoInteraction,
+  interactionMatchesTask,
   formatDialerNumber
 } from '../utils/dateUtils';
 import { validatePasswordPolicy } from '../utils/passwordUtils';
@@ -2242,9 +2243,7 @@ export default function StaffDashboard() {
           {/* 3rd Line: Last Remark with Date & Time */}
           {(() => {
             const isRemarkExpanded = !!expandedRemarkTaskIds[task.Task_ID];
-            const matchingRemarks = myCustomerInteractions.filter(
-              i => i.Customer_ID === task.Customer_ID || (task.Task_ID && i.Task_ID === task.Task_ID)
-            );
+            const matchingRemarks = myCustomerInteractions.filter(i => interactionMatchesTask(i, task));
             const latestRemark = matchingRemarks.length > 0 ? matchingRemarks[matchingRemarks.length - 1] : null;
             const remarkText = latestRemark ? latestRemark.Remarks : task.Remarks;
             const remarkTime = latestRemark ? formatInteractionTimestamp(latestRemark.Timestamp) : null;
@@ -3928,14 +3927,18 @@ export default function StaffDashboard() {
                 </div>
               ) : (
                 (() => {
+                  // This task only. The red Master Search above is the company-wide view.
                   const history = myCustomerInteractions.filter(
-                    i => (i.Customer_ID === remarkTask.Customer_ID || (remarkTask.Task_ID && i.Task_ID === remarkTask.Task_ID)) &&
+                    i => interactionMatchesTask(i, remarkTask) &&
                          matchesQuery(historySearchText, [i.Remarks, i.Type, i.Staff_Name, i.Staff_ID])
                   );
                   if (history.length === 0) {
                     return (
-                      <div className="p-6 text-center text-xs text-slate-400 bg-slate-50 rounded-2xl border border-dashed border-slate-200">
-                        {historySearchText ? `No remarks matching "${historySearchText}" for this client.` : 'No remarks recorded yet for this client or task. Add the first interaction remark above!'}
+                      <div className="p-6 text-center text-xs text-slate-400 bg-slate-50 rounded-2xl border border-dashed border-slate-200 space-y-1">
+                        <p>{historySearchText ? `No remarks matching "${historySearchText}" in this task.` : 'No remarks on this task yet. Add the first one above!'}</p>
+                        {/* The list is task-scoped now, so an empty one is ambiguous — it could mean
+                            the customer has none, or that they are all filed under a sibling task. */}
+                        <p className="text-[11px] text-slate-400">Use 🔍 above to search all remarks for this company.</p>
                       </div>
                     );
                   }

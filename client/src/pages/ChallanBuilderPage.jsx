@@ -67,6 +67,9 @@ export default function ChallanBuilderPage() {
   );
 
   const isIssued = challan?.Status === 'Issued';
+  // A challan with no job card behind it: typed in from paper, or a direct supply. Gates the extra
+  // line controls, which would otherwise invite someone to contradict a workshop record.
+  const isManual = Boolean(challan) && !challan.Job_Card_ID;
   const lines = challan?.Line_Items || [];
   const unmapped = lines.filter(l => l.Item_Match_Confidence === 'NONE').length;
 
@@ -176,10 +179,16 @@ export default function ChallanBuilderPage() {
   const saveLines = (next) => persist({ Line_Items: next || lines });
 
   const addManualLine = () => {
+    // Inherit equipment type and capacity from the row above — on a manual challan the next line is
+    // usually the same family, and this is the JobCardInwardTab pattern for cutting typing.
+    const prev = lines[lines.length - 1];
     const next = [...lines, {
       lineId: `M${Date.now().toString(36)}`,
       Line_Type: 'MANUAL', Item_ID: '', Item_Name: '', Description: '',
       Qty: 1, Unit: 'Nos', Rate: 0, HSN_Code: '',
+      // '' means "let the server classify from the catalogue".
+      Service_Override: '', Service_Type: '',
+      Equipment_Type: prev?.Equipment_Type || '', Capacity: prev?.Capacity || '',
       Item_Match_Confidence: 'NONE', Source_Item_IDs: [], UID_Numbers: []
     }];
     setChallan(c => ({ ...c, Line_Items: next }));
@@ -204,7 +213,17 @@ export default function ChallanBuilderPage() {
       Rate: resolved?.rate ?? Number(master.Standard_Rate) ?? 0,
       Rate_Source: resolved?.source || 'STANDARD',
       Rate_Source_Label: resolved?.sourceLabel || 'Standard rate from Item Master',
-      Item_Match_Confidence: 'EXACT'
+      Item_Match_Confidence: 'EXACT',
+      /*
+       * Cleared so the server re-derives them for the item just picked. Without this, swapping
+       * "Refilling CO2 3 Kg" for "HP Testing ABC 6 Kg" would keep the old service and capacity and
+       * put the line on the wrong certificate. A hand-typed override is deliberately NOT cleared —
+       * the user chose it and it outranks detection.
+       */
+      Line_Type: l.Service_Override ? l.Line_Type : '',
+      Service_Type: l.Service_Override ? l.Service_Type : '',
+      Equipment_Type: '',
+      Capacity: ''
     } : l));
     setMapping(null);
     await saveLines(next);
@@ -363,15 +382,22 @@ export default function ChallanBuilderPage() {
       setDuplicate(null);
       setChallan(data);
 
-      // Offer the certificate while the delivery is still in hand — the prefill endpoint is already
-      // there, it just had nothing calling it, so certificates were raised days later from memory.
-      // Only for lines that actually certify: an accessory-only delivery must not be asked.
+      /*
+       * Offer the certificate while the delivery is still in hand — the prefill endpoint is already
+       * there, it just had nothing calling it, so certificates were raised days later from memory.
+       * Only for lines that actually certify: an accessory-only delivery must not be asked.
+       *
+       * EVERY distinct service present gets offered, not just one. A single cylinder can legitimately
+       * be both refilled and hydro-tested (see the note in challanService.buildChallanLines), and
+       * those are two separate certificates. Picking one meant the other was silently never offered.
+       */
       const certifiable = (data.Line_Items || []).filter(l => l.Line_Type === 'SERVICE' && l.Service_Type);
-      if (certifiable.length > 0) {
-        // Refilling and HP testing are separate certificates; offer whichever this challan carries.
-        const hasHp = certifiable.some(l => /hp/i.test(l.Service_Type));
-        setCertPrompt({ formatType: hasHp ? 'HP Testing' : 'Refilling', count: certifiable.length });
-      }
+      const byType = [...new Set(certifiable.map(l => l.Service_Type))]
+        .map(formatType => ({
+          formatType,
+          count: certifiable.filter(l => l.Service_Type === formatType).length
+        }));
+      if (byType.length > 0) setCertPrompt({ types: byType });
     } catch (e) {
       setError(e.message);
     } finally {
@@ -475,6 +501,13 @@ export default function ChallanBuilderPage() {
           }`}>
             {challan.Status}{challan.Is_Partial ? ' · Partial' : ''}
           </span>
+          {/* Stays visible after issue: whoever opens this later needs to know why the stock ledger
+              will not move when it is invoiced. */}
+          {challan.Is_Historical && (
+            <span className="shrink-0 px-2 py-1 rounded-lg bg-amber-100 text-amber-800 text-[10px] font-extrabold">
+              Old record
+            </span>
+          )}
         </div>
       </header>
 
@@ -514,6 +547,72 @@ export default function ChallanBuilderPage() {
             />
           </label>
         </div>
+
+        {/*
+          Manual drafts only. Editable right up to issue and locked after, because the stock decision
+          must not change under an invoice that has already been raised on it.
+        */}
+        {isManual && !isIssued && (
+          <label className="flex items-start gap-2.5 min-h-[48px] px-3 py-2.5 rounded-xl bg-white border border-slate-200 active:bg-slate-50 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={Boolean(challan.Is_Historical)}
+              onChange={e => persist({ Is_Historical: e.target.checked })}
+              className="w-4 h-4 shrink-0 mt-0.5"
+            />
+            <span className="min-w-0">
+              <span className="block text-xs font-extrabold text-slate-800">Old challan — already delivered</span>
+              <span className="block text-[11px] text-slate-500 leading-snug mt-0.5">
+                Stock will NOT be reduced when this is invoiced — the goods left the shelf at the time.
+              </span>
+            </span>
+          </label>
+        )}
+
+        {/*
+          Vehicle number and notes are exactly what a paper challan carries, and the server has always
+          accepted them — there was simply nowhere to type them. Collapsed by default so the job-card
+          layout is unchanged for the people who never need them.
+        */}
+        {isManual && !isIssued && (
+          <details className="rounded-xl bg-white border border-slate-200 overflow-hidden">
+            <summary className="px-3 min-h-[44px] flex items-center text-xs font-extrabold text-slate-700 cursor-pointer select-none">
+              Delivery details
+            </summary>
+            <div className="px-3 pb-3 space-y-2">
+              <label className="block">
+                <span className="block text-[10px] font-extrabold uppercase tracking-wide text-slate-400 mb-0.5">Vehicle no</span>
+                <input
+                  value={challan.Vehicle_No || ''}
+                  onChange={e => setChallan(c => ({ ...c, Vehicle_No: e.target.value }))}
+                  onBlur={e => persist({ Vehicle_No: e.target.value })}
+                  placeholder="e.g. GJ-06-AB-1234"
+                  className="jc-input"
+                />
+              </label>
+              <label className="block">
+                <span className="block text-[10px] font-extrabold uppercase tracking-wide text-slate-400 mb-0.5">Received by</span>
+                <input
+                  value={challan.Received_By_Name || ''}
+                  onChange={e => setChallan(c => ({ ...c, Received_By_Name: e.target.value }))}
+                  onBlur={e => persist({ Received_By_Name: e.target.value })}
+                  placeholder="Name on the paper challan"
+                  className="jc-input"
+                />
+              </label>
+              <label className="block">
+                <span className="block text-[10px] font-extrabold uppercase tracking-wide text-slate-400 mb-0.5">Notes</span>
+                <textarea
+                  value={challan.Notes || ''}
+                  onChange={e => setChallan(c => ({ ...c, Notes: e.target.value }))}
+                  onBlur={e => persist({ Notes: e.target.value })}
+                  rows={2}
+                  className="jc-input py-2"
+                />
+              </label>
+            </div>
+          </details>
+        )}
 
         {duplicate && (
           <div className="rounded-xl bg-amber-50 border border-amber-300 p-3">
@@ -582,12 +681,90 @@ export default function ChallanBuilderPage() {
                           {flag.label} · map
                         </button>
                       )}
-                      {line.UID_Numbers?.length > 0 && (
+                      {line.Line_Type === 'SERVICE' && line.Service_Type && (
+                        <span className="px-1.5 py-0.5 rounded-md bg-emerald-100 text-emerald-700 text-[9px] font-extrabold">
+                          {line.Service_Type}{line.Capacity ? ` · ${line.Capacity}` : ''}
+                        </span>
+                      )}
+                      {line.UID_Numbers?.length > 0 && !isManual && (
                         <span className="text-[9px] text-slate-400 font-bold truncate">
                           UID: {line.UID_Numbers.join(', ')}
                         </span>
                       )}
                     </div>
+
+                    {/*
+                      Manual challans only. A job-card line already knows what it is — the technician
+                      ticked it on the cylinder — so exposing a dropdown there would invite someone
+                      to contradict the workshop record.
+
+                      The value falls back to what the server derived, so the auto-detected answer is
+                      what the user sees and they only touch it when it is wrong. Options are labelled
+                      by consequence, because "does this print a certificate?" is the actual question.
+                    */}
+                    {isManual && !isIssued && (
+                      <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                        <select
+                          value={line.Service_Override || (line.Line_Type === 'SERVICE' ? line.Service_Type : 'SUPPLY')}
+                          onChange={e => {
+                            const next = lines.map(l => (l.lineId === line.lineId
+                              ? { ...l, Service_Override: e.target.value }
+                              : l));
+                            setChallan(c => ({ ...c, Line_Items: next }));
+                            saveLines(next);
+                          }}
+                          className="jc-input flex-1 min-w-[11rem] text-xs"
+                          aria-label="What this line is"
+                        >
+                          <option value="SUPPLY">Supply only — no certificate</option>
+                          <option value="Refilling">Refilling — certificate</option>
+                          <option value="HP Testing">HP Testing — certificate</option>
+                          <option value="New Fire Extinguisher">New extinguisher — certificate</option>
+                        </select>
+
+                        {/* The certificate prints this, so a blank capacity is a blank column. The
+                            server normalises it, so "6kg" typed in a hurry comes back as "6 Kg". */}
+                        {line.Line_Type === 'SERVICE' && (
+                          <input
+                            value={line.Capacity || ''}
+                            onChange={e => patchLine(line.lineId, { Capacity: e.target.value })}
+                            onBlur={() => saveLines()}
+                            placeholder="Capacity"
+                            className="jc-input w-24 text-xs"
+                            aria-label="Capacity"
+                          />
+                        )}
+                      </div>
+                    )}
+
+                    {/*
+                      Cylinder numbers, for HP Testing only — buildCertificatePrefill emits one
+                      certificate row per number. Optional on purpose: a back-entered paper challan
+                      often has none, and the prefill then falls back to a single aggregated row,
+                      which is the honest outcome. Comma-separated rather than a repeater: three
+                      numbers are quicker typed than tapped.
+                    */}
+                    {isManual && !isIssued && /hp\s*test/i.test(line.Service_Type || '') && (
+                      <div className="mt-1.5">
+                        <input
+                          value={(line.UID_Numbers || []).join(', ')}
+                          onChange={e => patchLine(line.lineId, {
+                            UID_Numbers: e.target.value.split(',').map(v => v.trim()).filter(Boolean)
+                          })}
+                          onBlur={() => saveLines()}
+                          placeholder="Cylinder numbers, comma separated (optional)"
+                          className="jc-input w-full text-xs"
+                          aria-label="Cylinder numbers"
+                        />
+                        {(line.UID_Numbers || []).length > 0 && (line.UID_Numbers || []).length !== Number(line.Qty) && (
+                          /* Advisory, never a block: fewer numbers than cylinders means fewer rows on
+                             the certificate, which nobody notices until the customer's auditor does. */
+                          <p className="mt-0.5 text-[10px] font-bold text-amber-600">
+                            {(line.UID_Numbers || []).length} of {line.Qty} numbers entered
+                          </p>
+                        )}
+                      </div>
+                    )}
                   </div>
 
                   <div className="flex items-center gap-1.5 shrink-0">
@@ -658,7 +835,8 @@ export default function ChallanBuilderPage() {
 
         {!isIssued && (
           <button onClick={addManualLine} className="jc-btn-ghost w-full min-h-[48px]">
-            <Plus className="w-4 h-4" /> Add another product
+            {/* A manual challan opens empty, so "another" would be wrong on the first tap. */}
+            <Plus className="w-4 h-4" /> {lines.length === 0 ? 'Add the first item' : 'Add another product'}
           </button>
         )}
 
@@ -716,8 +894,22 @@ export default function ChallanBuilderPage() {
               >
                 <MapPin className="w-4 h-4" /> {challan.POD ? 'Delivered ✓' : 'Delivery'}
               </button>
+              {/* Re-opens the same chooser as the post-issue prompt rather than assuming Refilling.
+                  Hard-coding it here was the second half of the mixed-challan bug: coming back to a
+                  challan carrying both services always landed on the wrong certificate. */}
               <button
-                onClick={() => navigate(`/certificate-compliance/new?challanId=${challan.Challan_ID}&formatType=Refilling`)}
+                onClick={() => {
+                  const certifiable = (challan.Line_Items || []).filter(l => l.Line_Type === 'SERVICE' && l.Service_Type);
+                  const byType = [...new Set(certifiable.map(l => l.Service_Type))]
+                    .map(formatType => ({ formatType, count: certifiable.filter(l => l.Service_Type === formatType).length }));
+                  if (byType.length === 1) {
+                    navigate(`/certificate-compliance/new?challanId=${challan.Challan_ID}&formatType=${encodeURIComponent(byType[0].formatType)}`);
+                  } else if (byType.length > 1) {
+                    setCertPrompt({ types: byType });
+                  } else {
+                    setError('No line on this challan needs a certificate. Set a line to Refilling or HP Testing first.');
+                  }
+                }}
                 className="flex-1 min-h-[48px] rounded-xl border border-slate-200 bg-white text-slate-700 text-xs font-extrabold flex items-center justify-center gap-1.5 active:bg-slate-50"
               >
                 <FileText className="w-4 h-4" /> Cert
@@ -761,25 +953,34 @@ export default function ChallanBuilderPage() {
             <div className="flex items-start gap-2.5">
               <FileText className="w-5 h-5 text-indigo-600 shrink-0 mt-0.5" />
               <div className="min-w-0">
-                <p className="text-sm font-extrabold text-slate-900">Raise the certificate now?</p>
+                <p className="text-sm font-extrabold text-slate-900">
+                  {certPrompt.types.length > 1 ? 'Raise the certificates now?' : 'Raise the certificate now?'}
+                </p>
                 <p className="text-[11px] text-slate-500 mt-1">
-                  Challan {challan.Challan_No} is issued. {certPrompt.count} line{certPrompt.count > 1 ? 's' : ''}{' '}
-                  need a {certPrompt.formatType} certificate — the details carry over automatically.
+                  Challan {challan.Challan_No} is issued.{' '}
+                  {certPrompt.types.length > 1
+                    ? `This delivery needs ${certPrompt.types.length} certificates — create them one at a time.`
+                    : `${certPrompt.types[0].count} line${certPrompt.types[0].count > 1 ? 's' : ''} need a ${certPrompt.types[0].formatType} certificate — the details carry over automatically.`}
                 </p>
               </div>
             </div>
-            <div className="flex gap-2 pt-1">
+            {/* Stacked, not side by side: two 48px buttons plus Later cannot fit a 320px screen. */}
+            <div className="space-y-2 pt-1">
+              {certPrompt.types.map(t => (
+                <button
+                  key={t.formatType}
+                  onClick={() => navigate(`/certificate-compliance/new?challanId=${challan.Challan_ID}&formatType=${encodeURIComponent(t.formatType)}`)}
+                  className="w-full min-h-[48px] px-3 rounded-xl bg-indigo-600 text-white text-xs font-extrabold active:bg-indigo-700 flex items-center justify-between gap-2"
+                >
+                  <span>{t.formatType} certificate</span>
+                  <span className="opacity-70 shrink-0">{t.count} line{t.count > 1 ? 's' : ''}</span>
+                </button>
+              ))}
               <button
                 onClick={() => setCertPrompt(null)}
-                className="jc-btn-ghost flex-1 border border-slate-200 rounded-xl"
+                className="jc-btn-ghost w-full border border-slate-200 rounded-xl"
               >
                 Later
-              </button>
-              <button
-                onClick={() => navigate(`/certificate-compliance/new?challanId=${challan.Challan_ID}&formatType=${encodeURIComponent(certPrompt.formatType)}`)}
-                className="flex-1 min-h-[48px] rounded-xl bg-indigo-600 text-white text-xs font-extrabold active:bg-indigo-700"
-              >
-                Create certificate
               </button>
             </div>
           </div>

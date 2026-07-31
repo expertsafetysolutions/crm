@@ -28,6 +28,10 @@ const CONFIDENCE = { EXACT: 'EXACT', ALIAS: 'ALIAS', FUZZY: 'FUZZY', NONE: 'NONE
 const SERVICE = { REFILLING: 'Refilling', HP_TESTING: 'HP Testing' };
 
 const { normalizeCapacity, istToday } = jobCardService;
+const {
+  classifyItem, applyServiceOverride, OVERRIDE_SUPPLY,
+  REFILL_TOKENS, HPT_TOKENS, CO2_TOKENS, ABC_TOKENS
+} = require('../utils/itemClassifier');
 
 function rand2() {
   return Math.floor(Math.random() * 100).toString().padStart(2, '0');
@@ -142,12 +146,12 @@ function resolveItemForGroup(items, group) {
 
   // TIER 3 — token match on the item name. Synonyms are grouped because the catalogue is
   // admin-written free text: "DCP Refill 6Kg" and "Refilling ABC 6 Kg" are the same product.
-  const serviceTokens = group.Service_Type === SERVICE.REFILLING
-    ? ['refill', 'refilling', 'recharge']
-    : ['hp test', 'hp testing', 'hydro', 'hydraulic', 'pressure test'];
-  const typeTokens = String(group.Equipment_Type).toUpperCase() === 'CO2'
-    ? ['co2', 'carbon', 'dioxide']
-    : ['abc', 'dcp', 'powder'];
+  //
+  // The lists come from itemClassifier, which maps the OTHER direction (a catalogue item -> the
+  // service it represents). Sharing them means an item classified there as "Refilling / ABC / 6 Kg"
+  // can always resolve back to itself here. Two copies would eventually disagree.
+  const serviceTokens = group.Service_Type === SERVICE.REFILLING ? REFILL_TOKENS : HPT_TOKENS;
+  const typeTokens = String(group.Equipment_Type).toUpperCase() === 'CO2' ? CO2_TOKENS : ABC_TOKENS;
 
   const matchesServiceAndType = (name) =>
     serviceTokens.some(t => name.includes(t)) && typeTokens.some(t => name.includes(t));
@@ -508,6 +512,104 @@ async function generateChallanDraft(jobCardId, { itemIds, challanDate } = {}, ac
 }
 
 /**
+ * A challan with no job card behind it.
+ *
+ * Two real cases the workshop flow cannot serve:
+ *  - HISTORICAL back-entry — the challan exists on paper from before this system, and the office
+ *    wants it in the register so the customer's history and certificates live in one place;
+ *  - DIRECT SUPPLY — equipment sold and delivered with no workshop work, so no job card was opened.
+ *
+ * Deliberately NOT a branch inside generateChallanDraft. That function's five job-card lookups
+ * (recheck guard, item fetch, "nothing to deliver", draft dedupe, and the Job_Card_Master write) are
+ * all meaningless here, and threading a null card through them would put the workshop path — the one
+ * that runs every day — one bad conditional away from breaking.
+ *
+ * Lines are optional: the builder page adds them afterwards through updateChallanDraft, which is
+ * where classification and re-pricing already live. Passing them here is a convenience, not a
+ * second code path.
+ */
+async function createManualChallan(
+  { customerId, challanDate, isHistorical, notes, vehicleNo, receivedByName, lines } = {},
+  actor
+) {
+  const id = String(customerId || '').trim();
+  if (!id) throw new Error('A customer is required to raise a challan');
+
+  const customers = await sheetsService.getAllCustomers();
+  const customer = customers.find(c =>
+    String(c.Customer_ID || '').trim().toLowerCase() === id.toLowerCase());
+  if (!customer) throw new Error(`Customer ${customerId} not found`);
+
+  // Classify anything supplied up front, so a caller that does pass lines gets the same result the
+  // builder would have produced.
+  let normalized = [];
+  if (Array.isArray(lines) && lines.length > 0) {
+    const itemMaster = lines.some(needsClassification) ? await sheetsService.getAllItems() : [];
+    normalized = lines
+      .map(l => normalizeLine(
+        l,
+        undefined,
+        needsClassification(l) ? itemMaster.find(i => i.Item_ID === l.Item_ID) : null
+      ))
+      .filter(l => l.Qty > 0 && l.Item_Name);
+    normalized = await priceChallanLines(customer.Customer_ID, normalized, []);
+  }
+
+  const challan = {
+    Challan_ID: newChallanId(),
+    // Blank for the same reason as a job-card challan: the paper book is the authority.
+    Challan_No: '',
+    Challan_No_Suggested: await suggestNextChallanNo(),
+    Status: STATUS.DRAFT,
+
+    // Empty strings, never undefined — every `if (challan.Job_Card_ID)` guard downstream reads them
+    // as falsy, and GET /challans?jobCardId= filtering stays predictable.
+    Job_Card_ID: '',
+    Task_ID: '',
+    Source: 'MANUAL',
+    // Governs whether converting to an invoice moves stock. See convertChallanToInvoice.
+    Is_Historical: Boolean(isHistorical),
+
+    Customer_ID: customer.Customer_ID,
+    ...jobCardService.buildCustomerSnapshot(customer),
+
+    Is_Partial: false,
+    Challan_Date: challanDate || istToday(),
+    Notes: notes || '',
+    Vehicle_No: vehicleNo || '',
+    Received_By_Name: receivedByName || '',
+    Line_Items: normalized,
+    Total_Qty: totalQty(normalized),
+    Total_Amount: totalAmount(normalized),
+    Item_Count: normalized.length,
+
+    POD: null,
+    Issued_By: '',
+    Issued_At: '',
+    Linked_Invoice_ID: '',
+    Linked_Certificate_Guids: [],
+    Duplicate_Warning_Ack: false,
+    Created_By: actor?.staffId || 'SYSTEM',
+    Created_At: istToday(),
+    Created_At_Ms: Date.now(),
+    Updated_At: new Date().toISOString()
+  };
+
+  await sheetsService.insertRow('Delivery_Challan_Master', challan);
+
+  // Reuses CHALLAN_GENERATED rather than minting a tag: a new one would need mirroring into the
+  // client's REMARK_TAGS to render. The word "Manual" carries the distinction.
+  await interactionLogger.logEvent({
+    tag: interactionLogger.EVENT_TAG.CHALLAN_GENERATED,
+    summary: `Manual challan${challan.Is_Historical ? ' (historical back-entry)' : ''} | ${normalized.length} line(s)`,
+    customerId: customer.Customer_ID,
+    actor
+  });
+
+  return challan;
+}
+
+/**
  * A non-binding hint at what the next number probably is, from the numeric tail of the numbers
  * already issued. Shown as placeholder text only — it is never written to the document, because the
  * paper book is the authority and guessing ahead of it would create exactly the mismatch this
@@ -533,7 +635,80 @@ async function suggestNextChallanNo() {
   return template.replace(/(\d+)\s*$/, String(max + 1).padStart(tail.length, '0'));
 }
 
-const DRAFT_EDITABLE = ['Challan_Date', 'Notes', 'Vehicle_No', 'Received_By_Name'];
+const DRAFT_EDITABLE = ['Challan_Date', 'Notes', 'Vehicle_No', 'Received_By_Name', 'Is_Historical'];
+
+/**
+ * Canonical shape of ONE challan line. The single place that decides what a line's fields mean.
+ *
+ * `before` is the same line from the stored draft, used only to tell a human-edited rate from an
+ * unchanged one.
+ *
+ * `catalogueItem` is supplied ONLY when the line needs classifying — see needsClassification. When
+ * absent nothing is derived and the line's incoming Line_Type/Service_Type stand, which is what
+ * keeps a job-card line byte-identical to what buildChallanLines produced.
+ */
+function normalizeLine(l, before, catalogueItem) {
+  const rate = Number(l.Rate) || 0;
+  // A rate that differs from what we resolved is a human decision, so it is marked touched and
+  // survives the next regenerate. Rates arriving unchanged keep their original provenance.
+  const touched = Boolean(l.Rate_Touched) || (before ? rate !== (Number(before.Rate) || 0) : rate > 0);
+  const qty = Number(l.Qty) || 0;
+
+  /*
+   * What this line IS. Three sources, in priority order:
+   *  1. an explicit Service_Override the user picked in the builder — always wins, and is stored so
+   *     the next save cannot quietly re-derive over the correction;
+   *  2. classification from the catalogue item, when one was supplied;
+   *  3. whatever the line already carried.
+   */
+  let derived = null;
+  if (l.Service_Override) {
+    derived = applyServiceOverride(l.Service_Override, catalogueItem || { Item_Name: l.Item_Name });
+  } else if (catalogueItem) {
+    derived = classifyItem(catalogueItem);
+  }
+
+  return {
+    lineId: l.lineId || newLineId(),
+    Group_Key: l.Group_Key || '',
+    Line_Type: derived
+      ? derived.Line_Type
+      : (l.Line_Type === LINE_TYPE.MANUAL ? LINE_TYPE.MANUAL : (l.Line_Type || LINE_TYPE.MANUAL)),
+    Service_Type: derived ? derived.Service_Type : (l.Service_Type || ''),
+    Equipment_Type: derived ? derived.Equipment_Type : (l.Equipment_Type || ''),
+    // A capacity typed by hand beats the one parsed out of the item name — the human is looking at
+    // the actual cylinder.
+    Capacity: l.Capacity ? normalizeCapacity(l.Capacity) : (derived ? derived.Capacity : ''),
+    Service_Override: l.Service_Override || '',
+    Item_ID: l.Item_ID || '',
+    Item_Name: l.Item_Name || '',
+    Description: l.Description || l.Item_Name || '',
+    HSN_Code: l.HSN_Code || '',
+    Qty: qty,
+    Unit: l.Unit || 'Nos',
+    Rate: rate,
+    Rate_Source: touched && !l.Rate_Source ? 'MANUAL' : (l.Rate_Source || before?.Rate_Source || 'NONE'),
+    Rate_Source_Label: touched && !l.Rate_Source ? 'Entered by staff' : (l.Rate_Source_Label || before?.Rate_Source_Label || ''),
+    Rate_Touched: touched,
+    Amount: round2(rate * qty),
+    Item_Match_Confidence: l.Item_Match_Confidence || CONFIDENCE.NONE,
+    Source_Item_IDs: Array.isArray(l.Source_Item_IDs) ? l.Source_Item_IDs : [],
+    UID_Numbers: Array.isArray(l.UID_Numbers) ? l.UID_Numbers : []
+  };
+}
+
+/**
+ * True when a line should be classified from the catalogue.
+ *
+ * A job-card line always arrives carrying Line_Type AND Service_Type from buildChallanLines, so it
+ * never qualifies — that is the property that keeps the existing path untouched. Only a
+ * manually-picked line (has an Item_ID, no service decided yet) or an explicit override does.
+ */
+function needsClassification(l) {
+  if (l.Service_Override) return true;
+  if (!l.Item_ID) return false;
+  return !l.Line_Type || (l.Line_Type === LINE_TYPE.MANUAL && !l.Service_Type);
+}
 
 async function updateChallanDraft(challanId, patch, actor) {
   const challan = await sheetsService.getChallanById(challanId);
@@ -550,36 +725,18 @@ async function updateChallanDraft(challanId, patch, actor) {
   if (Array.isArray(patch?.Line_Items)) {
     const previous = Array.isArray(challan.Line_Items) ? challan.Line_Items : [];
 
+    // The catalogue is fetched ONLY when some line actually needs classifying, so a job-card save —
+    // whose lines all arrive pre-classified — costs exactly what it did before.
+    const itemMaster = patch.Line_Items.some(needsClassification)
+      ? await sheetsService.getAllItems()
+      : [];
+
     const lines = patch.Line_Items.map(l => {
       const before = previous.find(p => p.lineId === l.lineId);
-      const rate = Number(l.Rate) || 0;
-      // A rate that differs from what we resolved is a human decision, so it is marked touched and
-      // survives the next regenerate. Rates arriving unchanged keep their original provenance.
-      const touched = Boolean(l.Rate_Touched) || (before ? rate !== (Number(before.Rate) || 0) : rate > 0);
-      const qty = Number(l.Qty) || 0;
-
-      return {
-        lineId: l.lineId || newLineId(),
-        Group_Key: l.Group_Key || '',
-        Line_Type: l.Line_Type === LINE_TYPE.MANUAL ? LINE_TYPE.MANUAL : (l.Line_Type || LINE_TYPE.MANUAL),
-        Service_Type: l.Service_Type || '',
-        Equipment_Type: l.Equipment_Type || '',
-        Capacity: l.Capacity ? normalizeCapacity(l.Capacity) : '',
-        Item_ID: l.Item_ID || '',
-        Item_Name: l.Item_Name || '',
-        Description: l.Description || l.Item_Name || '',
-        HSN_Code: l.HSN_Code || '',
-        Qty: qty,
-        Unit: l.Unit || 'Nos',
-        Rate: rate,
-        Rate_Source: touched && !l.Rate_Source ? 'MANUAL' : (l.Rate_Source || before?.Rate_Source || 'NONE'),
-        Rate_Source_Label: touched && !l.Rate_Source ? 'Entered by staff' : (l.Rate_Source_Label || before?.Rate_Source_Label || ''),
-        Rate_Touched: touched,
-        Amount: round2(rate * qty),
-        Item_Match_Confidence: l.Item_Match_Confidence || CONFIDENCE.NONE,
-        Source_Item_IDs: Array.isArray(l.Source_Item_IDs) ? l.Source_Item_IDs : [],
-        UID_Numbers: Array.isArray(l.UID_Numbers) ? l.UID_Numbers : []
-      };
+      const catalogueItem = needsClassification(l)
+        ? itemMaster.find(i => i.Item_ID === l.Item_ID)
+        : null;
+      return normalizeLine(l, before, catalogueItem);
     }).filter(l => l.Qty > 0 && l.Item_Name);
 
     update.Line_Items = lines;
@@ -644,10 +801,20 @@ async function issueChallan(challanId, { challanNo, challanDate, acknowledgeDupl
     Updated_At: new Date().toISOString()
   });
 
-  await sheetsService.updateRow('Job_Card_Master', 'Job_Card_ID', challan.Job_Card_ID, {
-    Status: jobCardService.STATUS.CHALLAN_ISSUED,
-    Updated_At: new Date().toISOString()
-  });
+  /*
+   * Guarded like its neighbours above and below — a manual challan has no card to advance.
+   *
+   * Not merely tidiness: updateRow builds `new RegExp('^' + id + '$', 'i')` for string ids, so an
+   * empty Job_Card_ID becomes /^$/i inside a findOneAndUpdate — a pattern that matches ANY empty
+   * string. Unguarded, issuing a job-card-less challan could stamp CHALLAN_ISSUED onto an unrelated
+   * row that happened to have a blank id.
+   */
+  if (challan.Job_Card_ID) {
+    await sheetsService.updateRow('Job_Card_Master', 'Job_Card_ID', challan.Job_Card_ID, {
+      Status: jobCardService.STATUS.CHALLAN_ISSUED,
+      Updated_At: new Date().toISOString()
+    });
+  }
   if (challan.Task_ID) {
     await sheetsService.updateRow('Task_Master', 'Task_ID', challan.Task_ID, { Challan_ID: challanId });
     await quotationEngine.safeAdvanceTask(challan.Task_ID, 'Invoice', actor, `Delivery challan ${number} issued`);
@@ -708,13 +875,21 @@ async function buildCertificatePrefill(challanId, formatType) {
   if (!challan) throw new Error(`Challan ${challanId} not found`);
 
   const type = String(formatType || SERVICE.REFILLING).trim();
-  const isHpTesting = /hp\s*test/i.test(type);
-  const wanted = isHpTesting ? SERVICE.HP_TESTING : SERVICE.REFILLING;
+  const isHpTesting = /hp\s*test|hydro/i.test(type);
+
+  /*
+   * Match the requested type by NAME rather than folding everything that is not HP Testing into
+   * Refilling. That binary was fine while two types existed; with a third (New Fire Extinguisher,
+   * for equipment supplied rather than serviced) it would have silently served refill lines to
+   * anyone asking for it.
+   */
+  const wanted = isHpTesting ? SERVICE.HP_TESTING : type;
 
   const lines = (challan.Line_Items || []).filter(
     l => l.Line_Type === LINE_TYPE.SERVICE && l.Service_Type === wanted
   );
 
+  // A hydro test is certified for three years; everything else runs a year.
   const validityYears = isHpTesting ? 3 : 1;
   const serviceDate = challan.Challan_Date || istToday();
 
@@ -740,11 +915,10 @@ async function buildCertificatePrefill(challanId, formatType) {
 
   const settings = await sheetsService.getDocumentSettings('DEFAULT');
   // Per-type toggle: the challan reference is the customer's cross-reference back to the delivery,
-  // so it defaults on for the two challan-derived types and off for everything else.
+  // so it defaults ON for anything reached through this function — by definition every type here
+  // came from a challan. An admin's explicit setting still wins.
   const configured = settings?.certificate_types?.[type]?.showChallanRef;
-  const showChallanRef = configured !== undefined
-    ? Boolean(configured)
-    : [SERVICE.REFILLING, SERVICE.HP_TESTING].includes(wanted);
+  const showChallanRef = configured !== undefined ? Boolean(configured) : true;
 
   return {
     formatType: type,
@@ -776,6 +950,9 @@ async function buildCertificatePrefill(challanId, formatType) {
  * fitted them, and service lines are labour with nothing to deduct — so this deliberately does NOT
  * call inventoryService.deductForInvoice(), which would take every accessory out of stock a second
  * time. Only lines a human typed onto the challan afterwards are deducted here.
+ *
+ * A manual challan marked Is_Historical deducts NOTHING, for the same class of reason: its goods
+ * left the shelf on the original paper challan's date, before this system was keeping the ledger.
  */
 async function convertChallanToInvoice(challanId, { lineOverrides, documentDiscountPct, paymentTermsId } = {}, actor) {
   const challan = await sheetsService.getChallanById(challanId);
@@ -881,7 +1058,11 @@ async function convertChallanToInvoice(challanId, { lineOverrides, documentDisco
     Source_Challan_No: challan.Challan_No,
     Rate_Sources: rateSources,
     // Records WHY deductForInvoice was not called, so a later reader does not "fix" the omission.
-    Inventory_Deducted_At_JobCard: true,
+    // A job-card challan consumed its accessories at part-fitting time; a historical back-entry
+    // consumed them before this system existed. Writing an unconditional `true` on a manual challan
+    // would state a job-card reason that never happened.
+    Inventory_Deducted_At_JobCard: Boolean(challan.Job_Card_ID),
+    Inventory_Skipped_Historical: Boolean(challan.Is_Historical),
 
     Task_ID: challan.Task_ID || '',
     Status: 'Issued',
@@ -906,7 +1087,13 @@ async function convertChallanToInvoice(challanId, { lineOverrides, documentDisco
   });
 
   // Only staff-added lines consume stock here — see the note at the top of this function.
-  const manualLines = totals.lineItems.filter(l => l.Line_Type === LINE_TYPE.MANUAL && l.Item_ID);
+  //
+  // A historical back-entry is the exception: those goods left the shelf on the original delivery
+  // date, often years ago. Deducting now would remove them a second time, in the present, against a
+  // movement that already happened.
+  const manualLines = challan.Is_Historical
+    ? []
+    : totals.lineItems.filter(l => l.Line_Type === LINE_TYPE.MANUAL && l.Item_ID);
   let inventoryResult = null;
   if (manualLines.length > 0) {
     try {
@@ -924,10 +1111,19 @@ async function convertChallanToInvoice(challanId, { lineOverrides, documentDisco
     }
   }
 
-  try {
-    await priceListService.recordFromInvoice(invoice, actor);
-  } catch (e) {
-    console.error(`Price list update from invoice ${invoiceId} failed:`, e.message);
+  /*
+   * A historical invoice must not teach the price list.
+   *
+   * recordFromInvoice remembers what this customer was last charged, and that rate then auto-fills
+   * on their next quotation. Back-entering a 2019 challan at 2019 rates would quietly re-quote
+   * today's work at 2019 prices.
+   */
+  if (!challan.Is_Historical) {
+    try {
+      await priceListService.recordFromInvoice(invoice, actor);
+    } catch (e) {
+      console.error(`Price list update from invoice ${invoiceId} failed:`, e.message);
+    }
   }
 
   if (challan.Task_ID) {
@@ -1054,6 +1250,8 @@ module.exports = {
   resolveItemForGroup,
   resolveItemByName,
   generateChallanDraft,
+  createManualChallan,
+  normalizeLine,
   updateChallanDraft,
   issueChallan,
   buildCertificatePrefill,

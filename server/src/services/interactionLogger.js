@@ -60,7 +60,9 @@ const ACTION_LABEL = {
   pi_email: 'Proforma Invoice Mailed',
   invoice_email: 'Tax Invoice Mailed',
   challan_email: 'Delivery Challan Mailed',
-  certificate_email: 'Certificate Mailed'
+  certificate_email: 'Certificate Mailed',
+  po_email: 'Purchase Order Mailed',
+  po_reminder: 'Purchase Order Follow-up Mailed'
 };
 
 /**
@@ -75,7 +77,7 @@ function formatAmount(value) {
 /** Reference number, whichever document shape this is. Mirrors dispatchService.buildVars(). */
 function referenceNo(doc) {
   return doc.Quote_No_Display || doc.Quote_No || doc.PI_No || doc.Invoice_No
-    || doc.Challan_No || doc.Certificate_No || doc.certificateNo || '';
+    || doc.Challan_No || doc.Certificate_No || doc.certificateNo || doc.PO_No || '';
 }
 
 function taskIdOf(doc) {
@@ -83,7 +85,7 @@ function taskIdOf(doc) {
 }
 
 function customerIdOf(doc) {
-  return doc.Customer_ID || doc.customerId || '';
+  return doc.Customer_ID || doc.customerId || doc.Vendor_ID || doc.vendorId || '';
 }
 
 /**

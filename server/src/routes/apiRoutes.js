@@ -4125,7 +4125,8 @@ router.post('/job-cards/:id/generate-challan', requirePermission('jobcard','add'
 });
 
 // --- DELIVERY CHALLAN ---
-// '/challans/suggest-no' is registered before '/challans/:id' so the param route cannot swallow it.
+// '/challans/suggest-no' and '/challans/manual' are registered before '/challans/:id' so the param
+// route cannot swallow them.
 
 router.get('/challans', requirePermission('jobcard','view'), async (req, res) => {
   try {
@@ -4147,6 +4148,23 @@ router.get('/challans/suggest-no', requirePermission('jobcard','view'), async (r
   } catch (err) {
     console.error('GET /challans/suggest-no error:', err);
     res.status(500).json({ error: 'Failed to suggest a challan number' });
+  }
+});
+
+/**
+ * A challan with no job card behind it — a historical paper challan being typed in, or equipment
+ * supplied directly with no workshop work.
+ *
+ * Gated on `jobcard:add`, the same permission as generating one from a job card. Deliberately NOT
+ * `quotation:add`: that gate belongs to convert-to-invoice, because raising a delivery note must not
+ * imply the authority to raise a tax invoice.
+ */
+router.post('/challans/manual', requirePermission('jobcard','add'), async (req, res) => {
+  try {
+    res.json(await challanService.createManualChallan(req.body || {}, req.user));
+  } catch (err) {
+    console.error('POST /challans/manual error:', err);
+    res.status(400).json({ error: err.message || 'Failed to create the challan' });
   }
 });
 

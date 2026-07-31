@@ -87,16 +87,34 @@ function summarizeItems(lineItems) {
  */
 function buildVars(doc, extra = {}) {
   const docNo = doc.Quote_No_Display || doc.Quote_No || doc.PI_No || doc.Invoice_No
-    || doc.Challan_No || doc.Certificate_No || doc.certificateNo || '';
+    || doc.Challan_No || doc.Certificate_No || doc.certificateNo || doc.PO_No || '';
   // Type-specific dates come first; Created_At is the catch-all, and on a quotation it is the only
   // one present. A challan or certificate carries its own issue date, which is what the customer
   // reads on the paper document.
   const docDate = doc.PI_Date || doc.Invoice_Date || doc.Challan_Date
-    || doc.Issue_Date || doc.issueDate || doc.Created_At || '';
+    || doc.Issue_Date || doc.issueDate || doc.PO_Date || doc.Created_At || '';
 
-  const customerName = doc.Customer_Name_Snapshot || doc.Customer_Name || doc.customerName || '';
+  const customerName = doc.Customer_Name_Snapshot || doc.Customer_Name || doc.customerName
+    || doc.Vendor_Name || doc.Vendor_Name_Snapshot || '';
   // Challans total in Total_Amount; every priced document elsewhere uses Grand_Total.
-  const amount = doc.Grand_Total !== undefined ? doc.Grand_Total : doc.Total_Amount;
+  let amount = doc.Grand_Total !== undefined ? doc.Grand_Total : doc.Total_Amount;
+  let subtotal = doc.Subtotal;
+  let totalGst = doc.Total_GST;
+
+  if (doc.PO_ID) {
+    let totalTaxable = 0;
+    let totalTax = 0;
+    for (const l of (doc.Lines || [])) {
+      const taxable = l.Line_Total || 0;
+      const gstPct = l.GST_Rate || 0;
+      const gstAmt = taxable * (gstPct / 100);
+      totalTaxable += taxable;
+      totalTax += gstAmt;
+    }
+    amount = totalTaxable + totalTax;
+    subtotal = totalTaxable;
+    totalGst = totalTax;
+  }
 
   return {
     // Customer
@@ -119,8 +137,8 @@ function buildVars(doc, extra = {}) {
 
     // Money
     amount: formatCurrency(amount),
-    taxable_amount: formatCurrency(doc.Subtotal),
-    tax_amount: formatCurrency(doc.Total_GST),
+    taxable_amount: formatCurrency(subtotal),
+    tax_amount: formatCurrency(totalGst),
     discount_amount: formatCurrency((Number(doc.Line_Discount_Total) || 0) + (Number(doc.Document_Level_Discount_Amt) || 0)),
     amount_paid: formatCurrency(doc.Amount_Paid || 0),
     balance_due: formatCurrency((Number(amount) || 0) - (Number(doc.Amount_Paid) || 0)),
@@ -441,6 +459,108 @@ async function sendPaymentDueReminder(invoice) {
   });
 }
 
+async function sendPurchaseOrder(po, vendor, attachments, channel, actor) {
+  const settings = await getSettings();
+
+  let resolved = attachments;
+  if (attachments && !Array.isArray(attachments)) {
+    resolved = await resolveAttachments({
+      catalogIds: attachments.catalogIds,
+      inline: attachments.inline,
+      settings
+    });
+  }
+
+  // We build custom vars for PO
+  const vars = buildVars(po, {
+    customer_name: vendor.Vendor_Name || po.Vendor_Name,
+    company_name: vendor.Vendor_Name || po.Vendor_Name,
+    customer_email: vendor.Email || ''
+  });
+
+  // Calculate dynamic PO totals
+  let totalTaxable = 0;
+  let totalTax = 0;
+  const isIgst = po.Vendor_GSTIN && settings.seller_profile?.gstin && po.Vendor_GSTIN.slice(0, 2) !== settings.seller_profile.gstin.slice(0, 2);
+  for (const l of (po.Lines || [])) {
+    const taxable = l.Line_Total || 0;
+    const gstPct = l.GST_Rate || 0;
+    const gstAmt = taxable * (gstPct / 100);
+    totalTaxable += taxable;
+    totalTax += gstAmt;
+  }
+  const amount = totalTaxable + totalTax;
+  vars.amount = formatCurrency(amount);
+  vars.taxable_amount = formatCurrency(totalTaxable);
+  vars.tax_amount = formatCurrency(totalTax);
+
+  // We can write a custom template for PO
+  const body = `Dear ${vendor.Vendor_Name || po.Vendor_Name},\n\nPlease find attached our purchase order ${po.PO_No} dated ${formatDateDMY(po.PO_Date)} for ${vars.amount}.\n\nKindly supply the items as per the terms.\n\nRegards,\n${settings.seller_profile?.legal_name || 'Expert Safety Solutions'}`;
+  const subject = `Purchase Order ${po.PO_No} from ${settings.seller_profile?.legal_name || 'Expert Safety Solutions'}`;
+
+  const results = [];
+  results.push(await emailService.sendEmail(settings.smtp_config, {
+    to: vendor.Email || '',
+    subject,
+    body,
+    html: `<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.6;white-space:pre-wrap">${body
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/(https?:\/\/[^\s]+)/g, '<a href="$1">$1</a>')}</div>`,
+    attachments: resolved && resolved.length ? resolved : undefined
+  }));
+
+  try {
+    await interactionLogger.logDispatch({ doc: po, templateKey: 'po_email', results, actor });
+  } catch (e) {
+    console.error('interactionLogger.logDispatch PO error:', e);
+  }
+
+  return results;
+}
+
+async function sendPurchaseOrderReminder(po, vendor, actor) {
+  const settings = await getSettings();
+
+  const vars = buildVars(po, {
+    customer_name: vendor.Vendor_Name || po.Vendor_Name,
+    company_name: vendor.Vendor_Name || po.Vendor_Name,
+    customer_email: vendor.Email || ''
+  });
+
+  // Calculate dynamic PO totals
+  let totalTaxable = 0;
+  let totalTax = 0;
+  for (const l of (po.Lines || [])) {
+    const taxable = l.Line_Total || 0;
+    const gstPct = l.GST_Rate || 0;
+    const gstAmt = taxable * (gstPct / 100);
+    totalTaxable += taxable;
+    totalTax += gstAmt;
+  }
+  vars.amount = formatCurrency(totalTaxable + totalTax);
+
+  const body = `Dear ${vendor.Vendor_Name || po.Vendor_Name},\n\nThis is a gentle follow-up regarding our purchase order ${po.PO_No} dated ${formatDateDMY(po.PO_Date)} for ${vars.amount}.\n\nKindly confirm the delivery timeline at your earliest.\n\nRegards,\n${settings.seller_profile?.legal_name || 'Expert Safety Solutions'}`;
+  const subject = `Gentle Reminder: Purchase Order ${po.PO_No}`;
+
+  const results = [];
+  results.push(await emailService.sendEmail(settings.smtp_config, {
+    to: vendor.Email || '',
+    subject,
+    body,
+    html: `<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.6;white-space:pre-wrap">${body
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/(https?:\/\/[^\s]+)/g, '<a href="$1">$1</a>')}</div>`
+  }));
+
+  try {
+    await interactionLogger.logDispatch({ doc: po, templateKey: 'po_reminder', results, actor });
+  } catch (e) {
+    console.error('interactionLogger.logDispatch PO reminder error:', e);
+  }
+
+  return results;
+}
+
 module.exports = {
   substitute,
   buildVars,
@@ -456,5 +576,7 @@ module.exports = {
   sendPodConfirmation,
   sendCertificate,
   sendFollowUpReminder,
-  sendPaymentDueReminder
+  sendPaymentDueReminder,
+  sendPurchaseOrder,
+  sendPurchaseOrderReminder
 };

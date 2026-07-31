@@ -16,6 +16,7 @@ import {
   getGoogleDirectionsUrl,
   getAvailableContacts,
   isTaskOverdueNoInteraction,
+  interactionMatchesTask,
   formatDialerNumber
 } from '../utils/dateUtils';
 import { validatePasswordPolicy } from '../utils/passwordUtils';
@@ -170,16 +171,29 @@ function remarkAgeMs(item) {
  * (an Admin editing someone else's logged call would misattribute it), never system-generated, and
  * only while the window is open. Showing the button in any other case would just surface a 403.
  */
-function RemarkTimelineEntry({ item, currentStaffId, badgeClass, formatTimestamp, onSaved, token }) {
+function RemarkTimelineEntry({ item, currentStaffId, badgeClass, formatTimestamp, onSaved, token, subtitle, className = 'p-2 rounded-lg bg-white border border-amber-100 space-y-1' }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(item.Remarks || '');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
   const isAuthor = String(item.Staff_ID || '') === String(currentStaffId || '');
-  const canEdit = isAuthor
-    && !item.System_Generated
-    && remarkAgeMs(item) <= REMARK_EDIT_WINDOW_MS;
+  const eligible = isAuthor && !item.System_Generated;
+
+  // The window has to expire on a timer, not just on render. A remark opened at 4:30 old would
+  // otherwise keep offering an Edit button indefinitely, because nothing re-renders this panel —
+  // and the click would come back a 403 from the server.
+  const [remainingMs, setRemainingMs] = useState(() => REMARK_EDIT_WINDOW_MS - remarkAgeMs(item));
+  useEffect(() => {
+    if (!eligible || remainingMs <= 0) return;
+    const t = setInterval(() => setRemainingMs(REMARK_EDIT_WINDOW_MS - remarkAgeMs(item)), 1000);
+    return () => clearInterval(t);
+  }, [eligible, remainingMs > 0, item.Interaction_ID]);
+
+  const canEdit = eligible && remainingMs > 0;
+  // Deliberately not shown on the row — a live timer next to every remark reads as pressure. It is
+  // only the hover tooltip, for someone who wonders why the pencil is there or when it will go.
+  const countdown = `${Math.floor(remainingMs / 60000)}:${String(Math.floor((remainingMs % 60000) / 1000)).padStart(2, '0')}`;
 
   const save = async () => {
     const text = draft.trim();
@@ -193,7 +207,12 @@ function RemarkTimelineEntry({ item, currentStaffId, badgeClass, formatTimestamp
         body: JSON.stringify({ remarks: text })
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || 'Could not update this remark');
+      if (!res.ok) {
+        // The server is the authority on the window. If it says expired, stop offering the editor
+        // rather than leaving the author retrying a save that can never succeed.
+        if (data.expired) setRemainingMs(0);
+        throw new Error(data.error || 'Could not update this remark');
+      }
       setEditing(false);
       if (onSaved) await onSaved();
     } catch (e) {
@@ -210,15 +229,28 @@ function RemarkTimelineEntry({ item, currentStaffId, badgeClass, formatTimestamp
   };
 
   return (
-    <div className="p-2 rounded-lg bg-white border border-amber-100 space-y-1">
+    <div className={className}>
       <div className="flex items-center justify-between gap-2 flex-wrap">
         <div className="flex items-center gap-1.5 flex-wrap min-w-0">
           <span className={`px-1.5 py-0.5 rounded font-extrabold text-[9px] ${badgeClass}`}>
             {item.Type || 'Remark'}
           </span>
+          {subtitle}
           <span className="text-[11px] font-bold text-slate-700 truncate">
             {item.Staff_Name || item.Staff_ID || 'Staff'}
           </span>
+          {/* Sits beside the author, not out by the timestamp: the button belongs to "who wrote
+              this", and on a narrow screen the right-hand group is the first thing to wrap away. */}
+          {canEdit && !editing && (
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); setEditing(true); }}
+              className="shrink-0 p-1 rounded-md text-amber-700 hover:bg-amber-100 transition"
+              title={`Edit this remark — ${countdown} left`}
+            >
+              <Edit3 className="w-3 h-3" />
+            </button>
+          )}
           {item.Is_Edited && (
             <span className="text-[9px] font-bold text-slate-400 uppercase">edited</span>
           )}
@@ -227,16 +259,6 @@ function RemarkTimelineEntry({ item, currentStaffId, badgeClass, formatTimestamp
           <span className="text-[10px] font-semibold text-slate-400">
             {formatTimestamp ? formatTimestamp(item.Timestamp) : ''}
           </span>
-          {canEdit && !editing && (
-            <button
-              type="button"
-              onClick={(e) => { e.stopPropagation(); setEditing(true); }}
-              className="p-1 rounded-md text-amber-700 hover:bg-amber-100 transition"
-              title="Edit this remark (5-minute window)"
-            >
-              <Edit3 className="w-3 h-3" />
-            </button>
-          )}
         </div>
       </div>
 
@@ -2052,6 +2074,7 @@ export default function AdminDashboard() {
     const staffName = user?.Name || user?.Staff_ID || 'Staff';
     setRemarkForm({ type: 'Call Received', remarks: `Call Received: ${contactName} - ${staffName}\n` });
     setShowTagList(false);
+    setTagSearch('');
     setCallReceivedContactPicker({ isOpen: false, contacts: [] });
   };
 
@@ -2072,6 +2095,9 @@ export default function AdminDashboard() {
     }
     setRemarkForm({ ...remarkForm, type: tag });
     setShowTagList(false);
+    // The search box is now the always-visible trigger row, so a leftover query would sit beside the
+    // chosen tag looking like unsaved input — and would still be filtering the list on reopen.
+    setTagSearch('');
   };
 
   const handlePhoneButtonClick = (custObj, task = null) => {
@@ -3835,9 +3861,7 @@ export default function AdminDashboard() {
                     {/* 3rd Line: Last Remark with Date & Time */}
                     {(() => {
                       const isRemarkExpanded = !!expandedRemarkTaskIds[task.Task_ID];
-                      const matchingRemarks = customerInteractions.filter(
-                        i => i.Customer_ID === task.Customer_ID || (task.Task_ID && i.Task_ID === task.Task_ID)
-                      );
+                      const matchingRemarks = customerInteractions.filter(i => interactionMatchesTask(i, task));
                       const latestRemark = matchingRemarks.length > 0 ? matchingRemarks[matchingRemarks.length - 1] : null;
                       const remarkText = latestRemark ? latestRemark.Remarks : task.Remarks;
                       const remarkTime = latestRemark ? formatInteractionTimestamp(latestRemark.Timestamp) : null;
@@ -5164,29 +5188,47 @@ export default function AdminDashboard() {
                         </label>
                         <div className="relative">
                           <div className="flex items-center gap-1.5">
-                            <button
-                              type="button"
-                              onClick={() => setShowTagList(!showTagList)}
-                              className="flex-1 min-w-0 flex items-center justify-between px-3.5 py-2.5 bg-white border-2 border-slate-300 hover:border-amber-500 rounded-xl text-xs font-bold text-slate-800 shadow-2xs transition cursor-pointer text-left"
+                            {/* The trigger row IS the search box. It used to be a button that opened a
+                                panel containing a second, separate search input — two bars doing one
+                                job, and the tag you had already picked scrolled out of sight behind
+                                the one you typed in. Typing here filters the list below directly. */}
+                            <div
+                              onClick={() => { if (!showTagList) setShowTagList(true); }}
+                              className={`flex-1 min-w-0 flex items-center gap-2 px-3.5 py-2.5 bg-white border-2 rounded-xl shadow-2xs transition cursor-text ${showTagList ? 'border-amber-500 ring-2 ring-amber-200' : 'border-slate-300 hover:border-amber-500'}`}
                             >
-                              <span className="flex items-center gap-2 min-w-0 flex-1">
-                                {remarkForm.type ? (
-                                  <span className="px-2.5 py-0.5 rounded-lg bg-amber-600 text-white font-extrabold text-xs shrink-0 shadow-2xs">
-                                    {remarkForm.type}
-                                  </span>
-                                ) : (
-                                  <span className="px-2.5 py-0.5 rounded-lg bg-slate-100 text-slate-500 font-bold text-xs shrink-0 border border-dashed border-slate-300">
-                                    Select Tag
-                                  </span>
-                                )}
-                                <span className="text-slate-500 font-normal truncate">
-                                  {remarkForm.type
-                                    ? (!showTagList ? '(Click to change tag or correct mistake)' : '(Choose tag from dropdown below)')
-                                    : '(Tap to search & select a tag)'}
+                              {remarkForm.type && (
+                                <span className="px-2.5 py-0.5 rounded-lg bg-amber-600 text-white font-extrabold text-xs shrink-0 shadow-2xs">
+                                  {remarkForm.type}
                                 </span>
-                              </span>
-                              <ChevronDown className={`w-4 h-4 text-slate-400 shrink-0 transition-transform ${showTagList ? 'rotate-180 text-amber-600' : ''}`} />
-                            </button>
+                              )}
+                              <Search className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                              <input
+                                type="text"
+                                value={tagSearch}
+                                onChange={(e) => { setTagSearch(e.target.value); if (!showTagList) setShowTagList(true); }}
+                                onFocus={() => setShowTagList(true)}
+                                placeholder={remarkForm.type ? 'Type to change tag…' : 'Search & select a tag (e.g. Call, FLP)…'}
+                                className="flex-1 min-w-0 bg-transparent text-xs font-bold text-slate-800 placeholder:text-slate-400 placeholder:font-normal focus:outline-none"
+                              />
+                              {tagSearch && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => { e.stopPropagation(); setTagSearch(''); }}
+                                  className="shrink-0 text-slate-400 hover:text-slate-600 font-bold text-xs"
+                                  title="Clear search"
+                                >
+                                  ✕
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={(e) => { e.stopPropagation(); setShowTagList(!showTagList); }}
+                                className="shrink-0"
+                                title={showTagList ? 'Hide tag list' : 'Show tag list'}
+                              >
+                                <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform ${showTagList ? 'rotate-180 text-amber-600' : ''}`} />
+                              </button>
+                            </div>
                             <button
                               type="button"
                               onClick={(e) => handleAddCustomTag(e, false, true)}
@@ -5200,19 +5242,6 @@ export default function AdminDashboard() {
                           {/* Dropdown Menu when showTagList is true */}
                           {showTagList && (
                             <div className="mt-2 bg-white border-2 border-amber-300 rounded-2xl shadow-xl overflow-hidden animate-fadeIn space-y-2 p-2.5 z-30">
-                              <div className="flex items-center gap-1.5 pb-1.5 border-b border-amber-100">
-                                <div className="relative flex-1">
-                                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                                  <input
-                                    type="text"
-                                    placeholder="🔍 Search Tag (e.g. Call, FLP)..."
-                                    value={tagSearch}
-                                    onChange={(e) => setTagSearch(e.target.value)}
-                                    className="w-full pl-8 pr-3 py-1.5 border border-slate-200 rounded-xl text-xs bg-slate-50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-amber-500 font-semibold"
-                                    autoFocus
-                                  />
-                                </div>
-                              </div>
                               <div className="max-h-48 overflow-y-auto space-y-1 pr-1">
                                 {remarkTagsList.filter(t => matchesQuery(tagSearch, [t])).map(tag => {
                                   const isCustom = customRemarkTags.includes(tag) && !REMARK_TAGS.includes(tag);
@@ -5473,27 +5502,21 @@ export default function AdminDashboard() {
                                     </div>
                                   ) : (
                                     allRemarks.slice().reverse().map((item, idx) => (
-                                      <div key={item.Interaction_ID || idx} className="p-3.5 rounded-xl bg-white border border-indigo-100 shadow-2xs space-y-1.5 hover:border-indigo-300 transition">
-                                        <div className="flex items-center justify-between flex-wrap gap-2">
-                                          <div className="flex items-center gap-2 flex-wrap">
-                                            <span className={`px-2 py-0.5 rounded font-extrabold text-[10px] ${remarkBadgeClass(item.Type, 'bg-indigo-600 text-white')}`}>
-                                              {item.Type || 'Remark'}
-                                            </span>
-                                            <span className="text-xs font-extrabold text-indigo-950">
-                                              Client: {item.Customer_Name || item.Customer_ID || 'General'} {item.Task_ID ? `• #${item.Task_ID}` : ''}
-                                            </span>
-                                            <span className="text-[11px] font-bold text-slate-600 bg-slate-100 px-2 py-0.5 rounded-md">
-                                              👤 {item.Staff_Name || item.Staff_ID || 'Staff'}
-                                            </span>
-                                          </div>
-                                          <span className="text-[11px] font-semibold text-slate-400">
-                                            {formatInteractionTimestamp(item.Timestamp)}
+                                      <RemarkTimelineEntry
+                                        key={item.Interaction_ID || idx}
+                                        item={item}
+                                        currentStaffId={user?.Staff_ID}
+                                        badgeClass={remarkBadgeClass(item.Type, 'bg-indigo-600 text-white')}
+                                        formatTimestamp={formatInteractionTimestamp}
+                                        onSaved={() => loadAdminData(true)}
+                                        token={token}
+                                        className="p-3.5 rounded-xl bg-white border border-indigo-100 shadow-2xs space-y-1.5 hover:border-indigo-300 transition"
+                                        subtitle={
+                                          <span className="text-xs font-extrabold text-indigo-950">
+                                            Client: {item.Customer_Name || item.Customer_ID || 'General'} {item.Task_ID ? `• #${item.Task_ID}` : ''}
                                           </span>
-                                        </div>
-                                        <p className="text-xs text-slate-700 leading-relaxed font-medium pl-1 whitespace-pre-wrap">
-                                          {item.Remarks}
-                                        </p>
-                                      </div>
+                                        }
+                                      />
                                     ))
                                   )}
                                 </div>
@@ -5503,14 +5526,18 @@ export default function AdminDashboard() {
                         </div>
                       ) : (
                     (() => {
+                      // This task only. The red Master Search above is the company-wide view.
                       const history = customerInteractions.filter(
-                        i => (i.Customer_ID === remarkTask.Customer_ID || (remarkTask.Task_ID && i.Task_ID === remarkTask.Task_ID)) &&
+                        i => interactionMatchesTask(i, remarkTask) &&
                              matchesQuery(historySearchText, [i.Remarks, i.Type, i.Staff_Name, i.Staff_ID])
                       );
                       if (history.length === 0) {
                         return (
-                          <div className="p-6 text-center text-xs text-slate-400 bg-slate-50 rounded-2xl border border-dashed border-slate-200">
-                            {historySearchText ? `No remarks matching "${historySearchText}" for this client.` : 'No previous remarks found for this task or client yet.'}
+                          <div className="p-6 text-center text-xs text-slate-400 bg-slate-50 rounded-2xl border border-dashed border-slate-200 space-y-1">
+                            <p>{historySearchText ? `No remarks matching "${historySearchText}" in this task.` : 'No remarks on this task yet.'}</p>
+                            {/* The list is task-scoped now, so an empty one is ambiguous — it could mean
+                                the customer has none, or that they are all filed under a sibling task. */}
+                            <p className="text-[11px] text-slate-400">Use 🔍 above to search all remarks for this company.</p>
                           </div>
                         );
                       }
@@ -5521,22 +5548,15 @@ export default function AdminDashboard() {
                       return (
                         <div className="space-y-2.5">
                           {history.slice().reverse().map((item, idx) => (
-                            <div key={item.Interaction_ID || idx} className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-1.5 shadow-2xs">
-                              <div className="flex items-center justify-between gap-2">
-                                <div className="flex items-center gap-2">
-                                  <span className={`px-2 py-0.5 rounded font-extrabold text-[10px] ${remarkBadgeClass(item.Type, 'bg-amber-600 text-white')}`}>
-                                    {item.Type || 'Remark'}
-                                  </span>
-                                  <span className="text-xs font-bold text-slate-800">{item.Staff_Name || 'Staff'}</span>
-                                </div>
-                                <span className="text-[11px] font-semibold text-slate-500">
-                                  {formatInteractionTimestamp(item.Timestamp)}
-                                </span>
-                              </div>
-                              <p className="text-xs text-slate-700 leading-relaxed font-medium pl-1 whitespace-pre-wrap">
-                                {item.Remarks}
-                              </p>
-                            </div>
+                            <RemarkTimelineEntry
+                              key={item.Interaction_ID || idx}
+                              item={item}
+                              currentStaffId={user?.Staff_ID}
+                              badgeClass={remarkBadgeClass(item.Type, 'bg-amber-600 text-white')}
+                              formatTimestamp={formatInteractionTimestamp}
+                              onSaved={() => loadAdminData(true)}
+                              token={token}
+                            />
                           ))}
                         </div>
                       );
@@ -5914,6 +5934,7 @@ export default function AdminDashboard() {
                   placeholder="e.g. info@company.com"
                 />
               </div>
+
 
               {/* GST identity — drives the tax split on quotations and invoices */}
               <GstinInput

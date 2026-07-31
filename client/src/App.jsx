@@ -25,9 +25,11 @@ const StaffPermissionsPage = lazy(() => import('./pages/StaffPermissionsPage'));
 const JobCardPage = lazy(() => import('./pages/JobCardPage'));
 const ChallanBuilderPage = lazy(() => import('./pages/ChallanBuilderPage'));
 const ChallanListPage = lazy(() => import('./pages/ChallanListPage'));
+const ManualChallanPage = lazy(() => import('./pages/ManualChallanPage'));
 const CustomerPriceListPage = lazy(() => import('./pages/CustomerPriceListPage'));
 const EquipmentCategoriesPage = lazy(() => import('./pages/EquipmentCategoriesPage'));
 const PurchasePage = lazy(() => import('./pages/PurchasePage'));
+const PurchaseOrderBuilderPage = lazy(() => import('./pages/PurchaseOrderBuilderPage'));
 // The one page in the app a logged-OUT stranger is meant to see. Rendered before the auth gate
 // below, so it must not import anything that assumes a session.
 const PublicInquiryPage = lazy(() => import('./pages/PublicInquiryPage'));
@@ -45,6 +47,13 @@ function ServiceReportRoute() {
 function QuotationRoute() {
   const { quotationId } = useParams();
   return <QuotationBuilderPage key={quotationId || 'new'} />;
+}
+
+// Keyed for the same reason as QuotationRoute: moving between purchase orders only changes the URL
+// param, so without a key React Router would reuse the instance and keep the previous order's lines.
+function PurchaseOrderRoute() {
+  const { poId } = useParams();
+  return <PurchaseOrderBuilderPage key={poId || 'new'} />;
 }
 
 // Keyed for the same reason as the routes above: a technician moving from one job card to another
@@ -186,11 +195,18 @@ export default function App() {
               <Route path="/settings/permissions" element={<StaffPermissionsPage />} />
               <Route path="/settings/equipment-categories" element={<EquipmentCategoriesPage />} />
               <Route path="/purchase" element={<PurchasePage />} />
+              {/* LITERAL before the :poId sibling, so "new" is not read as an id. */}
+              <Route path="/purchase-orders/new" element={<PurchaseOrderRoute />} />
+              <Route path="/purchase-orders/:poId" element={<PurchaseOrderRoute />} />
               {/* Workshop job card. Keyed so moving between cards remounts with fresh state. */}
               <Route path="/job-card/task/:taskId" element={<JobCardRoute />} />
               <Route path="/job-card/:jobCardId" element={<JobCardRoute />} />
               {/* Delivery challan: register, and the builder that issues one from a job card. */}
               <Route path="/challans" element={<ChallanListPage />} />
+              {/* Literal, so it must not be shadowed by /challans/:challanId. React Router ranks a
+                  static segment above a dynamic one regardless of order, but keeping it above
+                  matches the convention the server routes follow. */}
+              <Route path="/challans/manual" element={<ManualChallanPage />} />
               <Route path="/challans/new/:jobCardId" element={<ChallanRoute />} />
               <Route path="/challans/:challanId" element={<ChallanRoute />} />
               <Route path="/price-list" element={<CustomerPriceListPage />} />

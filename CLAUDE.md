@@ -18,6 +18,7 @@ client/src/
   pages/JobCardPage.jsx           Workshop job card: INWARD + SERVICE tabs, offline-tolerant
   pages/ChallanBuilderPage.jsx    Delivery challan draft → issue, manual numbering
   pages/ChallanListPage.jsx       Challan register
+  pages/ManualChallanPage.jsx     Opens a challan with NO job card (historical paper entry / direct supply)
   pages/CustomerPriceListPage.jsx Per-customer remembered rates
   pages/CertificateComplianceGeneratorPage.jsx  ~3850 lines — writes Document_Registry
   pages/CertificateGeneratorPage.jsx            ~2230 lines — SERVICE REPORTS despite the name;
@@ -62,6 +63,10 @@ server/src/
   utils/inquiryValidator.js   Sanitises the one payload that arrives from an anonymous stranger
   utils/moneyMask.js          Strips rates/amounts from responses without `finance:view`
   utils/gstUtils.js           GSTIN validation, tax split, document totals
+  utils/capacity.js           normalizeCapacity — lives here, not in jobCardService, so utils never
+                              require a service. jobCardService re-exports it for existing callers
+  utils/itemClassifier.js     Item_Master row → {Line_Type, Service_Type, Equipment_Type, Capacity}.
+                              Name beats Category. Only the MANUAL challan path uses it
   services/sheetsService.js   THE data layer (Mongoose, despite the name). 36 collections,
                               3s cache, generic getTab/insertRow/updateRow/deleteRow
   services/workflowEngine.js  Task stage machine + department hand-offs + 11-month recurring
@@ -201,6 +206,32 @@ demands a written reason.
 ## Document Numbering
 
 - **Customer-facing numbers** (quotation/PI/invoice) *and purchase orders* come from `quotationEngine.nextDocumentNumber()`, backed by the atomic `Counter_Master` sequence. A PO is issued to a vendor, so a repeated number lets one delivery be claimed for payment twice. It de-duplicates the period when the configured prefix already contains it, and seeds a brand-new counter from the highest number already issued — so changing a prefix cannot restart numbering and re-issue a number a customer already has.
+- **A challan does not need a job card.** `createManualChallan` (`POST /challans/manual`) opens one
+  for a historical paper challan being typed in, or for equipment supplied with no workshop work. It
+  is a SEPARATE function, not a branch inside `generateChallanDraft` — that function's five job-card
+  lookups (recheck guard, item fetch, "nothing to deliver", draft dedupe, `Job_Card_Master` write)
+  are all meaningless without a card, and threading a null through them would put the daily workshop
+  path one bad conditional from breaking. Everything downstream (`updateChallanDraft`,
+  `buildCertificatePrefill`, `convertChallanToInvoice`, the PDF) was already job-card-free.
+- **`Is_Historical` stops the stock deduction, and only that.** A back-entered challan's goods left
+  the shelf years ago, so `convertChallanToInvoice` skips `deductForInvoice` and also skips
+  `priceListService.recordFromInvoice` — otherwise a 2019 rate would be learned as this customer's
+  current price and auto-fill on their next quotation. Editable while Draft, locked at issue, and
+  recorded on the invoice as `Inventory_Skipped_Historical`.
+- **Manual challan lines are classified from the catalogue, not asked per line.**
+  `itemClassifier.classifyItem` reads the item's `Item_Name` first and `Category` second — the live
+  catalogue has `HP Testing of Co2 3 Kg` filed under a *Refilling* category, so the name has to win.
+  Loose tokens (`hydro`, `hydraulic`) additionally require the word "test" nearby, or
+  "Hydrolic Binding-Hose Pipe" — a physical hose — lands on a hydro-test certificate. A per-line
+  `Service_Override` always beats detection and is STORED, so the next save cannot re-guess over a
+  human correction.
+- **A job-card line is never re-classified.** `needsClassification` returns false when a line already
+  carries `Line_Type` + `Service_Type`, which every `buildChallanLines` line does. That is the one
+  property keeping the workshop path byte-identical, and the catalogue is only fetched when some line
+  actually needs it, so a job-card save gains zero I/O.
+- **`Challan_No` is unique-ish, not unique.** A bulk back-entry session will trip the duplicate
+  warning often, because paper books repeat numbers across years. It stays acknowledgeable rather
+  than bypassable — that warning is exactly what catches a mistyped number during bulk entry.
 - **Challan numbers are typed by hand.** The office writes them in a paper book and the app must match it exactly. Never auto-assign; `suggestNextChallanNo()` is a placeholder hint only, and a duplicate raises a warning the user can override.
 - **Certificate numbers are minted client-side** so one appears instantly and offline. `POST /api/certificates` enforces uniqueness at save time and reports any reassignment back in `reassigned` — the page adopts what the server actually stored.
 - **Internal IDs** are hand-rolled strings: `` `PREFIX${Date.now().toString().slice(-6)}${rand2}` `` (`JC`, `JCI`, `DC`, `CPL`, `PI`, `SINV`, `ITEM`, `STK`, `INV`). Keep the per-collection prefix.

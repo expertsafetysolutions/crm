@@ -642,6 +642,10 @@ const REMINDER_JOBS = {
   [reminderScheduler.JOBS.PO_REMINDER]: {
     label: 'Purchase order vendor reminders',
     run: () => require('./services/quotationCronService').runPurchaseOrderReminders()
+  },
+  [reminderScheduler.JOBS.CERTIFICATE_DUE]: {
+    label: 'Certificate due (30-day) reminders',
+    run: () => require('./services/quotationCronService').runCertificateDueReminders()
   }
 };
 
@@ -735,7 +739,8 @@ const LEGACY_CRON_PATHS = {
   '/api/cron/refilling-due-check': reminderScheduler.JOBS.REFILLING_DUE,
   '/api/cron/quotation-followup-check': reminderScheduler.JOBS.QUOTATION_FOLLOWUP,
   '/api/cron/payment-due-reminder-check': reminderScheduler.JOBS.PAYMENT_DUE,
-  '/api/cron/annual-prospect-check': reminderScheduler.JOBS.ANNUAL_PROSPECT
+  '/api/cron/annual-prospect-check': reminderScheduler.JOBS.ANNUAL_PROSPECT,
+  '/api/cron/certificate-due-check': reminderScheduler.JOBS.CERTIFICATE_DUE
 };
 
 for (const [path, job] of Object.entries(LEGACY_CRON_PATHS)) {

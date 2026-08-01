@@ -1,9 +1,12 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Plus, Search, FileText, Loader2, ArrowLeft, Filter, TrendingDown } from 'lucide-react';
+import { Plus, Search, FileText, Loader2, ArrowLeft, Filter, TrendingDown, Trophy, Bell } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { matchesQuery } from '../utils/searchUtils';
 import { formatMoney, formatDate, statusMeta } from '../utils/quotationUtils';
+
+// Must match quotationEngine.OPEN_STATUSES — the same set the reminder cron actually targets.
+const REMINDER_OPEN_STATUSES = ['Sent', 'RevisionRequested', 'RequirementChangeRequested'];
 
 /** Quotation register — one row per thread (superseded revisions hidden by default). */
 export default function QuotationListPage() {
@@ -15,10 +18,12 @@ export default function QuotationListPage() {
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
   const [showSuperseded, setShowSuperseded] = useState(false);
-  // 'list' = the quotation register, 'lost' = why enquiries were lost.
+  // 'list' = the quotation register, 'won'/'lost' = outcome reports, 'reminders' = follow-up cadence.
   const [view, setView] = useState('list');
   const [lostReport, setLostReport] = useState(null);
   const [lostLoading, setLostLoading] = useState(false);
+  const [wonReport, setWonReport] = useState(null);
+  const [wonLoading, setWonLoading] = useState(false);
 
   // Fetched on first open of the report rather than up front — it scans every task, so there is no
   // reason to pay for it on a page most visits never leave the register on.
@@ -36,6 +41,21 @@ export default function QuotationListPage() {
     })();
     return () => { cancelled = true; };
   }, [view, lostReport, token]);
+
+  useEffect(() => {
+    if (view !== 'won' || wonReport) return;
+    let cancelled = false;
+    (async () => {
+      setWonLoading(true);
+      try {
+        const res = await fetch('/api/analytics/order-won', { headers: { Authorization: `Bearer ${token}` } });
+        if (res.ok && !cancelled) setWonReport(await res.json());
+      } finally {
+        if (!cancelled) setWonLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [view, wonReport, token]);
 
   useEffect(() => {
     let cancelled = false;
@@ -83,8 +103,13 @@ export default function QuotationListPage() {
         {/* Filter bar on white, below the red app bar — keeps the controls legible and lets the
             search field use the same outlined treatment as the rest of the module. */}
         <div className="bg-white border-b border-slate-200">
-          <div className="max-w-6xl mx-auto px-4 flex gap-1">
-            {[['list', 'Quotations', FileText], ['lost', 'Order Lost', TrendingDown]].map(([id, label, Icon]) => (
+          <div className="max-w-6xl mx-auto px-4 flex gap-1 overflow-x-auto">
+            {[
+              ['list', 'Quotations', FileText],
+              ['won', 'Order Won', Trophy],
+              ['lost', 'Order Lost', TrendingDown],
+              ['reminders', 'Reminders', Bell]
+            ].map(([id, label, Icon]) => (
               <button key={id} onClick={() => setView(id)}
                 className={`px-3 py-2.5 text-xs font-bold whitespace-nowrap border-b-2 flex items-center gap-1.5 transition ${view === id ? 'border-rose-600 text-rose-600' : 'border-transparent text-slate-500 hover:text-slate-700'}`}>
                 <Icon className="w-3.5 h-3.5" />{label}
@@ -117,6 +142,10 @@ export default function QuotationListPage() {
       <div className="max-w-6xl mx-auto px-4 py-5">
         {view === 'lost' ? (
           <OrderLostReport report={lostReport} loading={lostLoading} />
+        ) : view === 'won' ? (
+          <OrderWonReport report={wonReport} loading={wonLoading} navigate={navigate} />
+        ) : view === 'reminders' ? (
+          <RemindersReport rows={rows} loading={loading} navigate={navigate} />
         ) : loading ? (
           <div className="flex justify-center py-16"><Loader2 className="w-6 h-6 animate-spin text-slate-400" /></div>
         ) : filtered.length === 0 ? (
@@ -257,6 +286,128 @@ function OrderLostReport({ report, loading }) {
             </div>
           ))}
         </div>
+      </div>
+    </div>
+  );
+}
+
+/** Orders won — no reason dimension (unlike Lost), so this is a simple totals + list view. */
+function OrderWonReport({ report, loading, navigate }) {
+  if (loading) {
+    return <div className="flex justify-center py-16"><Loader2 className="w-6 h-6 animate-spin text-slate-400" /></div>;
+  }
+  if (!report) {
+    return <div className="text-center py-16 text-slate-400 text-sm font-semibold">Could not load the report.</div>;
+  }
+  if (!report.totalWon) {
+    return (
+      <div className="text-center py-16 text-slate-400">
+        <Trophy className="w-10 h-10 mx-auto mb-2 opacity-40" />
+        <div className="text-sm font-semibold">No won orders recorded yet</div>
+        <div className="text-xs mt-1">
+          Open a quotation and use <b>Won / Lost</b> to record an outcome — it will show up here.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 gap-3">
+        <div className="bg-white border border-slate-200 rounded-xl p-4">
+          <div className="text-xs font-bold uppercase tracking-wide text-slate-500">Orders won</div>
+          <div className="text-2xl font-black text-slate-900 mt-1">{report.totalWon}</div>
+        </div>
+        <div className="bg-white border border-slate-200 rounded-xl p-4">
+          <div className="text-xs font-bold uppercase tracking-wide text-slate-500">Value won</div>
+          <div className="text-2xl font-black text-emerald-600 mt-1">{formatMoney(report.totalWonValue)}</div>
+        </div>
+      </div>
+
+      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+        <div className="px-4 py-2.5 border-b border-slate-100 text-xs font-bold uppercase tracking-wide text-slate-500">
+          Won quotations
+        </div>
+        <div className="divide-y divide-slate-100">
+          {report.rows.map(r => (
+            <button key={r.taskId}
+              onClick={() => r.quotationId && navigate(`/quotations/${r.quotationId}`)}
+              className="w-full text-left px-4 py-3 flex items-center justify-between gap-2 hover:bg-slate-50">
+              <div className="min-w-0">
+                <div className="font-semibold text-sm truncate">{r.customerName}</div>
+                <div className="text-[11px] text-slate-500 font-mono">{r.quoteNo}</div>
+              </div>
+              <div className="text-right shrink-0">
+                <div className="font-bold text-sm">{formatMoney(r.amount)}</div>
+                <div className="text-[11px] text-slate-400">{r.closedAt ? formatDate(r.closedAt.slice(0, 10)) : ''}</div>
+              </div>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Every quotation still in the reminder cron's OPEN_STATUSES set, with its cadence and history at a
+ * glance. Reuses the same /api/quotations rows already fetched for the register — Reminder_Log,
+ * Reminder_Count, Next_Reminder_Date and Follow_Up_Interval_Days are already present on each row.
+ * Editing lives on the quotation detail page (its Reminders panel) rather than duplicated here.
+ */
+function RemindersReport({ rows, loading, navigate }) {
+  const eligible = useMemo(
+    () => rows
+      .filter(r => REMINDER_OPEN_STATUSES.includes(r.Status))
+      .sort((a, b) => String(a.Next_Reminder_Date || '9999').localeCompare(String(b.Next_Reminder_Date || '9999'))),
+    [rows]
+  );
+
+  if (loading) {
+    return <div className="flex justify-center py-16"><Loader2 className="w-6 h-6 animate-spin text-slate-400" /></div>;
+  }
+  if (eligible.length === 0) {
+    return (
+      <div className="text-center py-16 text-slate-400">
+        <Bell className="w-10 h-10 mx-auto mb-2 opacity-40" />
+        <div className="text-sm font-semibold">No quotations are currently on a reminder cadence</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead className="bg-slate-50 text-[11px] uppercase text-slate-500">
+            <tr>
+              <th className="px-4 py-2.5 text-left font-bold">Number</th>
+              <th className="px-4 py-2.5 text-left font-bold">Customer</th>
+              <th className="px-4 py-2.5 text-center font-bold">Sent</th>
+              <th className="px-4 py-2.5 text-left font-bold">Last sent</th>
+              <th className="px-4 py-2.5 text-left font-bold">Next reminder</th>
+            </tr>
+          </thead>
+          <tbody>
+            {eligible.map(r => (
+              <tr key={r.Quotation_ID}
+                onClick={() => navigate(`/quotations/${r.Quotation_ID}`)}
+                className="border-t border-slate-100 hover:bg-slate-50 cursor-pointer">
+                <td className="px-4 py-2.5 font-semibold whitespace-nowrap">{r.Quote_No_Display}</td>
+                <td className="px-4 py-2.5">
+                  <div className="font-medium truncate max-w-[220px]">{r.Customer_Name_Snapshot}</div>
+                </td>
+                <td className="px-4 py-2.5 text-center font-bold">{r.Reminder_Count || 0}</td>
+                <td className="px-4 py-2.5 text-slate-500 whitespace-nowrap">
+                  {r.Last_Reminder_Sent_At ? formatDate(r.Last_Reminder_Sent_At.slice(0, 10)) : 'Never'}
+                </td>
+                <td className="px-4 py-2.5 text-slate-700 font-semibold whitespace-nowrap">
+                  {r.Next_Reminder_Date ? formatDate(r.Next_Reminder_Date) : '—'}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
     </div>
   );

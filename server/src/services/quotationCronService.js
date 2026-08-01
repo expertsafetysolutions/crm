@@ -283,11 +283,207 @@ async function runPurchaseOrderReminders() {
   return { dueCount: due.length, sentCount, failedCount, todayStr };
 }
 
+const CERTIFICATE_DUE_DEFAULTS = {
+  lead_days: 30,
+  pre_due_interval_days: 3,
+  post_due_interval_days: 1,
+  stop_after_count: 10,
+  stop_after_days_overdue: 60
+};
+
+/**
+ * Whether one item's reminder cadence should fire today, given its stored state.
+ *
+ * Reminders start `lead_days` before the due date, repeat every `pre_due_interval_days` while still
+ * before due, switch to `post_due_interval_days` once overdue, and stop for good once either cap in
+ * `cfg` is hit — an item must not chase a customer forever. `state` is whatever this item's own
+ * entry in Due_Reminder_Offsets_Sent currently holds (or undefined for an item never reminded yet).
+ */
+function isItemDueToday(daysUntilDue, state, cfg, todayStr) {
+  if (state?.stopped) return false;
+  if (daysUntilDue > cfg.lead_days) return false;
+
+  if (!state?.lastSentAt) return true; // first reminder in this cadence
+
+  const interval = daysUntilDue >= 0 ? cfg.pre_due_interval_days : cfg.post_due_interval_days;
+  const daysSinceLast = Math.round((new Date(todayStr) - new Date(state.lastSentAt.slice(0, 10))) / 86400000);
+  return daysSinceLast >= Math.max(1, Number(interval) || 1);
+}
+
+/**
+ * Flattens every certificate's itemsList (each item has its own nextDate — see
+ * CertificateComplianceGeneratorPage.jsx's computeCertValidUntil) plus every Manual_Due_Entries row
+ * into one list of { sourceType, sourceId, itemId, customerId, customerName, itemName, capacity,
+ * qty, nextDate, state } candidates, so runCertificateDueReminders can filter/group them identically
+ * regardless of which collection they came from. `state` is this item's own entry (if any) inside
+ * the parent record's Due_Reminder_Offsets_Sent — {itemId, sentCount, lastSentAt, stopped}.
+ */
+async function collectDueCandidates() {
+  const certificates = await sheetsService.getAllCertificates();
+  const manualEntries = await sheetsService.getTab('Manual_Due_Entries');
+  const certificatesById = new Map(certificates.map(c => [c.verificationGuid || c.Verification_GUID, c]));
+  const manualEntriesById = new Map(manualEntries.map(e => [e.Due_Entry_ID, e]));
+
+  const out = [];
+
+  for (const cert of certificates) {
+    if (cert.Is_Deleted) continue;
+    if (cert.Due_Reminder_Enabled === false) continue;
+    const customerId = cert.Customer_ID || cert.customerId;
+    const customerName = cert.Customer_Name || cert.customerName;
+    if (!customerId) continue;
+    const offsetsSent = Array.isArray(cert.Due_Reminder_Offsets_Sent) ? cert.Due_Reminder_Offsets_Sent : [];
+    for (const item of (cert.itemsList || [])) {
+      if (!item.nextDate) continue;
+      const itemId = item.id || item.srNo || `${item.itemName}-${item.capacity}`;
+      out.push({
+        sourceType: 'certificate',
+        sourceId: cert.verificationGuid || cert.Verification_GUID,
+        itemId,
+        customerId,
+        customerName,
+        itemName: item.itemName,
+        capacity: item.capacity,
+        qty: item.qty,
+        nextDate: item.nextDate,
+        state: offsetsSent.find(o => o.itemId === itemId)
+      });
+    }
+  }
+
+  for (const entry of manualEntries) {
+    if (entry.Is_Deleted) continue;
+    if (entry.Due_Reminder_Enabled === false) continue;
+    if (!entry.Customer_ID || !entry.Due_Date) continue;
+    const offsetsSent = Array.isArray(entry.Due_Reminder_Offsets_Sent) ? entry.Due_Reminder_Offsets_Sent : [];
+    for (const item of (entry.Equipment_List || [])) {
+      const itemId = item.itemName + (item.capacity || '');
+      out.push({
+        sourceType: 'manual',
+        sourceId: entry.Due_Entry_ID,
+        itemId,
+        customerId: entry.Customer_ID,
+        customerName: entry.Customer_Name,
+        itemName: item.itemName,
+        capacity: item.capacity,
+        qty: item.qty,
+        nextDate: entry.Due_Date,
+        state: offsetsSent.find(o => o.itemId === itemId)
+      });
+    }
+  }
+
+  return { candidates: out, certificatesById, manualEntriesById };
+}
+
+/**
+ * Module H: repeating due-reminder for expiring certificate equipment (Due Certificate Report).
+ * Cadence is admin-configurable (Quotation_Settings.certificate_due_reminder_config): starts
+ * `lead_days` before an item's due date, repeats every `pre_due_interval_days` before due and
+ * `post_due_interval_days` once overdue, and auto-stops per item once either cap
+ * (stop_after_count / stop_after_days_overdue) is hit — see isItemDueToday().
+ *
+ * Candidates due on the SAME run are grouped by Customer_ID before dispatch, so a company with
+ * several certificates/items due together receives ONE email listing all of them rather than one
+ * per certificate — confirmed requirement, not an optimisation.
+ */
+async function runCertificateDueReminders() {
+  const todayStr = istToday();
+  const settings = await quotationEngine.getSettings();
+  const cfg = { ...CERTIFICATE_DUE_DEFAULTS, ...(settings.certificate_due_reminder_config || {}) };
+
+  const { candidates, certificatesById, manualEntriesById } = await collectDueCandidates();
+  const customers = await sheetsService.getAllCustomers();
+  const customerById = new Map(customers.map(c => [c.Customer_ID, c]));
+
+  const due = candidates.filter(c => {
+    const daysUntilDue = Math.round((new Date(String(c.nextDate).slice(0, 10)) - new Date(todayStr)) / 86400000);
+    return isItemDueToday(daysUntilDue, c.state, cfg, todayStr);
+  });
+
+  const byCustomer = new Map();
+  for (const item of due) {
+    if (!byCustomer.has(item.customerId)) byCustomer.set(item.customerId, []);
+    byCustomer.get(item.customerId).push(item);
+  }
+
+  let sentCount = 0;
+  let failedCount = 0;
+
+  for (const [customerId, items] of byCustomer) {
+    const customer = customerById.get(customerId);
+    if (!customer || !customer.Email) {
+      failedCount += items.length;
+      continue;
+    }
+
+    try {
+      const results = await dispatchService.sendCertificateDueReminder(customer, items);
+      const anySent = results.some(r => r.ok);
+      if (anySent) sentCount += items.length; else failedCount += items.length;
+
+      // Stamp every source record involved — a certificate can contribute more than one item, and
+      // several certificates/manual entries can belong to the same customer group.
+      const bySource = new Map();
+      for (const item of items) {
+        const key = `${item.sourceType}::${item.sourceId}`;
+        if (!bySource.has(key)) bySource.set(key, []);
+        bySource.get(key).push(item);
+      }
+
+      for (const [, sourceItems] of bySource) {
+        const { sourceType, sourceId } = sourceItems[0];
+        const collection = sourceType === 'certificate' ? 'Document_Registry' : 'Manual_Due_Entries';
+        const idColumn = sourceType === 'certificate' ? 'verificationGuid' : 'Due_Entry_ID';
+        const currentRow = sourceType === 'certificate' ? certificatesById.get(sourceId) : manualEntriesById.get(sourceId);
+        const offsetsSent = Array.isArray(currentRow?.Due_Reminder_Offsets_Sent) ? currentRow.Due_Reminder_Offsets_Sent : [];
+        const log = Array.isArray(currentRow?.Due_Reminder_Log) ? currentRow.Due_Reminder_Log : [];
+
+        // Update each fired item's own state in place (not appended) — sentCount/lastSentAt track
+        // the running cadence, and stopped latches true once either cap is crossed, so future runs
+        // skip this item until the admin flips Due_Reminder_Enabled off and back on.
+        const updatedOffsets = [...offsetsSent];
+        for (const item of sourceItems) {
+          const daysUntilDue = Math.round((new Date(String(item.nextDate).slice(0, 10)) - new Date(todayStr)) / 86400000);
+          const prevCount = Number(item.state?.sentCount) || 0;
+          const nextCount = prevCount + 1;
+          const daysOverdue = Math.max(0, -daysUntilDue);
+          const stopped = nextCount >= cfg.stop_after_count || daysOverdue >= cfg.stop_after_days_overdue;
+          const nextState = {
+            itemId: item.itemId,
+            sentCount: nextCount,
+            lastSentAt: new Date().toISOString(),
+            firstDueAt: item.state?.firstDueAt || item.nextDate,
+            stopped
+          };
+          const idx = updatedOffsets.findIndex(o => o.itemId === item.itemId);
+          if (idx === -1) updatedOffsets.push(nextState); else updatedOffsets[idx] = nextState;
+        }
+
+        await sheetsService.updateRow(collection, idColumn, sourceId, {
+          Due_Reminder_Offsets_Sent: updatedOffsets,
+          Due_Reminder_Log: [...log, {
+            timestamp: new Date().toISOString(),
+            items: sourceItems.map(i => i.itemId),
+            channels: results.map(r => ({ channel: r.channel, status: r.ok ? 'sent' : 'failed', error: r.ok ? '' : String(r.error || '') }))
+          }]
+        });
+      }
+    } catch (e) {
+      failedCount += items.length;
+      console.error(`Certificate due reminder failed for customer ${customerId}:`, e.message);
+    }
+  }
+
+  return { dueCount: due.length, groupCount: byCustomer.size, sentCount, failedCount, todayStr };
+}
+
 module.exports = {
   runQuotationFollowUpReminders,
   runPaymentDueReminders,
   runPurchaseOrderReminders,
   generateAnnualProspectTasks,
+  runCertificateDueReminders,
   ANNUAL_PROSPECT_LEAD_DAYS,
   PO_OPEN_STATUSES
 };

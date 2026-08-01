@@ -365,6 +365,9 @@ export default function CertificateComplianceGeneratorPage() {
   const [searchParams] = useSearchParams();
   const challanId = searchParams.get('challanId');
   const challanFormatType = searchParams.get('formatType') || 'Refilling';
+  // From CertificateReportPage — tapping a row opens this generator with the certificate already
+  // loaded for viewing/editing, instead of a blank form.
+  const openCertNo = searchParams.get('openCertNo');
   const navigate = useNavigate();
   const { token, user } = useAuth();
   const { docSettings, updateDocSettings } = useDocSettings();
@@ -535,6 +538,13 @@ export default function CertificateComplianceGeneratorPage() {
     sectionVisibility: {}
   });
 
+  // Snapshot of certForm as it was when an EXISTING (already-saved) certificate was loaded for
+  // editing — null for a brand-new, never-saved certificate. saveCertificateRecord compares the
+  // live form against this to decide whether a save is silently overwriting a saved record, so
+  // an accidental field change (e.g. bumping the Certificate Type dropdown) can't persist without
+  // the user explicitly confirming the overwrite.
+  const loadedCertSnapshotRef = useRef(null);
+
   const [certCustomerSearch, setCertCustomerSearch] = useState('');
   const [showCertCustDropdown, setShowCertCustDropdown] = useState(false);
 
@@ -694,7 +704,7 @@ export default function CertificateComplianceGeneratorPage() {
     const loadedValidUntil = c.Valid_Until || c.validUntil || '';
 
     // Load into form state directly
-    setCertForm({
+    const loaded = {
       ...c,
       certificateNo: newCertNo,
       revision: newRevision,
@@ -710,7 +720,11 @@ export default function CertificateComplianceGeneratorPage() {
       validUntil: loadedValidUntil,
       challanDate: loadedChallanDate,
       verificationGuid: c.Verification_GUID || c.verificationGuid || 'ESS-VER-' + Math.random().toString(36).substring(2, 8).toUpperCase()
-    });
+    };
+    setCertForm(loaded);
+    // This is a previously-saved certificate — remember its shape so any subsequent edit can be
+    // detected and confirmed before it silently overwrites the saved record.
+    loadedCertSnapshotRef.current = JSON.stringify(loaded);
 
     setNewItemRefillDate(loadedChallanDate);
     setNewItemNextDate(loadedValidUntil);
@@ -1000,6 +1014,11 @@ export default function CertificateComplianceGeneratorPage() {
         setAllCertificates(Array.isArray(certsData) ? certsData : []);
         setCertificateTypes(Array.isArray(certTypesData) ? certTypesData : []);
 
+        if (openCertNo && Array.isArray(certsData)) {
+          const match = certsData.find(c => (c.Certificate_No || c.certificateNo) === openCertNo);
+          if (match) handleLoadCertificateToEdit(match, { announce: false });
+        }
+
         if (taskId) {
           if (!tasksRes || !tasksRes.ok) throw new Error('Failed to load work order');
           const allTasks = await tasksRes.json();
@@ -1107,7 +1126,7 @@ export default function CertificateComplianceGeneratorPage() {
       }
     })();
     return () => { cancelled = true; };
-  }, [taskId, token, challanId, challanFormatType]);
+  }, [taskId, token, challanId, challanFormatType, openCertNo]);
 
   const retryLoadCustomers = async () => {
     try {
@@ -1399,8 +1418,30 @@ export default function CertificateComplianceGeneratorPage() {
   // above the early returns, since a hook depends on it — see Rules of Hooks).
   const readyToFinalize = clientDetailsComplete && (hideEquipmentSection || (certForm.itemsList || []).length > 0);
 
+  // True once a saved certificate has been loaded (loadedCertSnapshotRef set) AND the form has
+  // diverged from what was loaded — i.e. this save would overwrite a saved record with a change
+  // the user has not explicitly confirmed yet (see loadedCertSnapshotRef declaration above).
+  const hasUnsavedEditsToExisting = () =>
+    loadedCertSnapshotRef.current !== null && loadedCertSnapshotRef.current !== JSON.stringify(certForm);
+
+  // Thrown by saveCertificateRecord when the user declines the overwrite-confirmation below, so
+  // every call site's catch block can tell "user cancelled" apart from a real network/save failure.
+  const CERT_SAVE_CANCELLED = '__CERT_SAVE_CANCELLED__';
+
   // Shared certificate-persistence + PDF-rendering helpers, used by Save / Download / Print / Share below.
   const saveCertificateRecord = async (extra = {}) => {
+    // Reopening a saved certificate via search and then changing ANY field (certificate type,
+    // an item row, a date...) must never silently overwrite the saved record — a stray tap on the
+    // Certificate Type dropdown right next to the search/nav controls was doing exactly that.
+    // Require the user to explicitly confirm the overwrite, twice, before it is persisted.
+    if (hasUnsavedEditsToExisting()) {
+      if (!window.confirm('This certificate was already saved. You have changed it — save these changes and overwrite the saved certificate?')) {
+        throw new Error(CERT_SAVE_CANCELLED);
+      }
+      if (!window.confirm('Please confirm again: overwrite the previously saved certificate with your changes?')) {
+        throw new Error(CERT_SAVE_CANCELLED);
+      }
+    }
     const payload = {
       ...certForm, ...extra,
       Certificate_No: certForm.certificateNo, Customer_ID: certForm.customerId, Customer_Name: certForm.customerName, Address: certForm.address,
@@ -1441,6 +1482,9 @@ export default function CertificateComplianceGeneratorPage() {
         ? prev.map(x => (x.verificationGuid === certForm.verificationGuid || x.Verification_GUID === certForm.verificationGuid) ? json.certificate : x)
         : [...prev, json.certificate]);
     }
+    // The just-saved state is now the record on the server — re-baseline so a further save with
+    // no additional edits doesn't re-prompt for a change that was already confirmed.
+    loadedCertSnapshotRef.current = JSON.stringify({ ...certForm, ...extra });
     return { ...json, isExisting };
   };
 
@@ -1496,7 +1540,7 @@ export default function CertificateComplianceGeneratorPage() {
     const loadedChallanDate = targetCert.Challan_Date || targetCert.challanDate || targetCert.Issue_Date || targetCert.issueDate || getLocalDateStr();
     const loadedValidUntil = targetCert.Valid_Until || targetCert.validUntil || '';
 
-    setCertForm({
+    const loaded = {
       ...targetCert,
       certificateNo: newCertNo,
       revision: newRevision,
@@ -1512,7 +1556,11 @@ export default function CertificateComplianceGeneratorPage() {
       validUntil: loadedValidUntil,
       challanDate: loadedChallanDate,
       verificationGuid: targetCert.Verification_GUID || targetCert.verificationGuid
-    });
+    };
+    setCertForm(loaded);
+    // Same reasoning as handleLoadCertificateToEdit — this replaces the form with an existing
+    // saved certificate, so re-snapshot it as the new baseline for the unsaved-edit check.
+    loadedCertSnapshotRef.current = JSON.stringify(loaded);
 
     setNewItemRefillDate(loadedChallanDate);
     setNewItemNextDate(loadedValidUntil);
@@ -1545,6 +1593,9 @@ export default function CertificateComplianceGeneratorPage() {
       isContentUnlocked: false,
       revision: 0
     }));
+    // A blank certificate has nothing saved to protect yet — the next save is a plain POST, not an
+    // overwrite, so it must not trigger the unsaved-edit confirmation.
+    loadedCertSnapshotRef.current = null;
     setCertCustomerSearch('');
     setNewItemSearch('');
     setActiveMobileTab('edit');
@@ -1581,8 +1632,8 @@ export default function CertificateComplianceGeneratorPage() {
           ];
         }
       } catch (err) {
-        alert('Failed to auto-save current certificate: ' + err.message);
         setAdminSubmitting('');
+        if (err.message !== CERT_SAVE_CANCELLED) alert('Failed to auto-save current certificate: ' + err.message);
         return;
       }
       setAdminSubmitting('');
@@ -1691,7 +1742,7 @@ export default function CertificateComplianceGeneratorPage() {
       if (email?.ok) alert(`✅ Certificate ${certForm.certificateNo} emailed to ${email.recipient}.`);
       else alert(`Could not send: ${email?.error || 'unknown error'}`);
     } catch (err) {
-      alert('Email failed: ' + err.message);
+      if (err.message !== CERT_SAVE_CANCELLED) alert('Email failed: ' + err.message);
     } finally {
       setAdminSubmitting('');
     }
@@ -3318,7 +3369,7 @@ export default function CertificateComplianceGeneratorPage() {
                           }
                           alert('✅ Settings saved in the system!');
                         } catch (err) {
-                          alert('Error saving settings: ' + err.message);
+                          if (err.message !== CERT_SAVE_CANCELLED) alert('Error saving settings: ' + err.message);
                         } finally {
                           setAdminSubmitting('');
                         }
@@ -3377,7 +3428,7 @@ export default function CertificateComplianceGeneratorPage() {
                           setCertForm(prev => ({ ...prev, isSettingsLocked: true }));
                           alert('🔒 Settings saved and locked in the system. Future certificates of this type will use this configuration.');
                         } catch (err) {
-                          alert('Error locking settings: ' + err.message);
+                          if (err.message !== CERT_SAVE_CANCELLED) alert('Error locking settings: ' + err.message);
                         } finally {
                           setAdminSubmitting('');
                         }
@@ -3410,7 +3461,7 @@ export default function CertificateComplianceGeneratorPage() {
                     : allCertificates;
                   resetToBlankCertificate(updatedCerts);
                   alert('✅ Certificate saved. Ready for a new certificate.');
-                } catch (err) { alert('Save failed: ' + err.message); }
+                } catch (err) { if (err.message !== CERT_SAVE_CANCELLED) alert('Save failed: ' + err.message); }
                 finally { setAdminSubmitting(''); }
               }} className="flex-1 min-w-[80px] py-2 px-2.5 rounded-xl bg-slate-700 hover:bg-slate-800 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50">
                 <Save className="w-3.5 h-3.5" /><span>{adminSubmitting === 'save' ? 'Saving…' : 'Save'}</span>
@@ -3426,7 +3477,7 @@ export default function CertificateComplianceGeneratorPage() {
                   pdf.save(certFileName);
                   uploadPdfToAppsScript({ pdf, fileName: certFileName, documentType: 'Certificate', certificateNo: certForm.certificateNo, formatType: certForm.formatType, customerName: certForm.customerName, issueDate: certForm.issueDate });
                   if (!result.isExisting && result.certificate) advanceToNextCertNumber(result.certificate);
-                } catch (err) { console.error(err); alert('PDF error: ' + err.message); }
+                } catch (err) { if (err.message !== CERT_SAVE_CANCELLED) { console.error(err); alert('PDF error: ' + err.message); } }
                 finally { setAdminSubmitting(''); }
               }} className="flex-1 min-w-[80px] py-2 px-2.5 rounded-xl bg-amber-700 hover:bg-amber-800 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50">
                 <Download className="w-3.5 h-3.5" /><span>{adminSubmitting === 'download' ? 'Generating…' : 'Download'}</span>
@@ -3467,7 +3518,7 @@ export default function CertificateComplianceGeneratorPage() {
                     const r = await fetch(`/api/tasks/${task.Task_ID}/stage`, { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ remarks: `[Certificate Issued: ${certForm.certificateNo}] Challan Date: ${certForm.challanDate} | Valid Until: ${certForm.validUntil}`, latLong: '0.0000, 0.0000' }) });
                     if (!r.ok) throw new Error('Failed to advance stage');
                     alert(`✅ Certificate ${certForm.certificateNo} issued and stage advanced!`); handleBack();
-                  } catch (err) { alert(err.message); }
+                  } catch (err) { if (err.message !== CERT_SAVE_CANCELLED) alert(err.message); }
                   finally { setAdminSubmitting(''); }
                 }} className="w-full py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-xs flex items-center justify-center gap-1.5 shadow-md transition disabled:opacity-50">
                   <CheckCircle2 className="w-3.5 h-3.5" /><span>{adminSubmitting === 'cert' ? 'Saving…' : '✅ Mark Certified & Advance Stage'}</span>
@@ -3817,7 +3868,7 @@ export default function CertificateComplianceGeneratorPage() {
                 : allCertificates;
               resetToBlankCertificate(updatedCerts);
               alert('✅ Certificate saved. Ready for a new certificate.');
-            } catch (err) { alert('Save failed: ' + err.message); }
+            } catch (err) { if (err.message !== CERT_SAVE_CANCELLED) alert('Save failed: ' + err.message); }
             finally { setAdminSubmitting(''); }
           }} className="flex-1 min-w-[70px] py-2.5 px-2 rounded-xl bg-slate-700 active:scale-95 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50">
             <Save className="w-3.5 h-3.5" /><span>{adminSubmitting === 'save' ? 'Saving…' : 'Save'}</span>
@@ -3833,7 +3884,7 @@ export default function CertificateComplianceGeneratorPage() {
               pdf.save(certFileName);
               uploadPdfToAppsScript({ pdf, fileName: certFileName, documentType: 'Certificate', certificateNo: certForm.certificateNo, formatType: certForm.formatType, customerName: certForm.customerName, issueDate: certForm.issueDate });
               if (!result.isExisting && result.certificate) advanceToNextCertNumber(result.certificate);
-            } catch (err) { console.error(err); alert('PDF error: ' + err.message); }
+            } catch (err) { if (err.message !== CERT_SAVE_CANCELLED) { console.error(err); alert('PDF error: ' + err.message); } }
             finally { setAdminSubmitting(''); }
           }} className="flex-1 min-w-[70px] py-2.5 px-2 rounded-xl bg-amber-700 active:scale-95 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition disabled:opacity-50">
             <Download className="w-3.5 h-3.5" /><span>{adminSubmitting === 'download' ? 'Generating…' : 'Download'}</span>
@@ -3881,7 +3932,7 @@ export default function CertificateComplianceGeneratorPage() {
                 const r = await fetch(`/api/tasks/${task.Task_ID}/stage`, { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ remarks: `[Certificate Issued: ${certForm.certificateNo}] Challan Date: ${certForm.challanDate} | Valid Until: ${certForm.validUntil}`, latLong: '0.0000, 0.0000' }) });
                 if (!r.ok) throw new Error('Failed to advance stage');
                 alert(`✅ Certificate ${certForm.certificateNo} issued and stage advanced!`); handleBack();
-              } catch (err) { alert(err.message); }
+              } catch (err) { if (err.message !== CERT_SAVE_CANCELLED) alert(err.message); }
               finally { setAdminSubmitting(''); }
             }} className="flex-1 py-2 bg-emerald-600 active:scale-95 text-white font-extrabold text-xs flex items-center justify-center gap-1.5 rounded-xl shadow-xs transition disabled:opacity-50">
               <CheckCircle2 className="w-3.5 h-3.5" /><span>{adminSubmitting === 'cert' ? 'Saving…' : 'Mark Certified'}</span>

@@ -97,6 +97,10 @@ const DEFAULT_QUOTATION_SETTINGS = {
     invoice_email: true,
     challan_email: false,
     certificate_email: false,
+    // 30-days-before-due reminder for expiring certificate equipment (Due Certificate Report). New
+    // and automatic, so it ships off for the same reason challan_email/certificate_email/
+    // pod_confirmation do — deploying this cannot start messaging customers on its own.
+    certificate_due_reminder: false,
     pod_confirmation: false,
     // ON: the customer is told on screen that a copy has been emailed to them, so suppressing it
     // would make the confirmation page a lie. It is also the customer's only durable record of the
@@ -274,6 +278,15 @@ const DEFAULT_QUOTATION_SETTINGS = {
       whatsapp_template_name: '',
       whatsapp_template_status: 'not_submitted'
     },
+    // Fired 30 days before an equipment item's validity expires (Due Certificate Report). One email
+    // per customer per day even when several of their certificates fall due the same run —
+    // {item_summary} lists every due item together rather than sending one mail per certificate.
+    certificate_due_reminder: {
+      subject: 'Upcoming renewal due — {item_count} item(s) — Expert Safety Solutions',
+      body: 'Dear {customer_name},\n\nThe following fire safety equipment is due for renewal on {due_date}:\n\n{item_summary}\n\nPlease contact us to schedule the service in advance.\n\nRegards,\nExpert Safety Solutions',
+      whatsapp_template_name: '',
+      whatsapp_template_status: 'not_submitted'
+    },
     // Auto-reply to someone who filled in the public /inquiry form. {inquiry_no} and
     // {requirement_summary} are unique to this template — there is no document behind it yet, so
     // none of the money or document-number variables resolve.
@@ -313,6 +326,27 @@ const DEFAULT_QUOTATION_SETTINGS = {
   // Offsets (in days relative to invoice due date) at which payment reminders fire.
   // Negative = before due, 0 = on due date, positive = overdue.
   payment_reminder_offsets: [-3, 0, 7],
+
+  /**
+   * Repeating cadence for the certificate due-reminder (Due Certificate Report). Unlike
+   * payment_reminder_offsets' fixed list of days, this reminder REPEATS on an interval rather than
+   * firing on a few fixed offsets, because equipment can stay unrenewed for a long time and a
+   * single early reminder is too easy to forget.
+   *
+   * Reminders start `lead_days` before an item's due date, repeat every `pre_due_interval_days`
+   * while still before due, switch to `post_due_interval_days` once overdue, and stop automatically
+   * once EITHER cap is hit (whichever comes first) — an item must not chase a customer forever.
+   * Stopping is per-item (quotationCronService tracks sentCount/stopped on Due_Reminder_Offsets_Sent)
+   * and is reversible: turning that item's Due_Reminder_Enabled toggle off then back on resets the
+   * cadence and starts counting again from zero.
+   */
+  certificate_due_reminder_config: {
+    lead_days: 30,
+    pre_due_interval_days: 3,
+    post_due_interval_days: 1,
+    stop_after_count: 10,
+    stop_after_days_overdue: 60
+  },
 
   /**
    * The hour of day (IST, 0-23) each automatic reminder goes out.

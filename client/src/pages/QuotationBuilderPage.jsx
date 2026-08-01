@@ -23,6 +23,10 @@ import { stateOptions, extractStateCode, detectStateCode, getStateName } from '.
 // outside this list when an enquiry is closed as Lost.
 const ORDER_LOST_REASONS = ['Price High', 'Competitor', 'Delay', 'Requirement Cancelled', 'Other'];
 
+// Must match quotationEngine.OPEN_STATUSES — only these statuses still receive automated follow-up
+// reminders, so only these show the "edit reminder interval" control.
+const REMINDER_OPEN_STATUSES = ['Sent', 'RevisionRequested', 'RequirementChangeRequested'];
+
 /**
  * Strips the computed discount off a line loaded from a saved quotation.
  *
@@ -89,6 +93,10 @@ export default function QuotationBuilderPage() {
   // Inline item-create dialog: null when shut, else the draft item plus the line index that opened it.
   const [itemCreate, setItemCreate] = useState(null);
   const [savingItem, setSavingItem] = useState(false);
+  // Inline "edit reminder cadence" field, only shown once a quotation is issued and still open.
+  const [editingReminderDays, setEditingReminderDays] = useState(false);
+  const [reminderDaysDraft, setReminderDaysDraft] = useState('');
+  const [savingReminderDays, setSavingReminderDays] = useState(false);
 
   // Draft form state (only meaningful before the quotation is issued)
   const [form, setForm] = useState({
@@ -622,6 +630,32 @@ export default function QuotationBuilderPage() {
     if (refreshed.ok) setQuotation(await refreshed.json());
   };
 
+  /**
+   * Edits the follow-up cadence on an already-issued quotation. updateQuotation() (the normal Save
+   * path) refuses to touch anything past Draft/PendingApproval, so this goes through the dedicated
+   * PATCH /reminder-settings route instead, which only ever moves the reminder fields.
+   */
+  const saveReminderDays = async () => {
+    const days = Number(reminderDaysDraft);
+    if (!Number.isFinite(days) || days < 1) return flash('Enter a follow-up interval of 1 day or more.', true);
+
+    setSavingReminderDays(true);
+    try {
+      const res = await fetch(`/api/quotations/${quotation.Quotation_ID}/reminder-settings`, {
+        method: 'PATCH', headers: authHeaders, body: JSON.stringify({ followUpIntervalDays: days })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Could not update reminder settings');
+      setQuotation(data);
+      setEditingReminderDays(false);
+      flash('Follow-up interval updated.');
+    } catch (e) {
+      flash(e.message, true);
+    } finally {
+      setSavingReminderDays(false);
+    }
+  };
+
   const handleRevise = async () => {
     const reason = window.prompt('What is changing in this revision?');
     if (reason === null) return;
@@ -1034,6 +1068,83 @@ export default function QuotationBuilderPage() {
             </div>
           </div>
         </div>
+
+        {/* Reminder history — mirrors quotationCronService.js's Reminder_Log/Reminder_Count/
+            Next_Reminder_Date/Last_Reminder_Sent_At fields, which exist on every issued quotation
+            but had no UI anywhere before this. */}
+        {quotation && (
+          <div className="bg-white border border-slate-200 rounded-xl p-4">
+            <div className="flex items-center justify-between mb-3">
+              <span className="qt-section-label">Reminders</span>
+            </div>
+
+            <div className="grid grid-cols-3 gap-3 text-center mb-3">
+              <div>
+                <div className="text-lg font-black text-slate-900">{quotation.Reminder_Count || 0}</div>
+                <div className="text-[10px] uppercase tracking-wide text-slate-400 font-bold">Sent</div>
+              </div>
+              <div>
+                <div className="text-sm font-bold text-slate-700">
+                  {quotation.Last_Reminder_Sent_At ? formatDate(quotation.Last_Reminder_Sent_At.slice(0, 10)) : 'Never'}
+                </div>
+                <div className="text-[10px] uppercase tracking-wide text-slate-400 font-bold">Last sent</div>
+              </div>
+              <div>
+                <div className="text-sm font-bold text-slate-700">
+                  {quotation.Next_Reminder_Date ? formatDate(quotation.Next_Reminder_Date) : 'None scheduled'}
+                </div>
+                <div className="text-[10px] uppercase tracking-wide text-slate-400 font-bold">Next reminder</div>
+              </div>
+            </div>
+
+            {REMINDER_OPEN_STATUSES.includes(quotation.Status) && (
+              <div className="flex items-center gap-2 mb-3 pt-3 border-t border-slate-100">
+                {editingReminderDays ? (
+                  <>
+                    <div className="qt-field flex-1">
+                      <input type="number" min="1" value={reminderDaysDraft} placeholder=" "
+                        onChange={e => setReminderDaysDraft(e.target.value)} className="qt-input" />
+                      <label>Follow-up interval (days)</label>
+                    </div>
+                    <button onClick={saveReminderDays} disabled={savingReminderDays}
+                      className="qt-btn qt-btn-primary py-2.5 px-3 text-xs">
+                      {savingReminderDays && <Loader2 className="w-3.5 h-3.5 animate-spin" />} SAVE
+                    </button>
+                    <button onClick={() => setEditingReminderDays(false)} className="qt-btn qt-btn-ghost py-2.5 px-3 text-xs">
+                      CANCEL
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    onClick={() => { setReminderDaysDraft(String(quotation.Follow_Up_Interval_Days || 3)); setEditingReminderDays(true); }}
+                    className="text-xs font-bold text-rose-600 hover:text-rose-700"
+                  >
+                    Edit reminder interval (currently every {quotation.Follow_Up_Interval_Days || 3} days)
+                  </button>
+                )}
+              </div>
+            )}
+
+            {Array.isArray(quotation.Reminder_Log) && quotation.Reminder_Log.length > 0 ? (
+              <div className="space-y-1.5 max-h-48 overflow-y-auto pt-1">
+                {[...quotation.Reminder_Log].reverse().map((entry, i) => (
+                  <div key={i} className="flex items-center justify-between text-xs bg-slate-50 rounded-lg px-2.5 py-1.5">
+                    <span className="text-slate-500">{formatDate(String(entry.timestamp).slice(0, 10))}</span>
+                    <span className="flex gap-1.5">
+                      {(entry.channels || []).map((c, j) => (
+                        <span key={j} className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold ${c.status === 'sent' ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
+                          {c.channel}
+                        </span>
+                      ))}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="text-[11px] text-slate-400 pt-1">No reminders sent yet.</div>
+            )}
+          </div>
+        )}
 
         {/* Line items */}
         {/* NOT overflow-hidden: the item picker's dropdown is absolutely positioned inside this
@@ -1575,6 +1686,11 @@ export default function QuotationBuilderPage() {
             {closeForm.outcome === 'Lost' && (
               <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mt-3">
                 The quotation will also be marked Rejected, so no further reminders are sent.
+              </p>
+            )}
+            {closeForm.outcome === 'Won' && (
+              <p className="text-[11px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2 mt-3">
+                The quotation will be marked Won and no further reminders are sent.
               </p>
             )}
 

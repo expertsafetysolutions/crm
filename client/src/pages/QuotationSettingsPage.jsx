@@ -34,6 +34,7 @@ const EMAIL_TEMPLATES = [
   { key: 'invoice_email', label: 'Tax Invoice Dispatch', hint: 'Sent when you press Send Email on a sales invoice in Sales Documents. No {view_link} — the customer portal exists only for quotations.' },
   { key: 'challan_email', label: 'Delivery Challan Dispatch', hint: 'Sent when you press Send Email on an issued challan in the Challan register. Off by default.' },
   { key: 'certificate_email', label: 'Certificate Dispatch', hint: 'Sent when you press Email to Customer on a saved certificate. Supports {certificate_type}, {certificate_no} and {verification_link} — the public QR verification page. Off by default.' },
+  { key: 'certificate_due_reminder', label: 'Certificate Due Reminder', hint: 'Sent automatically 30 days before an equipment item\'s validity expires (Due Certificate Report). One email per customer per day even if several of their items fall due together. Off by default.' },
   // Both address a VENDOR — {customer_name} etc. resolve to the vendor's own details for these two.
   { key: 'po_email', label: 'Purchase Order Dispatch', hint: 'Sent when you press Send Email on an issued purchase order.' },
   { key: 'po_reminder', label: 'Purchase Order Reminder', hint: 'Auto-sent per PO on the "Auto-reminder every (days)" cadence set on that order (0 = off — most orders never reach this). Also sendable manually.' }
@@ -55,7 +56,8 @@ const REMINDER_JOBS = [
   { key: 'quotation_followup', label: 'Quotation follow-up', hint: 'Emails customers with an open quotation' },
   { key: 'payment_due', label: 'Invoice payment due', hint: 'Emails customers with an unpaid invoice' },
   { key: 'refilling_due', label: 'Refilling due', hint: 'Creates internal tasks — no customer email' },
-  { key: 'annual_prospect', label: 'Annual prospect leads', hint: 'Creates internal tasks — no customer email' }
+  { key: 'annual_prospect', label: 'Annual prospect leads', hint: 'Creates internal tasks — no customer email' },
+  { key: 'certificate_due', label: 'Certificate due (30 days before)', hint: 'Emails customers whose certificate equipment validity is expiring soon' }
 ];
 
 /** 12-hour labels against the 0-23 value the server stores, so the office reads its own clock. */
@@ -594,6 +596,37 @@ export default function QuotationSettingsPage() {
                 onChange={e => set('payment_reminder_offsets', e.target.value.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !Number.isNaN(n)))}
                 placeholder="-3, 0, 7"
                 className="qt-input" />
+            </Card>
+
+            <Card
+              title="Certificate Due Reminder Cadence"
+              hint="Unlike the payment reminder above, this one REPEATS rather than firing once. It starts before the due date and keeps reminding on an interval until it is renewed or manually stopped."
+            >
+              <Grid>
+                <Field label="Start reminding (days before due)" type="number"
+                  value={settings.certificate_due_reminder_config?.lead_days}
+                  onChange={v => set('certificate_due_reminder_config.lead_days', Number(v))} />
+                <Field label="Repeat every (days) before due" type="number"
+                  value={settings.certificate_due_reminder_config?.pre_due_interval_days}
+                  onChange={v => set('certificate_due_reminder_config.pre_due_interval_days', Number(v))} />
+                <Field label="Repeat every (days) once overdue" type="number"
+                  value={settings.certificate_due_reminder_config?.post_due_interval_days}
+                  onChange={v => set('certificate_due_reminder_config.post_due_interval_days', Number(v))} />
+                <Field label="Auto-stop after this many reminders" type="number"
+                  value={settings.certificate_due_reminder_config?.stop_after_count}
+                  onChange={v => set('certificate_due_reminder_config.stop_after_count', Number(v))} />
+                <Field label="Auto-stop after this many days overdue" type="number"
+                  value={settings.certificate_due_reminder_config?.stop_after_days_overdue}
+                  onChange={v => set('certificate_due_reminder_config.stop_after_days_overdue', Number(v))} />
+              </Grid>
+              <div className="mt-3 bg-amber-50 border border-amber-200 text-amber-800 px-3 py-2 rounded-xl text-[11px] flex items-start gap-2">
+                <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                <span>
+                  Auto-stop is per equipment item, whichever cap is reached first, and is not a
+                  cancellation — an Admin can restart it any time from the Due Certificate Report by
+                  turning that item's Email switch off then back on.
+                </span>
+              </div>
             </Card>
 
             <Card

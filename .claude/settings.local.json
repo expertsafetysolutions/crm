@@ -45,7 +45,11 @@
       "Bash(timeout 200 npm run verify:encryption)",
       "Bash(timeout 180 npm run verify)",
       "Bash(node --check server/src/utils/passwordUtils.js)",
-      "Bash(node --check server/src/routes/authRoutes.js)"
+      "Bash(node --check server/src/routes/authRoutes.js)",
+      "Bash(node -c server/src/routes/apiRoutes.js)",
+      "Bash(node -c server/src/services/quotationEngine.js)",
+      "Bash(awk 'NR>=6374 && NR<=6900' client/src/pages/AdminDashboard.jsx)",
+      "Bash(awk 'NR>=6374 && NR<=7200 && /^      \\\\\\)\\\\}/ {print NR\": \"$0}' client/src/pages/AdminDashboard.jsx)"
     ]
   }
 }

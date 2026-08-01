@@ -19,6 +19,7 @@ const priceListService = require('../services/priceListService');
 const interactionLogger = require('../services/interactionLogger');
 const moneyMask = require('../utils/moneyMask');
 const piiMask = require('../utils/piiMask');
+const geoFence = require('../utils/geoFence');
 const { recordAudit } = require('../utils/auditLog');
 
 const router = express.Router();
@@ -420,6 +421,100 @@ router.post('/certificates/:guid/restore', async (req, res) => {
   } catch (err) {
     console.error('Restore certificate failed:', err);
     res.status(500).json({ error: 'Failed to restore certificate' });
+  }
+});
+
+// Dedicated route for the Certificate Report's per-row Email switch, rather than routing it through
+// the generic PUT above. Turning the reminder back ON must also reset each item's cadence state
+// (sentCount/stopped) so a reactivated item starts a fresh cadence instead of being immediately
+// re-stopped by whatever count/overdue cap it had already crossed — but the generic PUT is also
+// how the certificate GENERATOR resaves the whole form (including this same flag unchanged), and
+// folding a reset into that path would silently wipe a live cadence on every ordinary content edit.
+router.post('/certificates/:guid/due-reminder-toggle', async (req, res) => {
+  try {
+    const enabled = req.body.enabled !== false;
+    const patch = { Due_Reminder_Enabled: enabled };
+    if (enabled) patch.Due_Reminder_Offsets_Sent = [];
+    const updated = await sheetsService.updateRow('Document_Registry', 'verificationGuid', req.params.guid, patch);
+    if (!updated) return res.status(404).json({ error: 'Certificate not found' });
+    res.json({ success: true, certificate: updated });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to update reminder setting' });
+  }
+});
+
+// --- MANUAL DUE ENTRIES (Due Certificate Report) ---
+// Tracking rows for legacy/paper customers whose equipment validity is due but who have no
+// certificate ever generated in this system. Deliberately a separate collection from
+// Document_Registry rather than a fake certificate — see sheetsService.js's Manual_Due_Entries
+// comment. The Due Certificate Report merges these with real certificates for display only.
+router.get('/manual-due-entries', async (req, res) => {
+  try {
+    const rows = await sheetsService.getTab('Manual_Due_Entries');
+    res.json(rows.filter(r => !r.Is_Deleted));
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to load manual due entries' });
+  }
+});
+
+router.post('/manual-due-entries', async (req, res) => {
+  try {
+    const id = `MDE${Date.now().toString().slice(-6)}${Math.random().toString(36).substring(2, 4).toUpperCase()}`;
+    const row = await sheetsService.insertRow('Manual_Due_Entries', {
+      ...req.body,
+      Due_Entry_ID: id,
+      // Same default as a real certificate at creation — the office adds these because they want
+      // this customer reminded, not the other way around.
+      Due_Reminder_Enabled: req.body.Due_Reminder_Enabled !== false,
+      Due_Reminder_Offsets_Sent: [],
+      Due_Reminder_Log: [],
+      Created_By: req.user.name || req.user.staffId || 'Unknown',
+      Created_At: new Date().toISOString()
+    });
+    res.json({ success: true, entry: row });
+  } catch (err) {
+    console.error('Create manual due entry failed:', err);
+    res.status(500).json({ error: 'Failed to create manual due entry' });
+  }
+});
+
+router.put('/manual-due-entries/:id', async (req, res) => {
+  try {
+    const { Due_Entry_ID, ...safeBody } = req.body;
+    const updated = await sheetsService.updateRow('Manual_Due_Entries', 'Due_Entry_ID', req.params.id, safeBody);
+    if (!updated) return res.status(404).json({ error: 'Entry not found' });
+    res.json({ success: true, entry: updated });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to update manual due entry' });
+  }
+});
+
+// Same reasoning as /certificates/:guid/due-reminder-toggle — reactivating must reset the item
+// cadence state, and the generic PUT above is also how the office edits an entry's other fields.
+router.post('/manual-due-entries/:id/due-reminder-toggle', async (req, res) => {
+  try {
+    const enabled = req.body.enabled !== false;
+    const patch = { Due_Reminder_Enabled: enabled };
+    if (enabled) patch.Due_Reminder_Offsets_Sent = [];
+    const updated = await sheetsService.updateRow('Manual_Due_Entries', 'Due_Entry_ID', req.params.id, patch);
+    if (!updated) return res.status(404).json({ error: 'Entry not found' });
+    res.json({ success: true, entry: updated });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to update reminder setting' });
+  }
+});
+
+router.delete('/manual-due-entries/:id', async (req, res) => {
+  try {
+    const updated = await sheetsService.updateRow('Manual_Due_Entries', 'Due_Entry_ID', req.params.id, {
+      Is_Deleted: true,
+      Deleted_At: new Date().toISOString(),
+      Deleted_By: req.user.name || req.user.staffId || 'Unknown'
+    });
+    if (!updated) return res.status(404).json({ error: 'Entry not found' });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to delete manual due entry' });
   }
 });
 
@@ -1293,13 +1388,16 @@ router.get('/notifications/my', async (req, res) => {
   try {
     const staffId = req.user.staffId || req.user.Staff_ID || req.user.id;
     const role = req.user.role || req.user.Role;
-    const [tasks, leaves, staffList, advances, serviceReports, certificates] = await Promise.all([
+    // Lower-cased throughout: Role is free-form on Staff_Master and 'Admin'/'admin' both occur.
+    const isAdminRole = String(role || '').trim().toLowerCase() === 'admin';
+    const [tasks, leaves, staffList, advances, serviceReports, certificates, attendance] = await Promise.all([
       sheetsService.getAllTasks(),
       sheetsService.getAllLeaves(),
       sheetsService.getAllStaff(),
       sheetsService.getAdvances(),
-      role === 'Admin' ? sheetsService.getAllServiceReports() : Promise.resolve([]),
-      role === 'Admin' ? sheetsService.getAllCertificates() : Promise.resolve([])
+      isAdminRole ? sheetsService.getAllServiceReports() : Promise.resolve([]),
+      isAdminRole ? sheetsService.getAllCertificates() : Promise.resolve([]),
+      isAdminRole ? sheetsService.getAllAttendance() : Promise.resolve([])
     ]);
 
     const notifications = [];
@@ -1321,7 +1419,7 @@ router.get('/notifications/my', async (req, res) => {
     // occur (resolvePermissions lowercases for the same reason). An exact match would silently
     // hide every web lead from a salesperson whose row was typed in lower case.
     const normalizedRole = String(role || '').trim().toLowerCase();
-    if (normalizedRole === 'admin' || normalizedRole === 'sales') {
+    if (isAdminRole || normalizedRole === 'sales') {
       tasks
         .filter(t => t.Source === 'ONLINE_INQUIRY')
         .filter(t => !t.Assigned_Staff && !['Completed', 'Cancelled'].includes(t.Status))
@@ -1341,7 +1439,7 @@ router.get('/notifications/my', async (req, res) => {
         });
     }
 
-    if (role === 'Admin') {
+    if (isAdminRole) {
       const pendingLeaves = leaves.filter(l => l.Status === 'Pending');
       pendingLeaves.forEach(l => {
         notifications.push({
@@ -1477,6 +1575,65 @@ router.get('/notifications/my', async (req, res) => {
           action: 'VIEW_CERTIFICATE'
         });
       });
+
+      /*
+       * Out-of-office punch requests waiting on a decision. Listed BEFORE the punch entries below
+       * because someone is standing there unable to start work — an action needed outranks an FYI.
+       */
+      try {
+        const pendingPunchApprovals = await attendanceService.listApprovals({
+          status: attendanceService.APPROVAL_STATUS.PENDING
+        });
+        pendingPunchApprovals.forEach(a => {
+          const where = a.Address_Text
+            ? a.Address_Text.split(',').slice(0, 3).join(',')
+            : (a.Distance_M != null ? `${a.Distance_M} m from office` : 'outside the office');
+          notifications.push({
+            id: `attapproval-${a.Approval_ID}`,
+            title: '📍 Out-of-Office Punch — Approval Needed',
+            message: `${a.Staff_Name} wants to punch ${a.Punch_Type === 'IN' ? 'in' : 'out'} at ${a.Requested_Time} — ${a.Distance_M != null ? `${a.Distance_M} m away` : 'location unknown'} (${where}).`,
+            time: `${a.Requested_Date} ${a.Requested_Time}`,
+            type: 'APPROVAL_NEEDED',
+            targetId: a.Approval_ID,
+            targetType: 'ATTENDANCE_APPROVAL',
+            action: 'REVIEW_ATTENDANCE_APPROVAL'
+          });
+        });
+      } catch (e) {
+        // The tray must still render if this one source fails.
+        console.error('Pending punch approvals for notifications failed:', e.message);
+      }
+
+      /*
+       * Today's punch in / punch out, so Admin can see who has actually turned up without opening
+       * the attendance screen. Scoped to TODAY only: yesterday's arrivals are history and belong in
+       * the attendance report, not in a tray that has to stay short enough to read.
+       *
+       * One entry per record, newest first, and an Admin's own punch is skipped — they know.
+       */
+      const todayStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
+      const nameById = new Map(staffList.map(s => [s.Staff_ID, s.Name || s.Staff_ID]));
+      (attendance || [])
+        .filter(a => a.Date === todayStr && a.Staff_ID !== staffId)
+        .sort((a, b) => String(b.Punch_In_Time || '').localeCompare(String(a.Punch_In_Time || '')))
+        .slice(0, 25)
+        .forEach(a => {
+          const who = nameById.get(a.Staff_ID) || a.Staff_ID;
+          const late = Number(a.Late_By_Minutes) || 0;
+          const out = a.Punch_Out_Time && a.Punch_Out_Time !== '';
+          notifications.push({
+            id: `att-${a.Record_ID}-${out ? 'out' : 'in'}`,
+            title: out ? '🔴 Staff Punched Out' : (late > 0 ? '🟠 Staff Punched In (Late)' : '🟢 Staff Punched In'),
+            message: out
+              ? `${who} punched out at ${a.Punch_Out_Time} — ${Number(a.Total_Worked_Hours) || 0} hrs worked.`
+              : `${who} punched in at ${a.Punch_In_Time}${late > 0 ? ` — ${late} min late` : ''}.`,
+            time: `${a.Date} ${out ? a.Punch_Out_Time : a.Punch_In_Time}`,
+            type: late > 0 && !out ? 'ALERT' : 'INFO',
+            targetId: a.Record_ID,
+            targetType: 'ATTENDANCE',
+            action: 'VIEW_ATTENDANCE'
+          });
+        });
     } else {
       const cleanStaffId = String(staffId || '').trim().toLowerCase();
       const myTasks = tasks.filter(t => String(t.Assigned_Staff || '').trim().toLowerCase() === cleanStaffId);
@@ -2519,16 +2676,105 @@ router.get('/attendance', async (req, res) => {
   }
 });
 
+/**
+ * Runs the geofence for a punch attempt and, when the person is outside and not exempt, raises the
+ * approval request and answers 409.
+ *
+ * Shared by both punch routes so the two can never drift apart. Returns the fence verdict when the
+ * punch may proceed, or null when it has already answered the response.
+ */
+async function gatePunchOnFence(req, res, punchType) {
+  const verdict = await attendanceService.resolvePunchFence({
+    staffId: req.user.staffId,
+    latLong: req.body.latLong,
+    gpsAccuracy: req.body.gpsAccuracy
+  });
+
+  if (verdict.allowed) return verdict;
+
+  // Fence on, but the phone could not produce a usable fix. Retryable and nothing for an Admin to
+  // look at, so it is a 400 rather than an approval request.
+  if (verdict.noFix) {
+    res.status(400).json({
+      error: 'Your location could not be read. Turn on high-accuracy GPS, step near a window or outside, and try again.',
+      code: 'NO_GPS_FIX'
+    });
+    return null;
+  }
+
+  const clientIp = req.body.ipAddress || req.headers['x-forwarded-for']?.split(',')[0]?.trim()
+    || req.socket?.remoteAddress || req.ip || 'Unknown IP';
+
+  const approval = await attendanceService.requestPunchApproval({
+    staffId: req.user.staffId,
+    punchType,
+    latLong: req.body.latLong,
+    gpsAccuracy: req.body.gpsAccuracy,
+    ipAddress: clientIp,
+    verdict
+  });
+
+  const label = verdict.settings?.Office_Label || 'the office';
+  const distance = verdict.distanceM != null ? `${verdict.distanceM} m` : 'outside the allowed area';
+
+  pushService.notifyAdmins({
+    type: pushService.NOTIFICATION_TYPES.ATTENDANCE_APPROVAL,
+    title: '📍 Out-of-Office Punch — Approval Needed',
+    body: `${approval.Staff_Name} wants to punch ${punchType === 'IN' ? 'in' : 'out'} at ${approval.Requested_Time}, ${distance} from ${label}.`,
+    url: `/?targetType=ATTENDANCE_APPROVAL&targetId=${approval.Approval_ID}`,
+    tag: `attendance-approval-${approval.Approval_ID}`
+  }, req.user.staffId);
+
+  // 409 with an actionable payload, the house convention. The `error` string must read well on its
+  // own because an un-updated client shows it verbatim in an alert.
+  res.status(409).json({
+    error: `You are ${distance} from ${label}. Your punch has been sent to Admin for approval.`,
+    code: 'OUTSIDE_GEOFENCE_PENDING_APPROVAL',
+    needsApproval: true,
+    approvalId: approval.Approval_ID,
+    punchType,
+    status: approval.Status,
+    requestedTime: approval.Requested_Time,
+    distanceM: verdict.distanceM ?? null,
+    accuracyM: approval.GPS_Accuracy_M,
+    radiusM: verdict.radiusM ?? null,
+    officeLabel: label,
+    pollUrl: `/api/attendance/approvals/${approval.Approval_ID}`
+  });
+  return null;
+}
+
 router.post('/attendance/punch-in', async (req, res) => {
   try {
+    const fence = await gatePunchOnFence(req, res, 'IN');
+    if (!fence) return;
+
     const clientIp = req.body.ipAddress || req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || req.ip || 'Unknown IP';
     const record = await attendanceService.punchIn({
       staffId: req.user.staffId,
       latLong: req.body.latLong,
       ipAddress: clientIp,
       overrideDate: req.body.overrideDate,
-      overrideTime: req.body.overrideTime
+      overrideTime: req.body.overrideTime,
+      gpsAccuracy: req.body.gpsAccuracy,
+      geofence: fence
     });
+
+    // Tell Admin who has arrived. Deliberately AFTER the record is written and NOT awaited into the
+    // response path — a push failure must never make a staff member's punch-in look like it failed.
+    const late = Number(record.Late_By_Minutes) || 0;
+    const away = fence.source === 'EXEMPT' && record.In_Distance_M != null
+      ? ` — ${record.In_Distance_M} m from office (field staff)` : '';
+    pushService.notifyAdmins({
+      type: pushService.NOTIFICATION_TYPES.ATTENDANCE_PUNCH,
+      title: late > 0 ? '🟠 Staff Punched In (Late)' : '🟢 Staff Punched In',
+      body: `${req.user.name || req.user.staffId} punched in at ${record.Punch_In_Time}${late > 0 ? ` — ${late} min late` : ''}${away}.`,
+      url: `/?targetType=ATTENDANCE&targetId=${record.Record_ID}`,
+      // Tagged per staff per day, so a punch-out replaces the punch-in card on the phone rather
+      // than stacking a second one for the same person.
+      tag: `attendance-${record.Staff_ID}-${record.Date}`
+    }, req.user.staffId);
+
     res.json(record);
   } catch (err) {
     res.status(400).json({ error: err.message || 'Failed to punch in' });
@@ -2537,17 +2783,140 @@ router.post('/attendance/punch-in', async (req, res) => {
 
 router.post('/attendance/punch-out', async (req, res) => {
   try {
+    const fence = await gatePunchOnFence(req, res, 'OUT');
+    if (!fence) return;
+
     const clientIp = req.body.ipAddress || req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || req.ip || 'Unknown IP';
     const result = await attendanceService.punchOut({
       staffId: req.user.staffId,
       latLong: req.body.latLong,
       ipAddress: clientIp,
       overrideDate: req.body.overrideDate,
-      overrideTime: req.body.overrideTime
+      overrideTime: req.body.overrideTime,
+      gpsAccuracy: req.body.gpsAccuracy,
+      geofence: fence
     });
+
+    const rec = result.record || {};
+    const hours = Number(result.dailySummary?.cumulativeHours) || 0;
+    const away = fence.source === 'EXEMPT' && rec.Out_Distance_M != null
+      ? ` — ${rec.Out_Distance_M} m from office (field staff)` : '';
+    pushService.notifyAdmins({
+      type: pushService.NOTIFICATION_TYPES.ATTENDANCE_PUNCH,
+      title: '🔴 Staff Punched Out',
+      body: `${req.user.name || req.user.staffId} punched out at ${rec.Punch_Out_Time || ''} — ${hours} hrs worked today${away}.`,
+      url: `/?targetType=ATTENDANCE&targetId=${rec.Record_ID || ''}`,
+      tag: `attendance-${req.user.staffId}-${result.dailySummary?.date || ''}`
+    }, req.user.staffId);
+
     res.json(result);
   } catch (err) {
     res.status(400).json({ error: err.message || 'Failed to punch out' });
+  }
+});
+
+// ─── OUT-OF-OFFICE PUNCH APPROVALS ─────────────────────────────────────────────────────────────
+// LITERAL paths first: /approvals must be registered before /:recordId siblings below, or ":recordId"
+// swallows the word.
+
+router.get('/attendance/approvals', async (req, res) => {
+  try {
+    const isAdmin = String(req.user.role || '').toLowerCase() === 'admin';
+    const rows = await attendanceService.listApprovals({
+      status: req.query.status,
+      // Staff see only their own; an Admin sees everyone's.
+      staffId: isAdmin ? undefined : req.user.staffId
+    });
+    res.json(rows.map(r => ({ ...r, mapsLink: geoFence.mapsLink(r.Lat_Long) })));
+  } catch (err) {
+    console.error('List attendance approvals error:', err);
+    res.status(500).json({ error: 'Failed to load approval requests' });
+  }
+});
+
+// The endpoint the waiting staff screen polls. Deliberately tiny — it is called every few seconds.
+router.get('/attendance/approvals/:approvalId', async (req, res) => {
+  try {
+    const row = await attendanceService.getApprovalById(req.params.approvalId);
+    if (!row) return res.status(404).json({ error: 'Approval request not found' });
+
+    const isAdmin = String(req.user.role || '').toLowerCase() === 'admin';
+    // Owner or Admin only — otherwise anyone could walk the ID space and read colleagues' locations.
+    if (!isAdmin && row.Staff_ID !== req.user.staffId) {
+      return res.status(403).json({ error: 'Not your request' });
+    }
+
+    res.json({
+      approvalId: row.Approval_ID,
+      status: row.Status,
+      punchType: row.Punch_Type,
+      requestedTime: row.Requested_Time,
+      distanceM: row.Distance_M ?? null,
+      rejectReason: row.Review_Reason || '',
+      resultingRecordId: row.Resulting_Record_ID || ''
+    });
+  } catch (err) {
+    console.error('Poll attendance approval error:', err);
+    res.status(500).json({ error: 'Failed to check the approval status' });
+  }
+});
+
+router.post('/attendance/approvals/:approvalId/approve', async (req, res) => {
+  try {
+    if (String(req.user.role || '').toLowerCase() !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    const out = await attendanceService.approvePunchApproval(req.params.approvalId, req.user);
+
+    pushService.notifyStaff(out.approval.Staff_ID, {
+      type: pushService.NOTIFICATION_TYPES.ATTENDANCE_APPROVAL,
+      title: '✅ Punch Approved',
+      body: `Your punch ${out.approval.Punch_Type === 'IN' ? 'in' : 'out'} at ${out.approval.Requested_Time} has been approved.`,
+      url: '/?targetType=ATTENDANCE',
+      tag: `attendance-approval-${out.approval.Approval_ID}`
+    });
+
+    res.json(out);
+  } catch (err) {
+    if (err.statusCode === 409) return res.status(409).json({ error: err.message });
+    console.error('Approve attendance request error:', err);
+    res.status(400).json({ error: err.message || 'Failed to approve the request' });
+  }
+});
+
+router.post('/attendance/approvals/:approvalId/reject', async (req, res) => {
+  try {
+    if (String(req.user.role || '').toLowerCase() !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    const row = await attendanceService.rejectPunchApproval(req.params.approvalId, req.user, req.body.reason);
+
+    pushService.notifyStaff(row.Staff_ID, {
+      type: pushService.NOTIFICATION_TYPES.ATTENDANCE_APPROVAL,
+      title: '❌ Punch Not Approved',
+      body: row.Review_Reason
+        ? `Your punch was not approved: ${row.Review_Reason}`
+        : 'You cannot punch from outside the office premises.',
+      url: '/?targetType=ATTENDANCE',
+      tag: `attendance-approval-${row.Approval_ID}`
+    });
+
+    res.json(row);
+  } catch (err) {
+    if (err.statusCode === 409) return res.status(409).json({ error: err.message });
+    console.error('Reject attendance request error:', err);
+    res.status(400).json({ error: err.message || 'Failed to reject the request' });
+  }
+});
+
+// Staff withdrawing their own pending request — they reached the office, or gave up waiting.
+router.post('/attendance/approvals/:approvalId/cancel', async (req, res) => {
+  try {
+    const row = await attendanceService.cancelPunchApproval(req.params.approvalId, req.user.staffId);
+    res.json(row || { cancelled: false });
+  } catch (err) {
+    if (err.statusCode === 403) return res.status(403).json({ error: err.message });
+    res.status(400).json({ error: err.message || 'Failed to cancel the request' });
   }
 });
 
@@ -2745,7 +3114,9 @@ const DEFAULT_NOTIFICATION_SETTINGS = {
   TASK_ASSIGNED: true,
   TASK_STAGE_HANDOFF: true,
   LEAVE_STATUS: true,
-  PHOTO_ICARD_APPROVAL: true
+  PHOTO_ICARD_APPROVAL: true,
+  ATTENDANCE_PUNCH: true,
+  ATTENDANCE_APPROVAL: true
 };
 
 router.get('/settings/notifications', async (req, res) => {
@@ -2766,17 +3137,127 @@ router.put('/settings/notifications', async (req, res) => {
     if (req.user.role !== 'Admin') {
       return res.status(403).json({ error: 'Admin access required' });
     }
-    const { TASK_ASSIGNED, TASK_STAGE_HANDOFF, LEAVE_STATUS, PHOTO_ICARD_APPROVAL } = req.body;
+    const {
+      TASK_ASSIGNED, TASK_STAGE_HANDOFF, LEAVE_STATUS, PHOTO_ICARD_APPROVAL,
+      ATTENDANCE_PUNCH, ATTENDANCE_APPROVAL
+    } = req.body;
     const updated = await sheetsService.saveNotificationSettings('DEFAULT', {
       TASK_ASSIGNED: Boolean(TASK_ASSIGNED),
       TASK_STAGE_HANDOFF: Boolean(TASK_STAGE_HANDOFF),
       LEAVE_STATUS: Boolean(LEAVE_STATUS),
-      PHOTO_ICARD_APPROVAL: Boolean(PHOTO_ICARD_APPROVAL)
+      PHOTO_ICARD_APPROVAL: Boolean(PHOTO_ICARD_APPROVAL),
+      ATTENDANCE_PUNCH: Boolean(ATTENDANCE_PUNCH),
+      ATTENDANCE_APPROVAL: Boolean(ATTENDANCE_APPROVAL)
     });
     res.json(updated);
   } catch (err) {
     console.error('Save notification settings error:', err);
     res.status(500).json({ error: 'Failed to save notification settings' });
+  }
+});
+
+// ─── OFFICE GEOFENCE (ATTENDANCE) SETTINGS ─────────────────────────────────────────────────────
+
+const DEFAULT_ATTENDANCE_SETTINGS = {
+  Geofence_Enabled: false,
+  Office_Latitude: null,
+  Office_Longitude: null,
+  Office_Radius_M: 200,
+  Office_Label: 'Head Office',
+  Accuracy_Grace: true,
+  Max_Accuracy_Grace_M: 150,
+  Approval_Expiry_Min: 240
+};
+
+/**
+ * The radius values offered in the settings screen.
+ *
+ * A dropdown of known-good distances rather than a bare number box: "how many metres is my office
+ * plot" is not a question anyone can answer accurately from memory, and a typo of one digit either
+ * blocks the whole workforce or disables the fence in practice. Custom is still allowed for a site
+ * that genuinely needs it, but the presets are what people should reach for.
+ */
+const RADIUS_PRESETS = [
+  { value: 50,   label: '50 m — single small office/shop', hint: 'Tight. Only for one small unit with good open-sky GPS.' },
+  { value: 100,  label: '100 m — one building', hint: 'Suits a single building with a small compound.' },
+  { value: 200,  label: '200 m — typical office plot (recommended)', hint: 'The safe default for most premises.' },
+  { value: 300,  label: '300 m — large plot / weak indoor GPS', hint: 'Use when staff punch from inside a large or steel-framed building.' },
+  { value: 500,  label: '500 m — industrial estate / campus', hint: 'Covers a workshop, yard and office together.' },
+  { value: 1000, label: '1 km — whole compound', hint: 'Very loose. Records location but rarely blocks anyone.' }
+];
+
+// Readable to any signed-in user: the staff punch screen needs the radius and label to explain
+// itself before a punch is attempted. Nothing here is sensitive — it is the company's own address.
+router.get('/settings/attendance', async (req, res) => {
+  try {
+    const settings = await sheetsService.getAttendanceSettings();
+    const merged = { ...DEFAULT_ATTENDANCE_SETTINGS, ...(settings || {}) };
+    res.json({
+      ...merged,
+      radiusPresets: RADIUS_PRESETS,
+      // Computed server-side so the UI never has to re-derive "is this thing actually on".
+      isActive: geoFence.isFenceConfigured(merged)
+    });
+  } catch (err) {
+    console.error('Fetch attendance settings error:', err);
+    res.status(500).json({ error: 'Failed to fetch attendance settings' });
+  }
+});
+
+router.put('/settings/attendance', async (req, res) => {
+  try {
+    if (req.user.role !== 'Admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+
+    const {
+      Geofence_Enabled, Office_Latitude, Office_Longitude, Office_Radius_M,
+      Office_Label, Accuracy_Grace, Max_Accuracy_Grace_M, Approval_Expiry_Min
+    } = req.body;
+
+    // Blank coordinates are allowed and mean "not configured yet" — that is the fail-open state,
+    // not an error. Only a value that is present AND unusable is rejected.
+    const hasLat = Office_Latitude !== null && Office_Latitude !== undefined && Office_Latitude !== '';
+    const hasLng = Office_Longitude !== null && Office_Longitude !== undefined && Office_Longitude !== '';
+    const lat = hasLat ? Number(Office_Latitude) : null;
+    const lng = hasLng ? Number(Office_Longitude) : null;
+
+    if (hasLat && (!Number.isFinite(lat) || Math.abs(lat) > 90)) {
+      return res.status(400).json({ error: 'Latitude must be a number between -90 and 90.' });
+    }
+    if (hasLng && (!Number.isFinite(lng) || Math.abs(lng) > 180)) {
+      return res.status(400).json({ error: 'Longitude must be a number between -180 and 180.' });
+    }
+
+    // The lock-everyone-out guard. Switching the fence on with no office saved would leave every
+    // staff member unable to punch in tomorrow morning, with nothing on screen explaining why.
+    if (Boolean(Geofence_Enabled) && (lat === null || lng === null)) {
+      return res.status(400).json({
+        error: 'Set the office location before switching the geofence on — otherwise nobody would be able to punch in.'
+      });
+    }
+
+    // Clamped, not rejected: a slider/dropdown should never hard-fail. Below 25m no GPS can reliably
+    // satisfy the fence; above 5km it stops meaning anything.
+    const radius = Math.min(5000, Math.max(25, Number(Office_Radius_M) || 200));
+
+    const updated = await sheetsService.saveAttendanceSettings('DEFAULT', {
+      Geofence_Enabled: Boolean(Geofence_Enabled),
+      Office_Latitude: lat,
+      Office_Longitude: lng,
+      Office_Radius_M: radius,
+      Office_Label: String(Office_Label || 'Head Office').trim(),
+      Accuracy_Grace: Accuracy_Grace !== false,
+      Max_Accuracy_Grace_M: Math.min(500, Math.max(0, Number(Max_Accuracy_Grace_M) || 150)),
+      Approval_Expiry_Min: Math.min(1440, Math.max(15, Number(Approval_Expiry_Min) || 240)),
+      Updated_By: req.user.staffId || 'SYSTEM',
+      Updated_At: new Date().toISOString()
+    });
+
+    res.json({ ...updated, radiusPresets: RADIUS_PRESETS, isActive: geoFence.isFenceConfigured(updated) });
+  } catch (err) {
+    console.error('Save attendance settings error:', err);
+    res.status(500).json({ error: 'Failed to save attendance settings' });
   }
 });
 
@@ -3556,6 +4037,43 @@ router.get('/quotations/:id', async (req, res) => {
   }
 });
 
+// Reminder cadence is editable even after a quotation is issued (Sent/RevisionRequested/etc), which
+// updateQuotation() deliberately refuses ("can no longer be edited") to protect pricing/line items on
+// an issued document. This route only ever touches the reminder-cadence fields, never pricing, so
+// bypassing that guard here is safe and scoped.
+router.patch('/quotations/:id/reminder-settings', async (req, res) => {
+  try {
+    const role = String(req.user.role || '');
+    if (role !== 'Admin' && role !== 'Sales') {
+      return res.status(403).json({ error: 'Only Admin or Sales staff can edit reminder settings' });
+    }
+
+    const existing = await sheetsService.getQuotationById(req.params.id);
+    if (!existing) return res.status(404).json({ error: 'Quotation not found' });
+
+    const { followUpIntervalDays, nextReminderDate } = req.body;
+    const updateData = {};
+    if (followUpIntervalDays !== undefined) {
+      const days = Number(followUpIntervalDays);
+      if (!Number.isFinite(days) || days < 1) {
+        return res.status(400).json({ error: 'followUpIntervalDays must be a positive number' });
+      }
+      updateData.Follow_Up_Interval_Days = days;
+    }
+    if (nextReminderDate !== undefined) updateData.Next_Reminder_Date = nextReminderDate;
+
+    if (Object.keys(updateData).length === 0) {
+      return res.status(400).json({ error: 'Nothing to update' });
+    }
+
+    const updated = await sheetsService.updateRow('Quotation_Master', 'Quotation_ID', req.params.id, updateData);
+    res.json(updated);
+  } catch (err) {
+    console.error('PATCH /quotations/:id/reminder-settings error:', err);
+    res.status(500).json({ error: 'Failed to update reminder settings' });
+  }
+});
+
 router.get('/quotations/:rootId/history', async (req, res) => {
   try {
     res.json(await sheetsService.getQuotationRevisions(req.params.rootId));
@@ -3780,8 +4298,12 @@ router.post('/tasks/:id/close-quotation-task', async (req, res) => {
 
     const updated = await sheetsService.updateRow('Task_Master', 'Task_ID', req.params.id, updateData);
 
-    if (task.Quotation_ID && outcome === 'Lost') {
-      await quotationEngine.rejectQuotation(task.Quotation_ID, reasonForOrderLost, req.user);
+    if (task.Quotation_ID) {
+      if (outcome === 'Lost') {
+        await quotationEngine.rejectQuotation(task.Quotation_ID, reasonForOrderLost, req.user);
+      } else {
+        await quotationEngine.markQuotationWon(task.Quotation_ID, req.user);
+      }
     }
 
     res.json(updated);
@@ -3810,6 +4332,34 @@ router.get('/analytics/order-lost', async (req, res) => {
   } catch (err) {
     console.error('GET /analytics/order-lost error:', err);
     res.status(500).json({ error: 'Failed to build order-lost analytics' });
+  }
+});
+
+router.get('/analytics/order-won', async (req, res) => {
+  try {
+    const [tasks, customers] = await Promise.all([
+      sheetsService.getAllTasks(),
+      sheetsService.getAllCustomers()
+    ]);
+    const customerById = new Map(customers.map(c => [c.Customer_ID, c]));
+    const won = tasks.filter(t => t.Closed_Outcome === 'Won');
+    res.json({
+      totalWon: won.length,
+      totalWonValue: won.reduce((s, t) => s + (Number(t.Quote_Amount) || 0), 0),
+      rows: won
+        .map(t => ({
+          taskId: t.Task_ID,
+          quotationId: t.Quotation_ID,
+          quoteNo: t.Quote_No || '',
+          customerName: customerById.get(t.Customer_ID)?.Company_Name || (t.Customer_ID ? `Customer (${t.Customer_ID})` : 'General Client'),
+          amount: Number(t.Quote_Amount) || 0,
+          closedAt: t.Closed_At || ''
+        }))
+        .sort((a, b) => new Date(b.closedAt) - new Date(a.closedAt))
+    });
+  } catch (err) {
+    console.error('GET /analytics/order-won error:', err);
+    res.status(500).json({ error: 'Failed to build order-won analytics' });
   }
 });
 

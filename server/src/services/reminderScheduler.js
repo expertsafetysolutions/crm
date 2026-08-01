@@ -22,7 +22,8 @@ const JOBS = {
   PAYMENT_DUE: 'payment_due',
   REFILLING_DUE: 'refilling_due',
   ANNUAL_PROSPECT: 'annual_prospect',
-  PO_REMINDER: 'po_reminder'
+  PO_REMINDER: 'po_reminder',
+  CERTIFICATE_DUE: 'certificate_due'
 };
 
 /** Current hour (0-23) on the office's clock, regardless of where the server runs. */

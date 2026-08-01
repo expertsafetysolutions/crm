@@ -5,7 +5,15 @@ const NOTIFICATION_TYPES = {
   TASK_ASSIGNED: 'TASK_ASSIGNED',
   TASK_STAGE_HANDOFF: 'TASK_STAGE_HANDOFF',
   LEAVE_STATUS: 'LEAVE_STATUS',
-  PHOTO_ICARD_APPROVAL: 'PHOTO_ICARD_APPROVAL'
+  PHOTO_ICARD_APPROVAL: 'PHOTO_ICARD_APPROVAL',
+  // Admin-facing: who arrived, when, and how late. Unlike the types above this one fans out to
+  // every Admin rather than to the person the event is about — the staff member punching in
+  // already knows they punched in.
+  ATTENDANCE_PUNCH: 'ATTENDANCE_PUNCH',
+  // Its own type rather than riding on ATTENDANCE_PUNCH: an Admin who has muted routine punch
+  // chatter must STILL be interrupted by something that is actively blocking someone from starting
+  // work. Also carries the staff-facing approve/reject reply.
+  ATTENDANCE_APPROVAL: 'ATTENDANCE_APPROVAL'
 };
 
 let vapidConfigured = false;
@@ -63,4 +71,30 @@ async function notifyStaff(staffId, { type, title, body, url, tag }) {
   }
 }
 
-module.exports = { NOTIFICATION_TYPES, notifyStaff, isEnabled };
+/**
+ * Sends to every Admin, skipping `exceptStaffId` (an Admin punching in should not be told about
+ * their own punch). Role is compared lower-cased because Role is free-form on Staff_Master and
+ * 'Admin'/'admin' both occur — an exact match would silently notify nobody.
+ *
+ * Failures are swallowed per-recipient by notifyStaff, so one Admin with a dead subscription can
+ * never stop the others being told.
+ */
+async function notifyAdmins({ type, title, body, url, tag }, exceptStaffId) {
+  if (!vapidConfigured) return;
+  try {
+    if (!(await isEnabled(type))) return;
+
+    const allStaff = await sheetsService.getAllStaff();
+    const admins = allStaff.filter(s => (
+      String(s.Role || '').trim().toLowerCase() === 'admin'
+      && s.Staff_ID !== exceptStaffId
+      && s.Status !== 'Inactive'
+    ));
+
+    await Promise.all(admins.map(a => notifyStaff(a.Staff_ID, { type, title, body, url, tag })));
+  } catch (e) {
+    console.error('[pushService] notifyAdmins error:', e);
+  }
+}
+
+module.exports = { NOTIFICATION_TYPES, notifyStaff, notifyAdmins, isEnabled };

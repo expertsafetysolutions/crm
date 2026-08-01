@@ -26,7 +26,8 @@ const STATUS = {
   REQUIREMENT_CHANGE_REQUESTED: 'RequirementChangeRequested',
   REJECTED: 'Rejected',
   EXPIRED: 'Expired',
-  CONVERTED: 'Converted'
+  CONVERTED: 'Converted',
+  WON: 'Won'
 };
 
 // Coarse Task_Master.Stage milestones this engine drives. Every one of these must also exist in
@@ -425,6 +426,24 @@ async function rejectQuotation(quotationId, reason, actor) {
 }
 
 /**
+ * Marks a quotation Won — the counterpart to rejectQuotation. WON is deliberately excluded from
+ * OPEN_STATUSES (like REJECTED), so this is what stops runQuotationFollowUpReminders from ever
+ * targeting the row again. Next_Reminder_Date is cleared too, same belt-and-suspenders pattern as
+ * expireStaleQuotations() and the customer-portal ACCEPT action.
+ */
+async function markQuotationWon(quotationId, actor) {
+  const existing = await sheetsService.getQuotationById(quotationId);
+  if (!existing) throw new Error(`Quotation ${quotationId} not found`);
+  const updated = await sheetsService.updateRow('Quotation_Master', 'Quotation_ID', quotationId, {
+    Status: STATUS.WON,
+    Next_Reminder_Date: '',
+    Won_By: actor?.staffId || 'SYSTEM',
+    Won_At: new Date().toISOString()
+  });
+  return updated;
+}
+
+/**
  * Creates the next revision as a NEW row, leaving the parent untouched (parent is marked Revised
  * so it drops out of follow-up queries but stays fully readable as history).
  */
@@ -784,6 +803,7 @@ module.exports = {
   updateQuotation,
   approveQuotation,
   rejectQuotation,
+  markQuotationWon,
   createRevision,
   markDispatched,
   applyCustomerAction,

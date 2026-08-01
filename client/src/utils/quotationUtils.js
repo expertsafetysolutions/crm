@@ -15,7 +15,8 @@ export const QUOTATION_STATUS_META = {
   RequirementChangeRequested: { label: 'Change Requested', cls: 'bg-orange-100 text-orange-700 border-orange-200' },
   Rejected: { label: 'Rejected', cls: 'bg-rose-100 text-rose-700 border-rose-200' },
   Expired: { label: 'Expired', cls: 'bg-rose-50 text-rose-600 border-rose-200' },
-  Converted: { label: 'Converted', cls: 'bg-indigo-100 text-indigo-700 border-indigo-200' }
+  Converted: { label: 'Converted', cls: 'bg-indigo-100 text-indigo-700 border-indigo-200' },
+  Won: { label: 'Won', cls: 'bg-green-100 text-green-800 border-green-300' }
 };
 
 export const ORDER_LOST_REASONS = ['Price High', 'Competitor', 'Delay', 'Requirement Cancelled', 'Other'];

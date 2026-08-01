@@ -14,6 +14,8 @@ const StaffDashboard = lazy(() => import('./pages/StaffDashboard'));
 const AdminDashboard = lazy(() => import('./pages/AdminDashboard'));
 const CertificateGeneratorPage = lazy(() => import('./pages/CertificateGeneratorPage'));
 const CertificateComplianceGeneratorPage = lazy(() => import('./pages/CertificateComplianceGeneratorPage'));
+const CertificateReportPage = lazy(() => import('./pages/CertificateReportPage'));
+const CertificateDueReportPage = lazy(() => import('./pages/CertificateDueReportPage'));
 const DocSettingsPage = lazy(() => import('./pages/DocSettingsPage'));
 const FieldVisitPage = lazy(() => import('./pages/FieldVisitPage'));
 const QuotationListPage = lazy(() => import('./pages/QuotationListPage'));
@@ -178,6 +180,8 @@ export default function App() {
               {/* Legacy fire-extinguisher aliases, kept so existing links keep working */}
               <Route path="/certificate/new" element={<CertificateGeneratorPage />} />
               <Route path="/certificate/:reportId" element={<CertificateGeneratorPage />} />
+              <Route path="/certificate-compliance/report" element={<CertificateReportPage />} />
+              <Route path="/certificate-compliance/due-report" element={<CertificateDueReportPage />} />
               <Route path="/certificate-compliance/new" element={<CertificateComplianceGeneratorPage />} />
               <Route path="/certificate-compliance/task/:taskId" element={<CertificateComplianceGeneratorPage />} />
               {/* One field visit = one client, every equipment family searchable together */}

@@ -710,10 +710,35 @@ export default function AdminDashboard() {
     TASK_ASSIGNED: true,
     TASK_STAGE_HANDOFF: true,
     LEAVE_STATUS: true,
-    PHOTO_ICARD_APPROVAL: true
+    PHOTO_ICARD_APPROVAL: true,
+    ATTENDANCE_PUNCH: true
   });
   const [isLoadingNotificationSettings, setIsLoadingNotificationSettings] = useState(false);
   const [isSavingNotificationSettings, setIsSavingNotificationSettings] = useState(false);
+
+  // Office geofence — where staff are allowed to punch in from.
+  const [geofenceSettings, setGeofenceSettings] = useState({
+    Geofence_Enabled: false,
+    Office_Latitude: null,
+    Office_Longitude: null,
+    Office_Radius_M: 200,
+    Office_Label: 'Head Office',
+    Accuracy_Grace: true,
+    Max_Accuracy_Grace_M: 150,
+    Approval_Expiry_Min: 240,
+    radiusPresets: [],
+    isActive: false
+  });
+  // Out-of-office punch requests waiting on a decision.
+  const [punchApprovals, setPunchApprovals] = useState([]);
+  const [decidingApprovalId, setDecidingApprovalId] = useState(null);
+  const [isLoadingGeofence, setIsLoadingGeofence] = useState(false);
+  const [isSavingGeofence, setIsSavingGeofence] = useState(false);
+  const [geofenceError, setGeofenceError] = useState('');
+  const [capturingOfficeGps, setCapturingOfficeGps] = useState(false);
+  const [officeGpsAccuracy, setOfficeGpsAccuracy] = useState(null);
+  // True when the radius in the form is not one of the presets — keeps the custom box open.
+  const [useCustomRadius, setUseCustomRadius] = useState(false);
 
   // Dynamic Task Tags (admin-editable, multi-select labels e.g. "New Inquiry", "Site Visit")
   const [tags, setTags] = useState([]);
@@ -1614,6 +1639,111 @@ export default function AdminDashboard() {
     }
   };
 
+  const loadPunchApprovals = async () => {
+    try {
+      const res = await fetch('/api/attendance/approvals?status=Pending', {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (res.ok) setPunchApprovals(await res.json());
+    } catch (err) {
+      console.error('Failed to load punch approvals:', err);
+    }
+  };
+
+  /**
+   * Approve or reject one out-of-office punch.
+   *
+   * A 409 here is not a failure to report as an error — it means another Admin already decided, or
+   * the person walked in and punched normally. Refreshing the list is the right response.
+   */
+  const handlePunchApprovalDecision = async (approvalId, decision) => {
+    let reason = '';
+    if (decision === 'reject') {
+      reason = window.prompt('Reason for rejecting (optional — the staff member will see this):') || '';
+    }
+    setDecidingApprovalId(approvalId);
+    try {
+      const res = await fetch(`/api/attendance/approvals/${approvalId}/${decision}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ reason })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        if (res.status === 409) alert(data.error);
+        else throw new Error(data.error || 'Could not record that decision');
+      }
+      await loadPunchApprovals();
+      await loadAdminData();
+    } catch (err) {
+      alert(err.message);
+    } finally {
+      setDecidingApprovalId(null);
+    }
+  };
+
+  const loadGeofenceSettings = async () => {
+    try {
+      setIsLoadingGeofence(true);
+      const res = await fetch('/api/settings/attendance', { headers: { Authorization: `Bearer ${token}` } });
+      if (res.ok) {
+        const data = await res.json();
+        setGeofenceSettings(data);
+        // Reopen the custom box when the saved radius is not one of the presets, so an unusual
+        // value stays visible and editable instead of silently snapping to the nearest preset.
+        const presets = (data.radiusPresets || []).map(p => p.value);
+        setUseCustomRadius(presets.length > 0 && !presets.includes(Number(data.Office_Radius_M)));
+      }
+    } catch (err) {
+      console.error('Failed to load geofence settings:', err);
+    } finally {
+      setIsLoadingGeofence(false);
+    }
+  };
+
+  /**
+   * Fills the office coordinates from the Admin's own phone.
+   *
+   * Deliberately stricter than the punch screen (maxAccuracy 100 vs 300): this coordinate is saved
+   * once and every future punch is measured against it, so a sloppy capture poisons every decision
+   * afterwards. Twenty seconds of waiting, one time, is a good trade.
+   */
+  const handleCaptureOfficeLocation = async () => {
+    setGeofenceError('');
+    setCapturingOfficeGps(true);
+    try {
+      const pos = await getAccurateGpsPosition({ timeout: 20000, maxAccuracy: 100 });
+      setGeofenceSettings(s => ({ ...s, Office_Latitude: pos.latitude, Office_Longitude: pos.longitude }));
+      setOfficeGpsAccuracy(pos.accuracy);
+    } catch (err) {
+      setGeofenceError(err.message || 'Could not read your location.');
+    } finally {
+      setCapturingOfficeGps(false);
+    }
+  };
+
+  const handleSaveGeofenceSettings = async () => {
+    setGeofenceError('');
+    setIsSavingGeofence(true);
+    try {
+      const res = await fetch('/api/settings/attendance', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify(geofenceSettings)
+      });
+      const data = await res.json();
+      // The server refuses to enable the fence with no office saved — surface that message rather
+      // than a generic failure, because it names exactly what the Admin must do next.
+      if (!res.ok) throw new Error(data.error || 'Could not save the geofence settings.');
+      setGeofenceSettings(data);
+      alert('Office location saved.');
+    } catch (err) {
+      setGeofenceError(err.message);
+    } finally {
+      setIsSavingGeofence(false);
+    }
+  };
+
   const handleRestoreCertificateFromBin = async (cert) => {
     const guid = cert.verificationGuid || cert.Verification_GUID || cert.Certificate_No || cert.certificateNo;
     try {
@@ -1662,6 +1792,8 @@ export default function AdminDashboard() {
 
   useEffect(() => {
     if (activeTab === 'PUSH_SETTINGS') loadNotificationSettings();
+    if (activeTab === 'GEOFENCE') loadGeofenceSettings();
+    if (activeTab === 'ATTENDANCE') loadPunchApprovals();
   }, [activeTab]);
 
   useEffect(() => {
@@ -1776,6 +1908,13 @@ export default function AdminDashboard() {
         setActiveTab('STAFF');
         setTimeout(() => scrollToSection('section-staff-roster'), 150);
       } else if (n.targetType === 'ADVANCE') {
+        setActiveTab('ATTENDANCE');
+        setTimeout(() => scrollToSection('section-attendance-logs'), 150);
+      } else if (n.targetType === 'ATTENDANCE_APPROVAL') {
+        setActiveTab('ATTENDANCE');
+        setTimeout(() => scrollToSection('section-punch-approvals'), 150);
+      } else if (n.targetType === 'ATTENDANCE') {
+        // Previously unhandled, so tapping an attendance notification did nothing at all.
         setActiveTab('ATTENDANCE');
         setTimeout(() => scrollToSection('section-attendance-logs'), 150);
       } else if (n.targetType === 'SERVICE_REPORT') {
@@ -3139,7 +3278,8 @@ export default function AdminDashboard() {
             { id: 'CERTIFICATES', label: '6. Certificate Module', shortLabel: '6. Certificates', icon: Award },
             { id: 'SERVICE_REPORTS', label: '7. Service Reports Queue', shortLabel: '7. Reports', icon: FileCheck },
             { id: 'RECYCLE_BIN', label: '8. Recycle Bin', shortLabel: '8. Recycle Bin', icon: Trash2 },
-            { id: 'PUSH_SETTINGS', label: '9. Push Notifications', shortLabel: '9. Notifications', icon: Bell }
+            { id: 'PUSH_SETTINGS', label: '9. Push Notifications', shortLabel: '9. Notifications', icon: Bell },
+            { id: 'GEOFENCE', label: '10. Office Location & Geofence', shortLabel: '10. Geofence', icon: MapPin }
           ].map(tab => {
             const Icon = tab.icon;
             return (
@@ -4386,6 +4526,27 @@ export default function AdminDashboard() {
                         title="Allow this staff member to generate Certificates"
                       >
                         <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all ${staff.Can_Access_Certificates ? 'left-[18px]' : 'left-0.5'}`} />
+                      </button>
+                    </div>
+
+                    {/* Field staff work away from the office all day; requiring approval for every
+                        punch would be daily friction for no gain. Their location is still recorded. */}
+                    <div className="flex items-center justify-between p-2 rounded-xl bg-slate-50 border border-slate-200/80">
+                      <span className="min-w-0 pr-2">
+                        <span className="block text-xs font-semibold text-slate-700">Punch from anywhere</span>
+                        <span className="block text-[10px] text-slate-500 leading-snug">
+                          {staff.Geofence_Exempt
+                            ? 'Field staff — punches without approval, location still recorded.'
+                            : 'Office only — punching outside needs your approval.'}
+                        </span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleUpdateStaffModuleAccess(staff.Staff_ID, 'Geofence_Exempt', !staff.Geofence_Exempt)}
+                        className={`relative w-10 h-6 rounded-full transition shrink-0 ${staff.Geofence_Exempt ? 'bg-emerald-500' : 'bg-slate-300'}`}
+                        title="Allow this staff member to punch in from outside the office without approval"
+                      >
+                        <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all ${staff.Geofence_Exempt ? 'left-[18px]' : 'left-0.5'}`} />
                       </button>
                     </div>
                   </div>
@@ -6135,6 +6296,81 @@ export default function AdminDashboard() {
       )}
 
       {(activeTab === 'ATTENDANCE' || (activeTab === 'OVERVIEW' && expandedOverviewModule === 'ATTENDANCE')) && (
+        <>
+        {/* Out-of-office punch approvals. Rendered only when there is something to decide, so the
+            screen does not carry a permanently empty box. Cards, not a table — this is read on a
+            phone and an eight-column table is unusable at 360px. */}
+        {punchApprovals.length > 0 && (
+          <div id="section-punch-approvals" className="bg-white border border-amber-300 rounded-2xl p-4 sm:p-5 shadow-sm space-y-3 mb-6">
+            <div className="flex items-center gap-2">
+              <MapPin className="w-4 h-4 text-amber-600" />
+              <h3 className="text-sm font-extrabold text-slate-900">
+                Out-of-Office Punch Approvals
+              </h3>
+              <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 text-[10px] font-extrabold">
+                {punchApprovals.length}
+              </span>
+            </div>
+            <p className="text-[11px] text-slate-500 -mt-1">
+              Someone is waiting to start or end work. Approving records the punch at the time they
+              asked, not the time you approve.
+            </p>
+
+            {punchApprovals.map(a => (
+              <div key={a.Approval_ID} className="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-2">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="text-xs font-extrabold text-slate-900 truncate">{a.Staff_Name}</p>
+                    <p className="text-[11px] text-slate-500">
+                      Punch {a.Punch_Type === 'IN' ? 'In' : 'Out'} at <b className="text-slate-700">{a.Requested_Time}</b> · {a.Requested_Date}
+                    </p>
+                  </div>
+                  <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-800 text-[10px] font-extrabold shrink-0">
+                    {a.Distance_M != null ? `${a.Distance_M} m away` : 'Location unknown'}
+                  </span>
+                </div>
+
+                <div className="text-[11px] text-slate-600 space-y-0.5">
+                  {a.Address_Text && <p className="leading-snug">📍 {a.Address_Text}</p>}
+                  <p>
+                    Allowed radius: {a.Office_Radius_M ?? '—'} m
+                    {a.GPS_Accuracy_M != null && (
+                      <span className={Number(a.GPS_Accuracy_M) > 100 ? 'text-amber-700 font-bold' : ''}>
+                        {' '}· GPS ±{a.GPS_Accuracy_M} m
+                      </span>
+                    )}
+                  </p>
+                  {a.mapsLink && (
+                    <a href={a.mapsLink} target="_blank" rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 text-indigo-600 hover:underline font-semibold">
+                      <MapPin className="w-3 h-3" /> Open exact spot on Google Maps
+                    </a>
+                  )}
+                </div>
+
+                <div className="flex gap-2 pt-1">
+                  <button
+                    type="button"
+                    disabled={decidingApprovalId === a.Approval_ID}
+                    onClick={() => handlePunchApprovalDecision(a.Approval_ID, 'approve')}
+                    className="flex-1 min-h-[44px] rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-extrabold transition disabled:opacity-50"
+                  >
+                    {decidingApprovalId === a.Approval_ID ? 'Saving…' : 'Approve'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={decidingApprovalId === a.Approval_ID}
+                    onClick={() => handlePunchApprovalDecision(a.Approval_ID, 'reject')}
+                    className="flex-1 min-h-[44px] rounded-xl border border-rose-300 text-rose-700 hover:bg-rose-50 text-xs font-extrabold transition disabled:opacity-50"
+                  >
+                    Reject
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
         <div id="section-leave-queue" className="space-y-6">
           {/* Section 1: Leave Approval Queue */}
           <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm">
@@ -6676,12 +6912,31 @@ export default function AdminDashboard() {
             </div>
           </div>
         </div>
+        </>
       )}
 
       {/* TAB CONTENT 6: CERTIFICATE MODULE - FIRE SAFETY & IS:2190 COMPLIANCE CERTIFICATES */}
       {(activeTab === 'CERTIFICATES' || (activeTab === 'OVERVIEW' && expandedOverviewModule === 'CERTIFICATES')) && (
         <div className="space-y-6">
-          <div className="flex justify-end">
+          <div className="flex flex-wrap justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => navigate('/certificate-compliance/report')}
+              className="flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold rounded-lg border border-dashed border-slate-300 text-slate-700 bg-slate-50 hover:bg-slate-100 transition"
+              title="Search and filter every generated certificate"
+            >
+              <FileText className="w-3 h-3" />
+              <span>Certificate Report</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => navigate('/certificate-compliance/due-report')}
+              className="flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold rounded-lg border border-dashed border-rose-300 text-rose-700 bg-rose-50 hover:bg-rose-100 transition"
+              title="Equipment due for renewal soon, with reminder scheduling"
+            >
+              <AlertTriangle className="w-3 h-3" />
+              <span>Due Certificate Report</span>
+            </button>
             <button
               type="button"
               onClick={() => { loadCertificateTypes(); setShowCertTypeManagerModal(true); }}
@@ -7059,7 +7314,9 @@ export default function AdminDashboard() {
                   { key: 'TASK_ASSIGNED', label: 'Task Assigned', desc: 'When a new task is created for a staff member, or a task is reassigned to them.' },
                   { key: 'TASK_STAGE_HANDOFF', label: 'Task Stage Hand-off', desc: 'When a task moves to the next workflow stage and lands on a staff member’s desk (e.g. Sales → Production).' },
                   { key: 'LEAVE_STATUS', label: 'Leave Approved / Rejected', desc: 'When an Admin approves or rejects a staff member’s leave request.' },
-                  { key: 'PHOTO_ICARD_APPROVAL', label: 'Photo / I-Card Approval', desc: 'When an Admin approves or rejects a staff member’s profile photo or I-Card update request.' }
+                  { key: 'PHOTO_ICARD_APPROVAL', label: 'Photo / I-Card Approval', desc: 'When an Admin approves or rejects a staff member’s profile photo or I-Card update request.' },
+                  { key: 'ATTENDANCE_PUNCH', label: 'Staff Punch In / Punch Out', desc: 'Alerts every Admin the moment a staff member punches in or out, with the time and how late they were. Goes to Admins only — staff are not notified about each other.' },
+                  { key: 'ATTENDANCE_APPROVAL', label: 'Out-of-Office Punch Approval', desc: 'Alerts you when someone tries to punch from outside the office and is waiting on your decision — and tells them the outcome. Separate from the setting above, because a person blocked from starting work should still reach you even if routine punch alerts are muted.' }
                 ].map(item => {
                   const enabled = !!notificationSettings[item.key];
                   return (
@@ -7089,6 +7346,269 @@ export default function AdminDashboard() {
               </div>
             )}
           </div>
+        </div>
+      )}
+
+      {activeTab === 'GEOFENCE' && (
+        <div className="space-y-4">
+          <div className="bg-gradient-to-r from-slate-900 via-emerald-950 to-slate-900 text-white rounded-2xl p-6 shadow-xl relative overflow-hidden">
+            <div className="absolute right-0 top-0 bottom-0 w-1/3 bg-white/5 transform skew-x-12 pointer-events-none"></div>
+            <div className="relative z-10">
+              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/30 border border-emerald-300/40 text-emerald-200 text-xs font-bold mb-2">
+                <MapPin className="w-3.5 h-3.5 text-emerald-300" />
+                <span>Attendance Location Rules</span>
+              </div>
+              <h2 className="text-xl sm:text-2xl font-black text-white">📍 Office Location &amp; Geofence</h2>
+              <p className="text-emerald-200 text-xs sm:text-sm mt-1 max-w-2xl">
+                Set where the office is, and how far from it staff may punch in. Anyone outside the
+                radius is blocked and sent to you for approval — except staff you have marked as
+                field workers, who punch through freely.
+              </p>
+            </div>
+          </div>
+
+          {isLoadingGeofence ? (
+            <div className="bg-white rounded-2xl border border-slate-200 px-4 py-12 text-xs text-slate-400 text-center font-bold">Loading…</div>
+          ) : (
+            <>
+              {/* The fail-open state, made visible. An Admin must never believe the fence is on
+                  when it is not — that is how people assume they are protected and are not. */}
+              {!geofenceSettings.isActive && (
+                <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 flex items-start gap-3">
+                  <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                  <div className="text-xs text-amber-900">
+                    <p className="font-extrabold text-sm">Geofence is not active</p>
+                    <p className="mt-1">
+                      {geofenceSettings.Office_Latitude == null
+                        ? 'No office location has been set yet, so attendance is working exactly as before — staff can punch from anywhere.'
+                        : 'The office is saved but the geofence switch is off. Attendance is working exactly as before.'}
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {geofenceError && (
+                <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4 flex items-start gap-3">
+                  <AlertTriangle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
+                  <p className="text-xs text-rose-800 font-semibold">{geofenceError}</p>
+                </div>
+              )}
+
+              {/* 1. Where the office is */}
+              <div className="bg-white rounded-2xl border border-slate-200 p-4 sm:p-5 shadow-xs space-y-3">
+                <div>
+                  <h3 className="text-sm font-extrabold text-slate-900">1. Where is your office?</h3>
+                  <p className="text-[11px] text-slate-500 mt-0.5">
+                    Stand inside the office and tap the button below — it fills both boxes for you.
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleCaptureOfficeLocation}
+                  disabled={capturingOfficeGps}
+                  className="w-full min-h-[48px] rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-sm font-extrabold flex items-center justify-center gap-2 transition disabled:opacity-50"
+                >
+                  <MapPin className="w-4 h-4" />
+                  {capturingOfficeGps ? 'Reading GPS… (up to 20s)' : 'Use my current location'}
+                </button>
+
+                {officeGpsAccuracy !== null && (
+                  <p className="text-[11px] text-emerald-700 font-bold text-center">
+                    ✓ Captured with ±{officeGpsAccuracy} m accuracy
+                  </p>
+                )}
+
+                <div className="grid grid-cols-2 gap-3">
+                  <label className="block">
+                    <span className="block text-[10px] font-extrabold uppercase tracking-wide text-slate-400 mb-1">Latitude</span>
+                    <input
+                      type="number" step="0.000001" inputMode="decimal" className="jc-input"
+                      placeholder="22.307200"
+                      value={geofenceSettings.Office_Latitude ?? ''}
+                      onChange={e => setGeofenceSettings(s => ({ ...s, Office_Latitude: e.target.value === '' ? null : e.target.value }))}
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="block text-[10px] font-extrabold uppercase tracking-wide text-slate-400 mb-1">Longitude</span>
+                    <input
+                      type="number" step="0.000001" inputMode="decimal" className="jc-input"
+                      placeholder="73.181200"
+                      value={geofenceSettings.Office_Longitude ?? ''}
+                      onChange={e => setGeofenceSettings(s => ({ ...s, Office_Longitude: e.target.value === '' ? null : e.target.value }))}
+                    />
+                  </label>
+                </div>
+
+                <label className="block">
+                  <span className="block text-[10px] font-extrabold uppercase tracking-wide text-slate-400 mb-1">Office name</span>
+                  <input
+                    className="jc-input" placeholder="Head Office"
+                    value={geofenceSettings.Office_Label || ''}
+                    onChange={e => setGeofenceSettings(s => ({ ...s, Office_Label: e.target.value }))}
+                  />
+                </label>
+
+                {/* Confirm the pin before saving — a transposed lat/lng puts the office in the
+                    Indian Ocean and turns every single punch into an approval request. */}
+                {geofenceSettings.Office_Latitude != null && geofenceSettings.Office_Longitude != null && (
+                  <a
+                    href={`https://maps.google.com/?q=${geofenceSettings.Office_Latitude},${geofenceSettings.Office_Longitude}`}
+                    target="_blank" rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 text-xs font-bold text-indigo-600 hover:underline"
+                  >
+                    <MapPin className="w-3.5 h-3.5" /> Preview this pin on Google Maps
+                  </a>
+                )}
+              </div>
+
+              {/* 2. How far is acceptable — presets, per the request */}
+              <div className="bg-white rounded-2xl border border-slate-200 p-4 sm:p-5 shadow-xs space-y-3">
+                <div>
+                  <h3 className="text-sm font-extrabold text-slate-900">2. How far from the office is acceptable?</h3>
+                  <p className="text-[11px] text-slate-500 mt-0.5">
+                    Staff punching within this distance are allowed straight through.
+                  </p>
+                </div>
+
+                <div className="space-y-1.5">
+                  {(geofenceSettings.radiusPresets || []).map(p => {
+                    const selected = !useCustomRadius && Number(geofenceSettings.Office_Radius_M) === p.value;
+                    return (
+                      <button
+                        key={p.value}
+                        type="button"
+                        onClick={() => { setUseCustomRadius(false); setGeofenceSettings(s => ({ ...s, Office_Radius_M: p.value })); }}
+                        className={`w-full text-left px-3 py-2.5 rounded-xl border transition min-h-[48px] ${
+                          selected ? 'bg-emerald-50 border-emerald-300 ring-1 ring-emerald-300' : 'bg-white border-slate-200 hover:bg-slate-50'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className={`w-4 h-4 rounded-full border-2 shrink-0 ${selected ? 'border-emerald-600 bg-emerald-600' : 'border-slate-300'}`} />
+                          <span className={`text-xs font-extrabold ${selected ? 'text-emerald-900' : 'text-slate-700'}`}>{p.label}</span>
+                        </div>
+                        <p className="text-[11px] text-slate-500 mt-0.5 ml-6">{p.hint}</p>
+                      </button>
+                    );
+                  })}
+
+                  <button
+                    type="button"
+                    onClick={() => setUseCustomRadius(true)}
+                    className={`w-full text-left px-3 py-2.5 rounded-xl border transition min-h-[48px] ${
+                      useCustomRadius ? 'bg-emerald-50 border-emerald-300 ring-1 ring-emerald-300' : 'bg-white border-slate-200 hover:bg-slate-50'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className={`w-4 h-4 rounded-full border-2 shrink-0 ${useCustomRadius ? 'border-emerald-600 bg-emerald-600' : 'border-slate-300'}`} />
+                      <span className={`text-xs font-extrabold ${useCustomRadius ? 'text-emerald-900' : 'text-slate-700'}`}>Custom distance</span>
+                    </div>
+                  </button>
+                </div>
+
+                {useCustomRadius && (
+                  <label className="block">
+                    <span className="block text-[10px] font-extrabold uppercase tracking-wide text-slate-400 mb-1">Radius in metres (25 – 5000)</span>
+                    <input
+                      type="number" min="25" max="5000" inputMode="numeric" className="jc-input"
+                      value={geofenceSettings.Office_Radius_M ?? 200}
+                      onChange={e => setGeofenceSettings(s => ({ ...s, Office_Radius_M: e.target.value }))}
+                    />
+                  </label>
+                )}
+
+                <p className="text-[11px] text-slate-500 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2">
+                  <b>Not sure?</b> Leave the switch below OFF for one day. Every punch still records
+                  its distance, nothing is blocked, and tomorrow you can see what your staff actually
+                  report while standing at their desks — then pick the radius from real numbers.
+                  GPS is weakest indoors, so a radius chosen off a map often blocks genuine staff.
+                </p>
+              </div>
+
+              {/* 3. The master switch */}
+              <div className="bg-white rounded-2xl border border-slate-200 p-4 sm:p-5 shadow-xs">
+                <div className="flex items-center justify-between gap-4">
+                  <div className="min-w-0">
+                    <div className="text-sm font-extrabold text-slate-900">Enforce the geofence</div>
+                    <div className="text-[11px] text-slate-500 mt-0.5">
+                      When ON, staff outside the radius cannot punch without your approval. Field
+                      staff marked "Punch from anywhere" are unaffected.
+                    </div>
+                  </div>
+                  <button
+                    type="button" role="switch" aria-checked={!!geofenceSettings.Geofence_Enabled}
+                    onClick={() => setGeofenceSettings(s => ({ ...s, Geofence_Enabled: !s.Geofence_Enabled }))}
+                    className={`relative shrink-0 w-12 h-7 rounded-full transition ${geofenceSettings.Geofence_Enabled ? 'bg-emerald-600' : 'bg-slate-300'}`}
+                  >
+                    <span className={`absolute top-1 left-1 w-5 h-5 rounded-full bg-white shadow-sm transition-transform ${geofenceSettings.Geofence_Enabled ? 'translate-x-5' : 'translate-x-0'}`} />
+                  </button>
+                </div>
+              </div>
+
+              {/* Advanced, folded away — most Admins should never need to open this. */}
+              <details className="bg-white rounded-2xl border border-slate-200 p-4 sm:p-5 shadow-xs">
+                <summary className="text-sm font-extrabold text-slate-900 cursor-pointer">Advanced settings</summary>
+                <div className="mt-3 space-y-3">
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="min-w-0">
+                      <div className="text-xs font-extrabold text-slate-800">Allow for weak GPS signal</div>
+                      <div className="text-[11px] text-slate-500 mt-0.5">
+                        Forgives a phone's own margin of error, so someone genuinely at their desk is
+                        not blocked by a bad indoor fix. Strongly recommended.
+                      </div>
+                    </div>
+                    <button
+                      type="button" role="switch" aria-checked={geofenceSettings.Accuracy_Grace !== false}
+                      onClick={() => setGeofenceSettings(s => ({ ...s, Accuracy_Grace: s.Accuracy_Grace === false }))}
+                      className={`relative shrink-0 w-12 h-7 rounded-full transition ${geofenceSettings.Accuracy_Grace !== false ? 'bg-emerald-600' : 'bg-slate-300'}`}
+                    >
+                      <span className={`absolute top-1 left-1 w-5 h-5 rounded-full bg-white shadow-sm transition-transform ${geofenceSettings.Accuracy_Grace !== false ? 'translate-x-5' : 'translate-x-0'}`} />
+                    </button>
+                  </div>
+                  <label className="block">
+                    <span className="block text-[10px] font-extrabold uppercase tracking-wide text-slate-400 mb-1">
+                      Maximum allowance for weak signal (metres)
+                    </span>
+                    <input
+                      type="number" min="0" max="500" inputMode="numeric" className="jc-input"
+                      value={geofenceSettings.Max_Accuracy_Grace_M ?? 150}
+                      onChange={e => setGeofenceSettings(s => ({ ...s, Max_Accuracy_Grace_M: e.target.value }))}
+                    />
+                    <span className="block text-[11px] text-slate-500 mt-1">
+                      Caps how much a phone claiming a poor fix can be forgiven. Effective maximum
+                      reach is radius + this value.
+                    </span>
+                  </label>
+                  <label className="block">
+                    <span className="block text-[10px] font-extrabold uppercase tracking-wide text-slate-400 mb-1">
+                      Approval request expires after (minutes)
+                    </span>
+                    <input
+                      type="number" min="15" max="1440" inputMode="numeric" className="jc-input"
+                      value={geofenceSettings.Approval_Expiry_Min ?? 240}
+                      onChange={e => setGeofenceSettings(s => ({ ...s, Approval_Expiry_Min: e.target.value }))}
+                    />
+                    <span className="block text-[11px] text-slate-500 mt-1">
+                      An unanswered request this old is dropped, so a forgotten punch cannot suddenly
+                      land hours later.
+                    </span>
+                  </label>
+                </div>
+              </details>
+
+              <div className="sticky bottom-0 bg-white/95 backdrop-blur border-t border-slate-200 -mx-3 sm:-mx-4 px-3 sm:px-4 py-3"
+                style={{ paddingBottom: 'calc(env(safe-area-inset-bottom) + 12px)' }}>
+                <button
+                  type="button"
+                  onClick={handleSaveGeofenceSettings}
+                  disabled={isSavingGeofence}
+                  className="w-full min-h-[48px] rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-extrabold transition disabled:opacity-50"
+                >
+                  {isSavingGeofence ? 'Saving…' : 'Save office location'}
+                </button>
+              </div>
+            </>
+          )}
         </div>
       )}
 

@@ -15,6 +15,10 @@ const models = {
   Activity_Logs: createModel('Activity_Logs'),
   Attendance_Log: createModel('Attendance_Log'),
   Leave_Requests: createModel('Leave_Requests'),
+  // Out-of-office punch requests awaiting Admin sign-off. Its own collection rather than a field on
+  // Attendance_Log because there IS no attendance row yet when the request is raised — the whole
+  // point is that the punch has not happened.
+  Attendance_Approvals: createModel('Attendance_Approvals'),
   Customer_Interactions: createModel('Customer_Interactions'),
   Salary_Advances: createModel('Salary_Advances'),
   Document_Registry: createModel('Document_Registry'),
@@ -25,7 +29,13 @@ const models = {
   Tag_Master: createModel('Tag_Master'),
   Field_Visits: createModel('Field_Visits'),
   Certificate_Type_Master: createModel('Certificate_Type_Master'),
+  // Due-certificate tracking rows for legacy/paper customers with no certificate ever generated in
+  // this system. Kept separate from Document_Registry rather than faked as a certificate — it has
+  // no Verification_GUID/QR/PDF, and mixing it into certificate save/edit logic would risk the two
+  // paths corrupting each other's state.
+  Manual_Due_Entries: createModel('Manual_Due_Entries'),
   Notification_Settings: createModel('Notification_Settings'),
+  Attendance_Settings: createModel('Attendance_Settings'),
   Quotation_Settings: createModel('Quotation_Settings'),
   Item_Master: createModel('Item_Master'),
   Quotation_Master: createModel('Quotation_Master'),
@@ -448,6 +458,58 @@ class MongoService {
     return result;
   }
 
+  async getAttendanceSettings(companyId = 'DEFAULT') {
+    await this.connect();
+    const Model = models['Attendance_Settings'];
+    const doc = await Model.findOne({ company_id: companyId }).lean();
+    if (doc) { delete doc._id; delete doc.__v; }
+    return doc || null;
+  }
+
+  async saveAttendanceSettings(companyId = 'DEFAULT', settingsData) {
+    await this.connect();
+    const Model = models['Attendance_Settings'];
+    const payload = { ...settingsData, company_id: companyId };
+    const result = await Model.findOneAndUpdate(
+      { company_id: companyId },
+      { $set: payload },
+      { new: true, upsert: true, returnDocument: 'after' }
+    ).lean();
+    if (result) { delete result._id; delete result.__v; }
+    return result;
+  }
+
+  async getAttendanceApprovals() { return this.getTab('Attendance_Approvals'); }
+
+  /**
+   * updateRow with an extra condition folded into the FILTER, so the database decides the winner.
+   *
+   * updateRow() matches on the key column alone. That is fine for ordinary edits but not for
+   * claiming a pending approval: two Admins tapping Approve at the same moment would both read
+   * Status 'Pending', both pass an if(), and both write a punch — two attendance rows for one
+   * arrival. Putting the expected state in the query means the loser matches zero documents and
+   * gets null back, which is the only reliable guard available without transactions.
+   *
+   * Returns the updated row, or null when the condition no longer held.
+   */
+  async updateRowIf(sheetName, idColumn, idValue, extraFilter, updateData) {
+    delete this.cache[sheetName];
+    await this.connect();
+    const Model = models[sheetName];
+    if (!Model) throw new Error(`Collection ${sheetName} not found`);
+
+    const updated = await Model.findOneAndUpdate(
+      { [idColumn]: idValue, ...extraFilter },
+      { $set: encryptRow(sheetName, updateData) },
+      { new: true, returnDocument: 'after' }
+    ).lean();
+
+    if (!updated) return null;
+    delete updated._id; delete updated.__v;
+    delete this.cache[sheetName];
+    return decryptRow(sheetName, updated);
+  }
+
   async getNotificationSettings(companyId = 'DEFAULT') {
     await this.connect();
     const Model = models['Notification_Settings'];
@@ -677,15 +739,49 @@ class MongoService {
     return result.Current_Value;
   }
 
-  // Read-modify-write since updateRow only supports $set (no array-push primitive) — dedupes by
-  // endpoint so re-subscribing the same device (e.g. after a SW update) doesn't create duplicates.
+  /**
+   * Read-modify-write since updateRow only supports $set (no array-push primitive) — dedupes by
+   * endpoint so re-subscribing the same device (e.g. after a SW update) doesn't create duplicates.
+   *
+   * A push endpoint identifies a BROWSER, not a person, so it must belong to exactly one staff row
+   * at a time. It is detached from every other staff member first: two people sharing a workshop
+   * phone otherwise leave the endpoint on both rows, and each then receives the other's alerts —
+   * attendance, leave decisions and task assignments meant for someone else. Logout already tries
+   * to unsubscribe, but it is best-effort and never runs when a browser is simply closed, so the
+   * guarantee has to live here on the write that actually claims the device.
+   */
   async addPushSubscription(staffId, subscription) {
     const staff = await this.getStaffById(staffId);
     if (!staff) return null;
+
+    await this.detachPushEndpointFromOthers(subscription.endpoint, staffId);
+
     const existing = Array.isArray(staff.Push_Subscriptions) ? staff.Push_Subscriptions : [];
     const filtered = existing.filter(s => s.endpoint !== subscription.endpoint);
     filtered.push({ ...subscription, subscribedAt: new Date().toISOString() });
     return this.updateRow('Staff_Master', 'Staff_ID', staffId, { Push_Subscriptions: filtered });
+  }
+
+  /**
+   * Strips one push endpoint from every staff row except `keepStaffId`, so a device can never be
+   * registered to two people at once. Returns the Staff_IDs it was removed from — the caller logs
+   * them, because a non-empty result means a shared device was just reassigned.
+   */
+  async detachPushEndpointFromOthers(endpoint, keepStaffId) {
+    if (!endpoint) return [];
+    const allStaff = await this.getAllStaff();
+    const stripped = [];
+
+    for (const s of allStaff) {
+      if (s.Staff_ID === keepStaffId) continue;
+      const subs = Array.isArray(s.Push_Subscriptions) ? s.Push_Subscriptions : [];
+      if (!subs.some(x => x.endpoint === endpoint)) continue;
+      await this.updateRow('Staff_Master', 'Staff_ID', s.Staff_ID, {
+        Push_Subscriptions: subs.filter(x => x.endpoint !== endpoint)
+      });
+      stripped.push(s.Staff_ID);
+    }
+    return stripped;
   }
 
   async removePushSubscription(staffId, endpoint) {

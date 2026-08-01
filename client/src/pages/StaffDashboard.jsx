@@ -1057,6 +1057,11 @@ export default function StaffDashboard() {
   const [feedbackMsg, setFeedbackMsg] = useState('');
   const [capturedLocation, setCapturedLocation] = useState('');
   const [locating, setLocating] = useState(false);
+  // The 409 payload from an out-of-office punch: the request is with Admin and this screen waits.
+  const [pendingApproval, setPendingApproval] = useState(null);
+  // Terminal outcome of that wait, so the person is told what happened rather than the card
+  // simply vanishing.
+  const [approvalOutcome, setApprovalOutcome] = useState(null);
   const [remarks, setRemarks] = useState('');
   const [newDate, setNewDate] = useState('');
   const [actionTaken, setActionTaken] = useState('');
@@ -1173,6 +1178,58 @@ export default function StaffDashboard() {
   const fetchAttendanceAndLeaves = async () => {
     await syncAllData(true);
   };
+
+  /**
+   * Watches a pending out-of-office request and finishes the job the moment Admin decides.
+   *
+   * Polling rather than a socket: this deployment runs as serverless functions, so there is no
+   * long-lived process to hold a connection open. Five seconds is fast enough to feel immediate
+   * while someone stands waiting, and the loop stops on any terminal status, on unmount, and when
+   * the phone is pocketed (document.hidden) — a screen in a pocket must not poll all afternoon.
+   */
+  useEffect(() => {
+    if (!pendingApproval?.approvalId) return;
+
+    let cancelled = false;
+    let polls = 0;
+    const MAX_POLLS = 120; // ~10 minutes
+
+    const tick = async () => {
+      if (cancelled || document.hidden) return;
+      if (++polls > MAX_POLLS) {
+        setApprovalOutcome({ status: 'Waiting', message: 'Still waiting for Admin. You can close this and try again later.' });
+        setPendingApproval(null);
+        return;
+      }
+      try {
+        const res = await fetch(`/api/attendance/approvals/${pendingApproval.approvalId}`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (cancelled || data.status === 'Pending') return;
+
+        setPendingApproval(null);
+        if (data.status === 'Approved') {
+          // The punch is already written server-side by the time we see this — only refresh.
+          setApprovalOutcome({ status: 'Approved', message: `Approved. Your punch at ${data.requestedTime} has been recorded.` });
+          await fetchAttendanceAndLeaves();
+          window.dispatchEvent(new CustomEvent('ATTENDANCE_REFRESHED', { detail: null }));
+        } else if (data.status === 'Rejected') {
+          setApprovalOutcome({
+            status: 'Rejected',
+            message: data.rejectReason || 'You cannot punch from outside the office premises.'
+          });
+        } else {
+          setApprovalOutcome({ status: data.status, message: `This request was ${String(data.status).toLowerCase()}.` });
+        }
+      } catch (e) { /* transient network trouble; the next tick retries */ }
+    };
+
+    const id = setInterval(tick, 5000);
+    tick();
+    return () => { cancelled = true; clearInterval(id); };
+  }, [pendingApproval?.approvalId, token]);
 
   useEffect(() => {
     // 1. Instant Zero-Time Load from Cache
@@ -1373,17 +1430,27 @@ export default function StaffDashboard() {
     }
   };
 
-  const handlePunchIn = async () => {
+  /**
+   * Punch in or out. One implementation for both, because the only differences are the endpoint,
+   * the wording and which event is dispatched — and the geofence/approval handling below must
+   * behave identically either way.
+   */
+  const doPunch = async (direction) => {
+    const isIn = direction === 'IN';
     try {
       setPunching(true);
       let coords = capturedLocation;
+      let accuracy = null;
       try {
         const pos = await getAccurateGpsPosition({ timeout: 15000, maxAccuracy: 300 });
         coords = pos.formatted;
+        // Sent to the server so the geofence can forgive a weak fix rather than blocking someone
+        // who is genuinely at their desk with poor indoor GPS.
+        accuracy = pos.accuracy;
         setCapturedLocation(coords);
       } catch (gpsErr) {
         setPunching(false);
-        alert(`⚠️ High-Accuracy GPS Required!\n\n${gpsErr.message || 'Your mobile GPS is turned OFF or signal is weak.'}\n\nPlease turn ON High-Accuracy GPS / Location services on your device and try Punch In again.`);
+        alert(`⚠️ High-Accuracy GPS Required!\n\n${gpsErr.message || 'Your mobile GPS is turned OFF or signal is weak.'}\n\nPlease turn ON High-Accuracy GPS / Location services on your device and try Punch ${isIn ? 'In' : 'Out'} again.`);
         return;
       }
 
@@ -1398,15 +1465,23 @@ export default function StaffDashboard() {
       const now = new Date();
       const overrideDate = getLocalDateStr(now);
       const overrideTime = getLocalTimeStr(now);
-      const res = await fetch('/api/attendance/punch-in', {
+      const res = await fetch(`/api/attendance/punch-${isIn ? 'in' : 'out'}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ latLong: coords, ipAddress: clientIp, overrideDate, overrideTime })
+        body: JSON.stringify({ latLong: coords, gpsAccuracy: accuracy, ipAddress: clientIp, overrideDate, overrideTime })
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Punch in failed');
+
+      // Outside the office: the punch did NOT happen, a request is now with Admin. Shown as a
+      // waiting card rather than an alert, because the person has to be told what happens next.
+      if (res.status === 409 && data.needsApproval) {
+        setPendingApproval(data);
+        return;
+      }
+
+      if (!res.ok) throw new Error(data.error || `Punch ${isIn ? 'in' : 'out'} failed`);
       await fetchAttendanceAndLeaves();
-      window.dispatchEvent(new CustomEvent('ATTENDANCE_REFRESHED', { detail: data.log }));
+      window.dispatchEvent(new CustomEvent('ATTENDANCE_REFRESHED', { detail: isIn ? data : null }));
     } catch (err) {
       alert(err.message);
     } finally {
@@ -1414,45 +1489,18 @@ export default function StaffDashboard() {
     }
   };
 
-  const handlePunchOut = async () => {
-    try {
-      setPunching(true);
-      let coords = capturedLocation;
-      try {
-        const pos = await getAccurateGpsPosition({ timeout: 15000, maxAccuracy: 300 });
-        coords = pos.formatted;
-        setCapturedLocation(coords);
-      } catch (gpsErr) {
-        setPunching(false);
-        alert(`⚠️ High-Accuracy GPS Required!\n\n${gpsErr.message || 'Your mobile GPS is turned OFF or signal is weak.'}\n\nPlease turn ON High-Accuracy GPS / Location services on your device and try Punch Out again.`);
-        return;
-      }
+  const handlePunchIn = () => doPunch('IN');
+  const handlePunchOut = () => doPunch('OUT');
 
-      let clientIp = '';
-      try {
-        const ipRes = await fetch('https://api.ipify.org?format=json', { signal: AbortSignal.timeout(3000) });
-        if (ipRes.ok) {
-          const ipData = await ipRes.json();
-          clientIp = ipData.ip;
-        }
-      } catch (e) { }
-      const now = new Date();
-      const overrideDate = getLocalDateStr(now);
-      const overrideTime = getLocalTimeStr(now);
-      const res = await fetch('/api/attendance/punch-out', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ latLong: coords, ipAddress: clientIp, overrideDate, overrideTime })
+  /** Withdraws a pending request — the person reached the office, or gave up waiting. */
+  const cancelPendingApproval = async () => {
+    if (!pendingApproval?.approvalId) return setPendingApproval(null);
+    try {
+      await fetch(`/api/attendance/approvals/${pendingApproval.approvalId}/cancel`, {
+        method: 'POST', headers: { 'Authorization': `Bearer ${token}` }
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Punch out failed');
-      await fetchAttendanceAndLeaves();
-      window.dispatchEvent(new CustomEvent('ATTENDANCE_REFRESHED', { detail: null }));
-    } catch (err) {
-      alert(err.message);
-    } finally {
-      setPunching(false);
-    }
+    } catch (e) { /* closing the card matters more than the server acknowledging it */ }
+    setPendingApproval(null);
   };
 
   const handleLeaveSubmit = async (e) => {
@@ -4075,10 +4123,67 @@ export default function StaffDashboard() {
               </button>
             </div>
 
+            {/* Outcome of a finished approval — dismissible, so it cannot linger past its usefulness. */}
+            {approvalOutcome && (
+              <div className={`p-3 rounded-xl border space-y-1.5 ${
+                approvalOutcome.status === 'Approved' ? 'bg-emerald-50 border-emerald-300'
+                  : approvalOutcome.status === 'Rejected' ? 'bg-rose-50 border-rose-300'
+                  : 'bg-slate-50 border-slate-300'
+              }`}>
+                <p className={`text-xs font-extrabold ${
+                  approvalOutcome.status === 'Approved' ? 'text-emerald-900'
+                    : approvalOutcome.status === 'Rejected' ? 'text-rose-900' : 'text-slate-800'
+                }`}>
+                  {approvalOutcome.status === 'Approved' ? '✅ Punch approved'
+                    : approvalOutcome.status === 'Rejected' ? '❌ Punch not approved' : '⏳ Still waiting'}
+                </p>
+                <p className="text-[11px] text-slate-700 leading-snug">{approvalOutcome.message}</p>
+                <button
+                  type="button"
+                  onClick={() => setApprovalOutcome(null)}
+                  className="w-full min-h-[40px] rounded-lg border border-slate-300 bg-white text-[11px] font-bold text-slate-600 active:bg-slate-100"
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
+
             {/* PUNCH IN / PUNCH OUT SECTION */}
             {(() => {
               const todayStr = getLocalDateStr();
               const openShift = myAttendanceLogs.find(r => r.Date === todayStr && (!r.Punch_Out_Time || r.Punch_Out_Time === ''));
+
+              // Waiting on Admin: the punch has NOT happened, so the button is replaced entirely
+              // rather than left tappable — a second tap would only re-raise the same request.
+              if (pendingApproval) {
+                return (
+                  <div className="p-3 rounded-xl border bg-amber-50 border-amber-300 space-y-2">
+                    <div className="flex items-center gap-2">
+                      <span className="w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse shrink-0" />
+                      <p className="text-xs font-extrabold text-amber-900">Waiting for Admin approval</p>
+                    </div>
+                    <p className="text-[11px] text-amber-800 leading-snug">
+                      You are {pendingApproval.distanceM != null ? `${pendingApproval.distanceM} m` : 'outside'} from {pendingApproval.officeLabel || 'the office'},
+                      so your punch {pendingApproval.punchType === 'IN' ? 'in' : 'out'} needs approval.
+                    </p>
+                    {/* The single most reassuring fact: a slow Admin will not cost them pay. */}
+                    <p className="text-[11px] font-bold text-amber-900 bg-amber-100 rounded-lg px-2 py-1.5">
+                      Your time is locked at {pendingApproval.requestedTime} — waiting will not make you late.
+                    </p>
+                    <p className="text-[10px] text-amber-700">
+                      This screen updates by itself once Admin decides. You can close the app.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={cancelPendingApproval}
+                      className="w-full min-h-[44px] rounded-xl border border-amber-400 text-amber-900 text-xs font-bold active:bg-amber-100"
+                    >
+                      Cancel this request
+                    </button>
+                  </div>
+                );
+              }
+
               return (
                 <div className={`p-3 rounded-xl border space-y-2 ${openShift ? 'bg-rose-50 border-rose-200' : 'bg-amber-50 border-amber-200'}`}>
                   <div className="flex items-center justify-between">

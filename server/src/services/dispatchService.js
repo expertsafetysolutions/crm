@@ -467,6 +467,40 @@ async function sendPaymentDueReminder(invoice) {
 }
 
 /**
+ * 30-days-before-due reminder for expiring certificate equipment (Due Certificate Report).
+ *
+ * `items` is the FLATTENED, cross-certificate list of everything due for this one customer on this
+ * one cron run — quotationCronService groups by Customer_ID before calling this, specifically so a
+ * company with several certificates due the same day gets ONE email listing all of them rather than
+ * one email per certificate. There is no single source document to pass as `doc` (the items can
+ * span multiple certificates and even a manual due entry), so a synthetic doc is built here just to
+ * carry customer identity + itemsList through buildVars' existing item_summary/due_date handling.
+ *
+ * Email only for this release — certificates carry no phone/WhatsApp snapshot yet, so recipientPhone
+ * is intentionally omitted and channel is pinned to 'Email' regardless of the configured
+ * dispatch_mode.
+ */
+async function sendCertificateDueReminder(customer, items) {
+  const settings = await getSettings();
+  const dueDate = items.map(i => i.nextDate).sort()[0] || '';
+  const doc = {
+    Customer_Name: customer.Customer_Name || customer.Company_Name || '',
+    Customer_Email_Snapshot: customer.Email || '',
+    // capacity folded into the name text — summarizeItems() only reads itemName/qty, and this is
+    // the one place item_summary needs to distinguish "6kg ABC" from "4.5kg ABC" on the same email.
+    itemsList: items.map(i => ({ itemName: [i.itemName, i.capacity].filter(Boolean).join(' '), qty: i.qty })),
+    Due_Date: dueDate
+  };
+  return dispatchTemplated({
+    doc,
+    templateKey: 'certificate_due_reminder',
+    recipientEmail: customer.Email || '',
+    settings,
+    channel: 'Email'
+  });
+}
+
+/**
  * Both PO senders used to hard-code their subject/body directly in JS — the only two document
  * types in the file that did not go through dispatchTemplated. That meant nothing here was
  * editable from Quotation Settings the way every other document's wording is: the office could
@@ -570,6 +604,7 @@ module.exports = {
   sendCertificate,
   sendFollowUpReminder,
   sendPaymentDueReminder,
+  sendCertificateDueReminder,
   sendPurchaseOrder,
   sendPurchaseOrderReminder
 };

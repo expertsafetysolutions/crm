@@ -548,7 +548,10 @@ app.get(['/api/quote-portal/:guid', '/q/:guid'], async (req, res) => {
     res.send(quotePortalView.renderQuotePortalPage({
       quotation,
       settings,
-      sellerName: settings.seller_profile?.legal_name || 'Expert Safety Solutions'
+      sellerName: settings.seller_profile?.legal_name || 'Expert Safety Solutions',
+      // Authorises this page's inline <script> under the CSP. Without it the buttons render but
+      // every click is silently blocked by the browser.
+      nonce: res.locals.cspNonce
     }));
   } catch (err) {
     console.error('Quote portal render error:', err);

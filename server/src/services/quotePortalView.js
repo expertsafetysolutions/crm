@@ -137,7 +137,7 @@ function renderActions(actions, actionable) {
   return `<div class="actions">${buttons}</div>`;
 }
 
-function renderQuotePortalPage({ quotation, settings, sellerName }) {
+function renderQuotePortalPage({ quotation, settings, sellerName, nonce = '' }) {
   const actionable = isActionable(quotation.Status);
   const paymentTerm = (settings.payment_terms || []).find(t => t.id === quotation.Payment_Terms_ID);
   const selectedTnc = (settings.tnc_checklist || [])
@@ -189,7 +189,7 @@ function renderQuotePortalPage({ quotation, settings, sellerName }) {
   </div>
 </div></div>
 
-<script>
+<script${nonce ? ` nonce="${esc(nonce)}"` : ''}>
 (function(){
   var guid = ${JSON.stringify(quotation.Portal_Guid || quotation.Portal_Code || '')} || window.location.pathname.split('/').pop();
   var modal = document.getElementById('modal');
@@ -247,7 +247,13 @@ function renderQuotePortalPage({ quotation, settings, sellerName }) {
     btn.disabled = true;
     btn.textContent = 'Submitting…';
 
-    var actionUrl = window.location.pathname.replace(/\/$/, '') + '/action';
+    // Trailing slash trimmed WITHOUT a regex on purpose: this whole script lives inside a template
+    // literal, and a literal backslash there is consumed as an escape — /\/$/ was emitted to the
+    // browser as //$/, which starts a comment and killed the rest of the script. Every button then
+    // rendered but did nothing. String methods have no backslash to lose.
+    var path = window.location.pathname;
+    if (path.charAt(path.length - 1) === '/') path = path.slice(0, -1);
+    var actionUrl = path + '/action';
     fetch(actionUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

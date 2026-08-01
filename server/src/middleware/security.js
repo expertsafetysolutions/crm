@@ -16,6 +16,7 @@
  *    attempts a minute.
  */
 
+const crypto = require('crypto');
 const helmet = require('helmet');
 const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 
@@ -159,8 +160,32 @@ const publicVerifyLimiter = rateLimit({
  * HSTS is left to Vercel, which already sends it on the apex domain.
  */
 function applySecurityHeaders(app) {
+  /*
+   * Per-request nonce for server-rendered public pages that carry an inline <script> — today just
+   * the customer quote portal. script-src 'self' blocks such a script outright: the buttons render,
+   * the customer taps Accept, and nothing at all happens, with the failure visible only in a
+   * browser console no customer will ever open.
+   *
+   * A nonce rather than 'unsafe-inline': the latter would re-enable EVERY inline script across the
+   * whole app, including the authenticated dashboards, to fix two pages. The nonce authorises
+   * exactly the script we emitted on this one response and nothing else.
+   */
+  app.use((req, res, next) => {
+    res.locals.cspNonce = crypto.randomBytes(16).toString('base64');
+    next();
+  });
+
   app.use(helmet({
-    contentSecurityPolicy,
+    contentSecurityPolicy: {
+      ...contentSecurityPolicy,
+      directives: {
+        ...contentSecurityPolicy.directives,
+        scriptSrc: [
+          ...contentSecurityPolicy.directives.scriptSrc,
+          (req, res) => `'nonce-${res.locals.cspNonce}'`
+        ]
+      }
+    },
     crossOriginResourcePolicy: { policy: 'cross-origin' },
     crossOriginEmbedderPolicy: false,
     referrerPolicy: { policy: 'strict-origin-when-cross-origin' },

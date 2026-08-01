@@ -36,46 +36,101 @@ function summarizeLineItems(lineItems) {
  * Reminders stop on their own once Status leaves the open set (accepted/rejected/expired/converted),
  * because those rows fall out of this query.
  */
+/**
+ * The reminder cap for one quotation: its own Max_Reminders, else the company default.
+ *
+ * 0 (or a negative) means unlimited, deliberately — an office that wants the old behaviour of
+ * chasing until the quotation closes can ask for it explicitly rather than getting it by accident.
+ */
+function resolveReminderLimit(quotation, settings) {
+  const own = Number(quotation.Max_Reminders);
+  if (Number.isFinite(own) && own > 0) return own;
+  if (Number.isFinite(own) && own === 0) return 0;          // explicit "unlimited" on this row
+  const fallback = Number(settings?.defaults?.max_follow_up_reminders);
+  return Number.isFinite(fallback) && fallback > 0 ? fallback : 0;
+}
+
+/**
+ * Post-send bookkeeping, shared by the cron and the manual "Send now" button.
+ *
+ * Extracted so the two paths cannot drift: if the manual send did not increment Reminder_Count, a
+ * hand-sent reminder would never count toward the cap and the cadence could be pushed past its
+ * limit by hand without anyone noticing.
+ *
+ * Latches Reminder_Stopped once the cap is reached and clears Next_Reminder_Date, so the row drops
+ * out of the due query entirely rather than being re-evaluated (and re-skipped) every single day.
+ */
+async function recordReminderSent(quotation, results, settings) {
+  const interval = Number(quotation.Follow_Up_Interval_Days) || 3;
+  const log = Array.isArray(quotation.Reminder_Log) ? quotation.Reminder_Log : [];
+  const nextCount = (Number(quotation.Reminder_Count) || 0) + 1;
+  const limit = resolveReminderLimit(quotation, settings);
+  const reachedCap = limit > 0 && nextCount >= limit;
+
+  const patch = {
+    // Always re-arm from today, not from the stale due date, so a backlog can't cause a burst
+    // of same-day reminders on the next run.
+    Next_Reminder_Date: reachedCap ? '' : istDateOffset(interval),
+    Last_Reminder_Sent_At: new Date().toISOString(),
+    Reminder_Count: nextCount,
+    Reminder_Log: [...log, {
+      timestamp: new Date().toISOString(),
+      channels: results.map(r => ({ channel: r.channel, status: r.ok ? 'sent' : 'failed', error: r.ok ? '' : String(r.error || '') }))
+    }]
+  };
+  if (reachedCap) {
+    patch.Reminder_Stopped = true;
+    patch.Reminder_Stopped_Reason = `Reached the ${limit}-reminder limit`;
+  }
+
+  await sheetsService.updateRow('Quotation_Master', 'Quotation_ID', quotation.Quotation_ID, patch);
+  return { reachedCap, nextCount, limit };
+}
+
 async function runQuotationFollowUpReminders() {
   const todayStr = istToday();
+  const settings = await quotationEngine.getSettings();
   const quotations = await sheetsService.getAllQuotations();
 
   const due = quotations.filter(q =>
     quotationEngine.OPEN_STATUSES.includes(q.Status)
+    && q.Reminder_Stopped !== true
     && q.Next_Reminder_Date
     && q.Next_Reminder_Date <= todayStr
   );
 
   let sentCount = 0;
   let failedCount = 0;
+  let stoppedCount = 0;
 
   for (const quotation of due) {
     try {
+      // Checked before sending, not after: a row already at its cap (because the limit was lowered,
+      // or a manual send pushed it there) must be retired without one last email going out.
+      const limit = resolveReminderLimit(quotation, settings);
+      if (limit > 0 && (Number(quotation.Reminder_Count) || 0) >= limit) {
+        await sheetsService.updateRow('Quotation_Master', 'Quotation_ID', quotation.Quotation_ID, {
+          Reminder_Stopped: true,
+          Reminder_Stopped_Reason: `Reached the ${limit}-reminder limit`,
+          Next_Reminder_Date: ''
+        });
+        stoppedCount++;
+        continue;
+      }
+
       const results = await dispatchService.sendFollowUpReminder(quotation);
       const anySent = results.some(r => r.ok);
       if (anySent) sentCount++; else failedCount++;
 
-      const interval = Number(quotation.Follow_Up_Interval_Days) || 3;
-      const log = Array.isArray(quotation.Reminder_Log) ? quotation.Reminder_Log : [];
-
-      await sheetsService.updateRow('Quotation_Master', 'Quotation_ID', quotation.Quotation_ID, {
-        // Always re-arm from today, not from the stale due date, so a backlog can't cause a burst
-        // of same-day reminders on the next run.
-        Next_Reminder_Date: istDateOffset(interval),
-        Last_Reminder_Sent_At: new Date().toISOString(),
-        Reminder_Count: (Number(quotation.Reminder_Count) || 0) + 1,
-        Reminder_Log: [...log, {
-          timestamp: new Date().toISOString(),
-          channels: results.map(r => ({ channel: r.channel, status: r.ok ? 'sent' : 'failed', error: r.ok ? '' : String(r.error || '') }))
-        }]
-      });
+      const outcome = await recordReminderSent(quotation, results, settings);
+      if (outcome.reachedCap) stoppedCount++;
     } catch (e) {
       failedCount++;
       console.error(`Follow-up reminder failed for ${quotation.Quotation_ID}:`, e.message);
     }
   }
 
-  return { dueCount: due.length, sentCount, failedCount, todayStr };
+  return { dueCount: due.length, sentCount, failedCount, stoppedCount, todayStr };
 }
 
 /**
@@ -480,6 +535,10 @@ async function runCertificateDueReminders() {
 
 module.exports = {
   runQuotationFollowUpReminders,
+  // Shared with the manual "Send now" button so a hand-sent reminder is counted, logged and capped
+  // exactly like an automatic one.
+  recordReminderSent,
+  resolveReminderLimit,
   runPaymentDueReminders,
   runPurchaseOrderReminders,
   generateAnnualProspectTasks,

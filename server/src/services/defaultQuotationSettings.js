@@ -174,6 +174,11 @@ const DEFAULT_QUOTATION_SETTINGS = {
 
   defaults: {
     follow_up_interval_days: 3,
+    // How many follow-up reminders one quotation may receive before it stops chasing on its own.
+    // A finite default on purpose: without a cap the cron re-arms Next_Reminder_Date after every
+    // send, so an open quotation is chased every few days forever and customers end up on their
+    // tenth reminder. Overridable per quotation via Max_Reminders; 0 there means unlimited.
+    max_follow_up_reminders: 5,
     auto_expiry_days: 30,
     default_gst_rate: 18,
     quote_no_prefix: 'EXP/Q',

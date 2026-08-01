@@ -10,6 +10,8 @@ const { verifyStaffPassword, validatePasswordPolicy, BCRYPT_COST } = require('..
 const gstUtils = require('../utils/gstUtils');
 const { requirePermission, resolvePermissions, sanitizePermissions, can, MODULES, ACTIONS } = require('../utils/permissions');
 const quotationEngine = require('../services/quotationEngine');
+const quotationCronService = require('../services/quotationCronService');
+const dispatchService = require('../services/dispatchService');
 const conversionService = require('../services/conversionService');
 const inventoryService = require('../services/inventoryService');
 const jobCardService = require('../services/jobCardService');
@@ -4051,7 +4053,7 @@ router.patch('/quotations/:id/reminder-settings', async (req, res) => {
     const existing = await sheetsService.getQuotationById(req.params.id);
     if (!existing) return res.status(404).json({ error: 'Quotation not found' });
 
-    const { followUpIntervalDays, nextReminderDate } = req.body;
+    const { followUpIntervalDays, nextReminderDate, maxReminders, reminderStopped } = req.body;
     const updateData = {};
     if (followUpIntervalDays !== undefined) {
       const days = Number(followUpIntervalDays);
@@ -4062,6 +4064,30 @@ router.patch('/quotations/:id/reminder-settings', async (req, res) => {
     }
     if (nextReminderDate !== undefined) updateData.Next_Reminder_Date = nextReminderDate;
 
+    // 0 is meaningful here (unlimited), so the guard is >= 0 rather than the > 0 used above.
+    if (maxReminders !== undefined) {
+      const max = Number(maxReminders);
+      if (!Number.isInteger(max) || max < 0) {
+        return res.status(400).json({ error: 'maxReminders must be 0 (unlimited) or a positive whole number' });
+      }
+      updateData.Max_Reminders = max;
+    }
+
+    // Resuming has to re-arm the schedule as well as clear the flag: a stopped row had its
+    // Next_Reminder_Date cleared, so flipping the boolean alone would leave it silently inert.
+    if (reminderStopped !== undefined) {
+      updateData.Reminder_Stopped = Boolean(reminderStopped);
+      if (!reminderStopped) {
+        updateData.Reminder_Stopped_Reason = '';
+        if (!existing.Next_Reminder_Date && nextReminderDate === undefined) {
+          const interval = Number(updateData.Follow_Up_Interval_Days ?? existing.Follow_Up_Interval_Days) || 3;
+          const d = new Date();
+          d.setDate(d.getDate() + interval);
+          updateData.Next_Reminder_Date = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(d);
+        }
+      }
+    }
+
     if (Object.keys(updateData).length === 0) {
       return res.status(400).json({ error: 'Nothing to update' });
     }
@@ -4071,6 +4097,59 @@ router.patch('/quotations/:id/reminder-settings', async (req, res) => {
   } catch (err) {
     console.error('PATCH /quotations/:id/reminder-settings error:', err);
     res.status(500).json({ error: 'Failed to update reminder settings' });
+  }
+});
+
+/**
+ * Sends one follow-up reminder immediately, from the Reminders list.
+ *
+ * Routes through the SAME dispatch + bookkeeping the nightly cron uses, so a hand-sent reminder
+ * increments Reminder_Count, appends to Reminder_Log and counts toward the stop-after cap. A
+ * separate write here would let someone push a customer past their limit by hand without it
+ * showing anywhere.
+ */
+router.post('/quotations/:id/send-reminder', async (req, res) => {
+  try {
+    const role = String(req.user.role || '');
+    if (role !== 'Admin' && role !== 'Sales') {
+      return res.status(403).json({ error: 'Only Admin or Sales staff can send reminders' });
+    }
+
+    const quotation = await sheetsService.getQuotationById(req.params.id);
+    if (!quotation) return res.status(404).json({ error: 'Quotation not found' });
+
+    const settings = await quotationEngine.getSettings();
+    const limit = quotationCronService.resolveReminderLimit(quotation, settings);
+    const sentSoFar = Number(quotation.Reminder_Count) || 0;
+    if (limit > 0 && sentSoFar >= limit) {
+      // 409 with the numbers, so the client can say WHY rather than "failed".
+      return res.status(409).json({
+        error: `This quotation has already had its ${limit} reminders. Raise the limit first if you want to send another.`,
+        reminderCount: sentSoFar,
+        maxReminders: limit
+      });
+    }
+
+    const results = await dispatchService.sendFollowUpReminder(quotation);
+    const outcome = await quotationCronService.recordReminderSent(quotation, results, settings);
+
+    const failures = results.filter(r => !r.ok);
+    if (results.length && failures.length === results.length) {
+      return res.status(502).json({
+        error: `Could not send: ${failures.map(f => `${f.channel} — ${f.error}`).join('; ')}`
+      });
+    }
+
+    res.json({
+      success: true,
+      results,
+      reminderCount: outcome.nextCount,
+      reachedCap: outcome.reachedCap,
+      maxReminders: outcome.limit
+    });
+  } catch (err) {
+    console.error('POST /quotations/:id/send-reminder error:', err);
+    res.status(500).json({ error: err.message || 'Failed to send the reminder' });
   }
 });
 

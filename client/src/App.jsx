@@ -5,6 +5,7 @@ import { useAuth } from './context/AuthContext';
 import { DocSettingsProvider } from './context/DocSettingsContext';
 import Navbar from './components/Navbar';
 import OfflineBanner from './components/OfflineBanner';
+import TourOverlay from './tour/TourOverlay';
 import Login from './pages/Login';
 
 // Route-level code splitting: each dashboard/generator page (and its heavy deps like
@@ -170,6 +171,9 @@ export default function App() {
             setCurrentView={handleSetCurrentView}
           />
         )}
+        {/* Tour only makes sense on the two dashboards, not full-screen certificate/settings/
+            quotation/job-card pages, so it shares the same hidesChrome gate as the Navbar. */}
+        {!hidesChrome && <TourOverlay />}
 
         <main className={hidesChrome ? 'flex-1' : 'flex-1 pb-16'}>
           <Suspense fallback={<RouteLoadingFallback />}>

@@ -110,13 +110,14 @@ function buildGeofenceFields(side, geofence, gpsAccuracy, approvalId) {
  */
 async function supersedePendingApprovals(staffId, dateStr, punchType, reason) {
   try {
-    const rows = await sheetsService.getAttendanceApprovals();
-    const stale = rows.filter(r =>
-      r.Staff_ID === staffId &&
-      r.Requested_Date === dateStr &&
-      r.Punch_Type === punchType &&
-      r.Status === APPROVAL_STATUS.PENDING
-    );
+    // Filtered server-side instead of loading every approval ever requested (getAttendanceApprovals)
+    // just to find this one staff member's pending rows for today.
+    const stale = await sheetsService.queryTab('Attendance_Approvals', {
+      Staff_ID: staffId,
+      Requested_Date: dateStr,
+      Punch_Type: punchType,
+      Status: APPROVAL_STATUS.PENDING
+    });
     for (const row of stale) {
       await sheetsService.updateRow('Attendance_Approvals', 'Approval_ID', row.Approval_ID, {
         Status: APPROVAL_STATUS.CANCELLED,
@@ -139,10 +140,10 @@ class AttendanceService {
     const dateStr = overrideDate || ist.dateStr;
     const timeStr = overrideTime || ist.timeStr;
 
-    const allRecords = await sheetsService.getAllAttendance();
-    const openRecord = allRecords.find(
-      r => r.Staff_ID === staffId && r.Date === dateStr && (!r.Punch_Out_Time || r.Punch_Out_Time === '')
-    );
+    // Filtered server-side to this staff member's own records for today, instead of loading every
+    // attendance row ever recorded (getAllAttendance) just to check for one open session.
+    const todaysRecords = await sheetsService.queryTab('Attendance_Log', { Staff_ID: staffId, Date: dateStr });
+    const openRecord = todaysRecords.find(r => !r.Punch_Out_Time || r.Punch_Out_Time === '');
 
     if (openRecord) {
       throw new Error('You already have an active punch-in session for today. Please punch out first.');
@@ -184,10 +185,12 @@ class AttendanceService {
     const dateStr = overrideDate || ist.dateStr;
     const timeStr = overrideTime || ist.timeStr;
 
-    const allRecords = await sheetsService.getAllAttendance();
-    const openRecord = allRecords.find(
-      r => r.Staff_ID === staffId && r.Date === dateStr && (!r.Punch_Out_Time || r.Punch_Out_Time === '')
-    );
+    // Filtered server-side to this staff member's own records for today — punchOut needs every
+    // session today (to sum cumulative hours), not just the open one, so the filter stays at
+    // {Staff_ID, Date} rather than narrowing further, but this is still one staff/one day instead
+    // of the entire Attendance_Log collection.
+    const todaysRecords = await sheetsService.queryTab('Attendance_Log', { Staff_ID: staffId, Date: dateStr });
+    const openRecord = todaysRecords.find(r => !r.Punch_Out_Time || r.Punch_Out_Time === '');
 
     if (!openRecord) {
       throw new Error('No open punch-in record found for today.');
@@ -196,14 +199,12 @@ class AttendanceService {
     const sessionHours = calculateWorkedHours(openRecord.Punch_In_Time, timeStr);
 
     // Sum all previous sessions for today + this session
-    const dayRecords = allRecords.filter(
-      r => r.Staff_ID === staffId && r.Date === dateStr && r.Record_ID !== openRecord.Record_ID
-    );
+    const dayRecords = todaysRecords.filter(r => r.Record_ID !== openRecord.Record_ID);
     const priorHours = dayRecords.reduce((sum, r) => sum + Number(r.Total_Worked_Hours || 0), 0);
     const cumulativeHours = Number((priorHours + sessionHours).toFixed(2));
 
-    // Compute pro-rata salary
-    const staff = await sheetsService.getStaffById(staffId);
+    // Compute pro-rata salary — filtered to the one staff record instead of loading all of Staff_Master.
+    const [staff] = await sheetsService.queryTab('Staff_Master', { Staff_ID: staffId });
     const dailyRate = Number(staff?.Daily_Salary_Rate) || 1000;
 
     // Check if Sunday (automatic Weekly Off full pay) or worked >= 10 hours

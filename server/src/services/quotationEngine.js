@@ -536,6 +536,17 @@ async function createRevision(quotationId, payload, actor) {
     Superseded_At: new Date().toISOString()
   });
 
+  // Mirrors createQuotation's own log call — a revision was silent on the timeline before this,
+  // so telecalling staff had no record that the price/terms on a task's quotation had changed.
+  await interactionLogger.logEvent({
+    tag: interactionLogger.EVENT_TAG.QUOTATION_GENERATED,
+    summary: `${revision.Quote_No_Display} (Rev ${nextRevisionNo}) | ${interactionLogger.formatAmount(revision.Grand_Total)}`
+      + `${revision.Revision_Reason ? ` | ${revision.Revision_Reason}` : ''}`,
+    taskId: revision.Task_ID,
+    customerId: revision.Customer_ID,
+    actor
+  });
+
   return revision;
 }
 

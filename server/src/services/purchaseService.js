@@ -2,6 +2,7 @@ const sheetsService = require('./sheetsService');
 const inventoryService = require('./inventoryService');
 const landedCostService = require('./landedCostService');
 const quotationEngine = require('./quotationEngine');
+const interactionLogger = require('./interactionLogger');
 const { round2, computeDocumentTotals, extractStateCode } = require('../utils/gstUtils');
 
 /**
@@ -424,6 +425,34 @@ async function previewPurchaseOrder(payload) {
   return { ...totals, Lines: lines, GST_Type: gstType };
 }
 
+/**
+ * Purchase Orders never carried a Task_ID — they aren't part of the Sales/Production pipeline, only
+ * Vendor_ID. That meant a PO event could only ever be logged customer/vendor-keyed, and the task
+ * board's timeline only matches a Task_ID-less interaction by Customer_ID — which a Vendor_ID never
+ * equals — so no PO activity could ever surface where telecalling staff actually work from. This
+ * creates a real Task_Master row (mirroring createQuotationFollowUpTask in apiRoutes.js) so PO
+ * events can be logged against a real Task_ID and finally show up on the board.
+ */
+async function createPurchaseOrderTask(po, actor) {
+  const task = {
+    Task_ID: newId('TASK'),
+    Description: `Purchase Order Follow-up - ${po.PO_No} - ${po.Vendor_Name}`,
+    Assigned_Staff: actor?.staffId || '',
+    Department: 'Purchase',
+    Stage: 'Purchase Order',
+    Type: 'One-time',
+    Scheduled_Date: istToday(),
+    Status: 'Pending',
+    PO_ID: po.PO_ID,
+    PO_No: po.PO_No,
+    Vendor_ID: po.Vendor_ID,
+    Created_By: actor?.staffId || 'SYSTEM',
+    Created_At: istToday()
+  };
+  await sheetsService.insertRow('Task_Master', task);
+  return task;
+}
+
 async function createPurchaseOrder(payload, actor) {
   const vendorId = String(payload.vendorId || '').trim();
   if (!vendorId) throw new Error('A vendor is required');
@@ -466,6 +495,9 @@ async function createPurchaseOrder(payload, actor) {
     Created_By: actor?.staffId || 'SYSTEM',
     Created_At: new Date().toISOString()
   };
+
+  const task = await createPurchaseOrderTask(row, actor);
+  row.Task_ID = task.Task_ID;
   await sheetsService.insertRow('Purchase_Order', row);
 
   if (row.RFQ_ID) {
@@ -473,6 +505,15 @@ async function createPurchaseOrder(payload, actor) {
       Status: RFQ_STATUS.CLOSED, Converted_PO_ID: row.PO_ID, Updated_At: new Date().toISOString()
     });
   }
+
+  await interactionLogger.logEvent({
+    tag: interactionLogger.EVENT_TAG.PO_GENERATED,
+    summary: `${row.PO_No} | ${interactionLogger.formatAmount(row.Grand_Total)} | ${row.Vendor_Name}`,
+    taskId: task.Task_ID,
+    customerId: vendorId,
+    actor
+  });
+
   return row;
 }
 
@@ -492,12 +533,25 @@ async function cancelPurchaseOrder(poId, reason, actor) {
   if ((po.Lines || []).some(l => Number(l.Received_Qty) > 0)) {
     throw new Error('Goods have already been received against this order — it cannot be cancelled');
   }
-  return sheetsService.updateRow('Purchase_Order', 'PO_ID', poId, {
+  const cancelReason = String(reason || '').trim();
+  const updated = await sheetsService.updateRow('Purchase_Order', 'PO_ID', poId, {
     Status: PO_STATUS.CANCELLED,
-    Cancel_Reason: String(reason || '').trim(),
+    Cancel_Reason: cancelReason,
     Cancelled_By: actor?.staffId || 'SYSTEM',
     Cancelled_At: new Date().toISOString()
   });
+
+  // Logged against the PO's own follow-up task (created with the order) — no second task for a
+  // cancellation, same principle as everywhere else a document is superseded rather than reborn.
+  await interactionLogger.logEvent({
+    tag: interactionLogger.EVENT_TAG.PO_CANCELLED,
+    summary: `${po.PO_No}${cancelReason ? ` | ${cancelReason}` : ''}`,
+    taskId: po.Task_ID,
+    customerId: po.Vendor_ID,
+    actor
+  });
+
+  return updated;
 }
 
 // ─── GOODS RECEIPT ─────────────────────────────────────────────────────────────────────────────
@@ -836,15 +890,28 @@ async function releasePayment(poId, { note, paidAmount } = {}, actor) {
     throw err;
   }
 
-  return sheetsService.updateRow('Purchase_Order', 'PO_ID', poId, {
+  const releasedAmount = round2(Number(paidAmount) || match.summary.Expected_Total);
+  const updated = await sheetsService.updateRow('Purchase_Order', 'PO_ID', poId, {
     Payment_Released: true,
     Payment_Released_At: new Date().toISOString(),
     Payment_Released_By: actor?.staffId || 'SYSTEM',
     Payment_Release_Note: text,
-    Payment_Released_Amount: round2(Number(paidAmount) || match.summary.Expected_Total),
+    Payment_Released_Amount: releasedAmount,
     Payment_Match_Status: match.summary.Match_Status,
     Updated_At: new Date().toISOString()
   });
+
+  const po = await getPurchaseOrderById(poId);
+  await interactionLogger.logEvent({
+    tag: interactionLogger.EVENT_TAG.VENDOR_PAYMENT_RELEASED,
+    summary: `${interactionLogger.formatAmount(releasedAmount)} to ${po?.Vendor_Name || 'vendor'} | ${po?.PO_No || poId}`
+      + `${text ? ` | ${text}` : ''}`,
+    taskId: po?.Task_ID,
+    customerId: po?.Vendor_ID,
+    actor
+  });
+
+  return updated;
 }
 
 // ─── VENDOR QUOTE → CUSTOMER QUOTATION ─────────────────────────────────────────────────────────

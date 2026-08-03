@@ -94,13 +94,28 @@ class MongoService {
     if (this.connectionPromise) {
       return this.connectionPromise;
     }
-    this.connectionPromise = mongoose.connect(targetUri).then(() => {
+    // Timed so a slow cold start (serverless) is visible in logs distinctly from a slow query
+    // inside getTab() — the two used to be indistinguishable from a single "it's slow" report.
+    const connectStarted = Date.now();
+    // Explicit pool/timeout tuning: unset, Mongoose's per-instance defaults mean every serverless
+    // cold start opens a fresh, unbounded-wait connection instead of failing fast and letting the
+    // caller retry. The timeouts bound how long a stalled handshake/query can hang before erroring
+    // out. maxPoolSize must clear the widest single fan-out in the app (/sync/all alone issues 13
+    // parallel getTab() calls) with real headroom — at 10 it was BELOW that, so /sync/all's own
+    // queries queued behind each other, and /api/notifications/my (polled independently every 30s,
+    // often landing mid-/sync/all) queued behind those, which is what stretched a punch-approval
+    // notification's arrival from a normal poll delay into a much longer wait.
+    this.connectionPromise = mongoose.connect(targetUri, {
+      maxPoolSize: 50,
+      serverSelectionTimeoutMS: 10000,
+      socketTimeoutMS: 45000
+    }).then(() => {
       this.isConnected = true;
-      console.log('✅ Connected to MongoDB Atlas');
+      console.log(`✅ Connected to MongoDB Atlas [PERF] connect() took ${Date.now() - connectStarted}ms`);
       this.ensureIndexes();
     }).catch(err => {
       this.connectionPromise = null;
-      console.error('❌ MongoDB Connection Error:', err);
+      console.error(`❌ MongoDB Connection Error after ${Date.now() - connectStarted}ms:`, err);
       throw err;
     });
     return this.connectionPromise;
@@ -129,6 +144,37 @@ class MongoService {
     } catch (err) {
       console.error('⚠️  Certificate number index not created:', err.message);
     }
+
+    // Lookup/filter indexes for the fields routes actually query on once filtering is pushed into
+    // Mongo (see queryTab). Each build is independent and best-effort — one failing must never
+    // block another or stop the server booting.
+    const lookupIndexes = [
+      ['Customer_Master', { Customer_ID: 1 }, 'customer_id'],
+      ['Task_Master', { Task_ID: 1 }, 'task_id'],
+      ['Task_Master', { Customer_ID: 1 }, 'task_customer_id'],
+      ['Task_Master', { Assigned_Staff: 1 }, 'task_assigned_staff'],
+      ['Task_Master', { Status: 1 }, 'task_status'],
+      ['Staff_Master', { Staff_ID: 1 }, 'staff_id'],
+      ['Item_Master', { Item_ID: 1 }, 'item_id'],
+      ['Item_Master', { Category: 1 }, 'item_category'],
+      ['Quotation_Master', { Customer_ID: 1 }, 'quotation_customer_id'],
+      ['Quotation_Master', { Status: 1 }, 'quotation_status'],
+      ['Quotation_Master', { Created_At_Ms: -1 }, 'quotation_created_at'],
+      ['Vendor_Master', { Vendor_ID: 1 }, 'vendor_id'],
+      ['Purchase_Order', { PO_ID: 1 }, 'po_id'],
+      ['Document_Registry', { Customer_ID: 1 }, 'doc_customer_id'],
+      // Compound, matching exactly how punchIn/punchOut/supersedePendingApprovals filter — a punch
+      // looks up one staff member's own rows for one date, not the whole collection.
+      ['Attendance_Log', { Staff_ID: 1, Date: 1 }, 'attendance_staff_date'],
+      ['Attendance_Approvals', { Staff_ID: 1, Requested_Date: 1, Punch_Type: 1, Status: 1 }, 'approvals_staff_date_type_status']
+    ];
+    for (const [collection, spec, name] of lookupIndexes) {
+      try {
+        await models[collection].collection.createIndex(spec, { name, background: true });
+      } catch (err) {
+        console.error(`⚠️  Index ${name} on ${collection} not created:`, err.message);
+      }
+    }
   }
 
   async getTab(sheetName) {
@@ -139,7 +185,13 @@ class MongoService {
     await this.connect();
     const Model = models[sheetName];
     if (!Model) throw new Error(`Collection ${sheetName} not found`);
+    // Separates the raw Mongo round-trip from the decrypt pass so a slow query and slow crypto
+    // show up as distinct numbers in logs instead of one opaque getTab() total — confirmed via
+    // direct measurement that Atlas round-trip latency, not decrypt, is what varies (0-30ms decrypt
+    // vs. hundreds of ms to several seconds of query time on this cluster).
+    const queryStarted = Date.now();
     const data = await Model.find({}).lean();
+    const queryMs = Date.now() - queryStarted;
     // Remove _id and __v for backward compatibility with existing JSON code. If a document has no
     // app-level `id` field of its own (legacy rows inserted before an `id` convention existed),
     // backfill it from Mongo's real, always-unique _id — otherwise every such row collapses to
@@ -154,9 +206,40 @@ class MongoService {
     // Decrypt BEFORE caching, so the cached array holds plaintext and a second reader inside the
     // 3s TTL never re-decrypts an already-decrypted value. decryptRows returns new objects and
     // leaves `cleanData` untouched, matching the read-only contract this cache relies on.
+    const decryptStarted = Date.now();
     const decrypted = decryptRows(sheetName, cleanData);
+    const decryptMs = Date.now() - decryptStarted;
+    if (queryMs > 200 || decryptMs > 200) {
+      console.log(`[PERF] getTab('${sheetName}') rows=${data.length} query=${queryMs}ms decrypt=${decryptMs}ms`);
+    }
     this.cache[sheetName] = { timestamp: now, data: decrypted };
     return decrypted;
+  }
+
+  /**
+   * Like getTab(), but pushes a filter down to Mongo instead of loading the whole collection and
+   * filtering in JS. Bypasses the getTab() cache on purpose — callers pass different filters on
+   * every request, so a shared cache keyed only on sheetName couldn't serve them correctly anyway.
+   * Only use this for collections that are large/growing AND already indexed for the fields being
+   * filtered on (see ensureIndexes); for small master lists getTab() + client-side search is the
+   * established, intentional pattern (see CLAUDE.md's UI Standard).
+   */
+  async queryTab(sheetName, filter = {}, options = {}) {
+    await this.connect();
+    const Model = models[sheetName];
+    if (!Model) throw new Error(`Collection ${sheetName} not found`);
+    let query = Model.find(filter).lean();
+    if (options.sort) query = query.sort(options.sort);
+    if (options.limit) query = query.limit(options.limit);
+    const data = await query;
+    const cleanData = data.map(doc => {
+      const fallbackId = doc._id ? String(doc._id) : undefined;
+      delete doc._id;
+      delete doc.__v;
+      if (doc.id === undefined && fallbackId) doc.id = fallbackId;
+      return doc;
+    });
+    return decryptRows(sheetName, cleanData);
   }
 
   async insertRow(sheetName, data) {

@@ -45,7 +45,10 @@ const EVENT_TAG = {
   PI_GENERATED: 'PI Generated',
   INVOICE_GENERATED: 'Invoice Generated',
   PAYMENT_RECEIVED: 'Payment Received',
-  STOCK_SHORT: 'Stock Short'
+  STOCK_SHORT: 'Stock Short',
+  PO_GENERATED: 'PO Generated',
+  PO_CANCELLED: 'PO Cancelled',
+  VENDOR_PAYMENT_RELEASED: 'Vendor Payment Released'
 };
 
 /**

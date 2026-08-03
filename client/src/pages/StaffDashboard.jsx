@@ -118,6 +118,10 @@ const SYSTEM_REMARK_BADGE_STYLES = {
   'PI Generated': 'bg-purple-100 text-purple-800 border border-purple-200',
   'Invoice Generated': 'bg-purple-100 text-purple-800 border border-purple-200',
   'Payment Received': 'bg-emerald-100 text-emerald-800 border border-emerald-200',
+  // Purchase
+  'PO Generated': 'bg-purple-100 text-purple-800 border border-purple-200',
+  'PO Cancelled': 'bg-slate-100 text-slate-700 border border-slate-200',
+  'Vendor Payment Released': 'bg-emerald-100 text-emerald-800 border border-emerald-200',
   // Needs attention
   'Stock Short': 'bg-rose-100 text-rose-800 border border-rose-200'
 };
@@ -471,6 +475,9 @@ export default function StaffDashboard() {
   const [editingRemarkText, setEditingRemarkText] = useState('');
   const [submittingRemark, setSubmittingRemark] = useState(false);
   const [punching, setPunching] = useState(false);
+  // Shown once, right after an on-time punch-in — a small on-screen thank-you, not a nag. Cleared
+  // on its own timer and on unmount, since it means nothing once the person has moved on.
+  const [onTimeCelebration, setOnTimeCelebration] = useState(null);
   const [showPunchOutConfirmModal, setShowPunchOutConfirmModal] = useState(false);
   const [showProfilePopup, setShowProfilePopup] = useState(false);
   const [leaveSubmitting, setLeaveSubmitting] = useState(false);
@@ -750,11 +757,18 @@ export default function StaffDashboard() {
     }
   };
 
+  // taskList must already be scoped to what this user is allowed to reorder (filteredTasks), NOT
+  // the raw `tasks` state. Under an Admin-role JWT — including while impersonating, since
+  // impersonation never re-issues the token — `tasks` holds every staff member's tasks mixed
+  // together (GET /api/sync/all returns the unfiltered list for role === 'Admin'). Saving that
+  // straight to Staff_Master.Task_Order used to write a company-wide, cross-staff Task_ID list onto
+  // whichever one staff row was being impersonated, which is why the sequence an Admin set while
+  // impersonating never matched what the real staff member's own device showed afterward.
   const saveTasksOrder = async (taskList) => {
     try {
       const orderArr = taskList.map(t => t.Task_ID);
       localStorage.setItem(ORDER_KEY, JSON.stringify(orderArr));
-      
+
       if (navigator.onLine && token && user?.Staff_ID) {
         await fetch(`/api/staff/${user.Staff_ID}/task-order`, {
           method: 'PUT',
@@ -773,18 +787,28 @@ export default function StaffDashboard() {
       setDragOverTaskId(null);
       return;
     }
-    const fromIdx = tasks.findIndex(t => t.Task_ID === fromTaskId);
-    const toIdx = tasks.findIndex(t => t.Task_ID === toTaskId);
+    // Reorder within the SCOPED (visible) list, not the raw cross-staff `tasks` state — see
+    // saveTasksOrder's comment above for why that distinction is the actual fix here.
+    const fromIdx = filteredTasks.findIndex(t => t.Task_ID === fromTaskId);
+    const toIdx = filteredTasks.findIndex(t => t.Task_ID === toTaskId);
     if (fromIdx === -1 || toIdx === -1) {
       setDraggedTaskId(null);
       setDragOverTaskId(null);
       return;
     }
-    const newTasks = [...tasks];
-    const [movedItem] = newTasks.splice(fromIdx, 1);
-    newTasks.splice(toIdx, 0, movedItem);
+    const newScoped = [...filteredTasks];
+    const [movedItem] = newScoped.splice(fromIdx, 1);
+    newScoped.splice(toIdx, 0, movedItem);
+
+    // Merge the new relative order of the scoped subset back into the full `tasks` array: every
+    // scoped Task_ID now appears in its new relative sequence, every other (out-of-scope) task
+    // keeps its original position relative to the other out-of-scope tasks.
+    const scopedIds = new Set(newScoped.map(t => t.Task_ID));
+    let scopedCursor = 0;
+    const newTasks = tasks.map(t => scopedIds.has(t.Task_ID) ? newScoped[scopedCursor++] : t);
+
     setTasks(newTasks);
-    saveTasksOrder(newTasks);
+    saveTasksOrder(newScoped);
     setDraggedTaskId(null);
     setDragOverTaskId(null);
   };
@@ -1276,9 +1300,13 @@ export default function StaffDashboard() {
     const handleOpenProfile = () => setShowProfilePopup(true);
     const handleNavbarPunchIn = () => handlePunchIn();
     const handleNavbarPunchOut = () => setShowPunchOutConfirmModal(true);
+    // Drives activeTab from the guided tour (client/src/tour/), which lives outside this page's
+    // local state — same event-bridge pattern as OPEN_STAFF_PROFILE_POPUP above.
+    const handleTourNavigateTab = (e) => { if (e.detail?.tab) setActiveTab(e.detail.tab); };
     window.addEventListener('OPEN_STAFF_PROFILE_POPUP', handleOpenProfile);
     window.addEventListener('NAVBAR_PUNCH_IN', handleNavbarPunchIn);
     window.addEventListener('NAVBAR_PUNCH_OUT', handleNavbarPunchOut);
+    window.addEventListener('TOUR_NAVIGATE_TAB', handleTourNavigateTab);
     return () => {
       window.removeEventListener('focus', handleFocusSync);
       document.removeEventListener('visibilitychange', handleVis);
@@ -1286,6 +1314,7 @@ export default function StaffDashboard() {
       window.removeEventListener('OPEN_STAFF_PROFILE_POPUP', handleOpenProfile);
       window.removeEventListener('NAVBAR_PUNCH_IN', handleNavbarPunchIn);
       window.removeEventListener('NAVBAR_PUNCH_OUT', handleNavbarPunchOut);
+      window.removeEventListener('TOUR_NAVIGATE_TAB', handleTourNavigateTab);
     };
   }, [token]);
 
@@ -1465,6 +1494,9 @@ export default function StaffDashboard() {
       const now = new Date();
       const overrideDate = getLocalDateStr(now);
       const overrideTime = getLocalTimeStr(now);
+      // Captured BEFORE the punch lands, so a lunch-break second punch-in (there is already a
+      // record for today) doesn't re-trigger the "first arrival" celebration below.
+      const isFirstPunchInToday = !attendanceLogs.some(r => r.Date === overrideDate);
       const res = await fetch(`/api/attendance/punch-${isIn ? 'in' : 'out'}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
@@ -1480,7 +1512,25 @@ export default function StaffDashboard() {
       }
 
       if (!res.ok) throw new Error(data.error || `Punch ${isIn ? 'in' : 'out'} failed`);
-      await fetchAttendanceAndLeaves();
+      // Merge the punch response into local state instead of a full /sync/all reload — the route
+      // already returns the record that changed, same pattern used for customer/task creation.
+      const punchedRecord = isIn ? data : data.record;
+      if (punchedRecord?.Record_ID) {
+        setAttendanceLogs(prev => {
+          const exists = prev.some(r => r.Record_ID === punchedRecord.Record_ID);
+          return exists
+            ? prev.map(r => r.Record_ID === punchedRecord.Record_ID ? { ...r, ...punchedRecord } : r)
+            : [...prev, punchedRecord];
+        });
+      }
+      // A punctual arrival is worth a small on-screen thank-you — recognition someone actually
+      // sees in the moment, not just a badge buried in history they may never open. Only for the
+      // day's FIRST punch-in — a lunch-break return isn't "arriving on time" and would make the
+      // message feel spammy rather than genuine.
+      if (isIn && isFirstPunchInToday && Number(punchedRecord?.Late_By_Minutes || 0) === 0) {
+        setOnTimeCelebration(punchedRecord.Punch_In_Time || getLocalTimeStr(now));
+        setTimeout(() => setOnTimeCelebration(null), 4000);
+      }
       window.dispatchEvent(new CustomEvent('ATTENDANCE_REFRESHED', { detail: isIn ? data : null }));
     } catch (err) {
       alert(err.message);
@@ -2027,6 +2077,7 @@ export default function StaffDashboard() {
         key={task.Task_ID}
         id={`task-card-${task.Task_ID}`}
         data-task-id={task.Task_ID}
+        data-tour={idx === 0 ? 'staff-task-row-actions' : undefined}
         onDragOver={(e) => {
           e.preventDefault();
           handleAutoScroll(e.clientY);
@@ -2669,9 +2720,23 @@ export default function StaffDashboard() {
 
   return (
     <div className="max-w-5xl mx-auto px-3 sm:px-6 py-4 sm:py-6 space-y-4 sm:space-y-6">
+      {/* On-time punch-in celebration — brief, self-dismissing, floats above whatever tab is open
+          so it's actually seen instead of buried in a history list. */}
+      {onTimeCelebration && (
+        <div className="fixed top-16 left-1/2 -translate-x-1/2 z-50 animate-fadeIn px-4 w-full max-w-sm">
+          <div className="bg-emerald-600 text-white rounded-2xl shadow-2xl px-4 py-3 flex items-center gap-3">
+            <span className="text-2xl shrink-0">🎉</span>
+            <div className="min-w-0">
+              <p className="text-sm font-extrabold">Right on time!</p>
+              <p className="text-[11px] text-emerald-100">Punched in at {onTimeCelebration} — great start today.</p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Global Search Bar & Actions - Sticky Header */}
       {activeTab === 'TASKS' && (
-        <div className="sticky top-[57px] sm:top-[65px] z-30 bg-white/95 backdrop-blur-md pb-3 pt-1 border-b border-slate-200">
+        <div data-tour="staff-tasks-header" className="sticky top-[57px] sm:top-[65px] z-30 bg-white/95 backdrop-blur-md pb-3 pt-1 border-b border-slate-200">
           <div className="flex flex-col gap-2.5 w-full">
             {/* Top Row: Search Input & Action Buttons */}
             <div className="flex flex-row items-center gap-1.5 sm:gap-2 w-full">
@@ -2990,7 +3055,8 @@ export default function StaffDashboard() {
               </div>
             ) : (
               filteredMyAttendanceLogs.map((log, index) => {
-                const isLate = log.Late_Minutes && Number(log.Late_Minutes) > 0;
+                const lateMins = Number(log.Late_By_Minutes || log.Late_Minutes || 0);
+                const isLate = lateMins > 0;
                 return (
                   <div key={index} className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm hover:shadow-md transition space-y-3">
                     {/* Vertical Table Header: Date & Punctuality Status */}
@@ -3002,7 +3068,7 @@ export default function StaffDashboard() {
                       {isLate ? (
                         <span className="px-2.5 py-1 rounded-full bg-rose-50 text-rose-700 font-bold text-[11px] border border-rose-200 inline-flex items-center gap-1 shrink-0">
                           <AlertTriangle className="w-3 h-3" />
-                          Late by {log.Late_Minutes}m
+                          Late by {lateMins}m
                         </span>
                       ) : (
                         <span className="px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 font-bold text-[11px] border border-emerald-200 inline-flex items-center gap-1 shrink-0">
@@ -4185,7 +4251,7 @@ export default function StaffDashboard() {
               }
 
               return (
-                <div className={`p-3 rounded-xl border space-y-2 ${openShift ? 'bg-rose-50 border-rose-200' : 'bg-amber-50 border-amber-200'}`}>
+                <div className={`p-3 rounded-xl border space-y-2 ${openShift ? 'bg-rose-50 border-rose-200' : 'bg-emerald-50 border-emerald-200'}`}>
                   <div className="flex items-center justify-between">
                     <div>
                       <p className="text-xs font-bold text-slate-800">Daily Attendance</p>
@@ -4193,7 +4259,12 @@ export default function StaffDashboard() {
                     </div>
                     <div className="text-right text-xs">
                       <p className="text-slate-500 font-medium text-[11px]">In: <span className="font-bold text-emerald-700">{openShift?.Punch_In_Time || '--:--'}</span></p>
-                      <p className="text-slate-500 font-medium text-[11px]">Out: <span className="font-bold text-amber-700">{openShift ? 'Active' : '--:--'}</span></p>
+                      <p className="text-slate-500 font-medium text-[11px]">Out: <span className="font-bold text-rose-700">{openShift ? 'Active' : '--:--'}</span></p>
+                      {openShift && Number(openShift.Late_By_Minutes || openShift.Late_Minutes || 0) > 0 && (
+                        <p className="text-rose-600 font-bold text-[10px] mt-0.5">
+                          Late by {Number(openShift.Late_By_Minutes || openShift.Late_Minutes)}m
+                        </p>
+                      )}
                     </div>
                   </div>
                   <button
@@ -4210,7 +4281,7 @@ export default function StaffDashboard() {
                     }}
                     className={`w-full py-2 rounded-xl font-bold text-xs flex items-center justify-center gap-2 shadow-sm transition ${openShift
                       ? 'bg-rose-600 hover:bg-rose-700 text-white'
-                      : 'bg-amber-600 hover:bg-amber-700 text-white'
+                      : 'bg-emerald-600 hover:bg-emerald-700 text-white'
                       }`}
                   >
                     {openShift ? <Square className="w-3 h-3 fill-white" /> : <Clock className="w-3 h-3" />}
@@ -4273,6 +4344,7 @@ export default function StaffDashboard() {
 
               <button
                 type="button"
+                data-tour="staff-profile-menu-apply-leave"
                 onClick={() => {
                   setShowProfilePopup(false);
                   setActiveTab('APPLY_LEAVE');
@@ -4288,6 +4360,7 @@ export default function StaffDashboard() {
 
               <button
                 type="button"
+                data-tour="staff-profile-menu-leave-apps"
                 onClick={() => {
                   setShowProfilePopup(false);
                   setActiveTab('LEAVE_APPLICATIONS');
@@ -4303,6 +4376,7 @@ export default function StaffDashboard() {
 
               <button
                 type="button"
+                data-tour="staff-profile-menu-attendance"
                 onClick={() => {
                   setShowProfilePopup(false);
                   setActiveTab('ATTENDANCE_HISTORY');
@@ -4318,6 +4392,7 @@ export default function StaffDashboard() {
 
               <button
                 type="button"
+                data-tour="staff-profile-menu-earnings"
                 onClick={() => {
                   setShowProfilePopup(false);
                   setActiveTab('EARNINGS');

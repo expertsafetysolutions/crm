@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { Wifi, WifiOff, RefreshCw, User, LayoutDashboard, Briefcase, HelpCircle, PhoneCall, Bell, CheckCircle2, AlertCircle, Clock, X, Info } from 'lucide-react';
+import { Wifi, WifiOff, RefreshCw, User, LayoutDashboard, Briefcase, HelpCircle, PhoneCall, Bell, CheckCircle2, AlertCircle, Clock, X, Info, Compass } from 'lucide-react';
 import { formatDateDDMMYYYY, getLocalTimeStr } from '../utils/dateUtils';
+import { useTour } from '../tour/TourContext';
 
 // __APP_BUILD_TIME__ is injected by Vite at build time (see vite.config.js `define`) — always
 // reflects the actual last deployment, no manual date to keep updated.
@@ -10,6 +11,7 @@ const APP_LAST_UPDATED_TIME = getLocalTimeStr(new Date(__APP_BUILD_TIME__));
 
 export default function Navbar({ currentView, setCurrentView }) {
   const { user, realUser, stopImpersonating, logout, isOnline, pendingSyncCount, syncOfflineData, refreshUserProfile } = useAuth();
+  const { start: startTour } = useTour();
   const [notifications, setNotifications] = useState([]);
   const [showNotifications, setShowNotifications] = useState(false);
   const [hasUnread, setHasUnread] = useState(false);
@@ -119,6 +121,39 @@ export default function Navbar({ currentView, setCurrentView }) {
     });
   }, [user?.Staff_ID, user?.id, realUser?.Staff_ID, realUser?.id]);
 
+  // Lets an out-of-office punch be approved/rejected right from the tray, without navigating away
+  // first. Calls the same route the full Attendance-tab approval card uses, then just drops the
+  // notification locally — the next 30s poll (or a manual open of the Attendance tab) picks up the
+  // resulting state change, so this doesn't need to trigger a full data reload itself.
+  const [decidingNotifId, setDecidingNotifId] = useState(null);
+  const handlePunchApprovalDecision = useCallback(async (n, decision) => {
+    const approvalId = n.targetId;
+    if (!approvalId) return;
+    let reason = '';
+    if (decision === 'reject') {
+      reason = window.prompt('Reason for rejecting (optional — the staff member will see this):') || '';
+    }
+    setDecidingNotifId(n.id);
+    try {
+      const res = await fetch(`/api/attendance/approvals/${approvalId}/${decision}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('expert_safety_token')}` },
+        body: JSON.stringify({ reason })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        if (res.status === 409) alert(data.error);
+        else throw new Error(data.error || 'Could not record that decision');
+        return;
+      }
+      dismissSingleNotification(n);
+    } catch (err) {
+      alert(err.message);
+    } finally {
+      setDecidingNotifId(null);
+    }
+  }, [dismissSingleNotification]);
+
   const handleMarkAllRead = () => {
     const userIdKey = (realUser || user)?.Staff_ID || (realUser || user)?.id || 'default';
     const dismissedKey = `expert_safety_dismissed_notifs_${userIdKey}`;
@@ -219,7 +254,7 @@ export default function Navbar({ currentView, setCurrentView }) {
 
         {/* View Switcher for Admins */}
         {isAdmin && (
-          <div className="hidden md:flex items-center bg-slate-100 p-1 rounded-xl border border-slate-200">
+          <div data-tour="navbar-view-switcher" className="hidden md:flex items-center bg-slate-100 p-1 rounded-xl border border-slate-200">
             <button
               onClick={() => {
                 if (stopImpersonating) stopImpersonating();
@@ -250,14 +285,17 @@ export default function Navbar({ currentView, setCurrentView }) {
 
         {/* Status Indicators & User Profile */}
         <div className="flex items-center space-x-1 sm:space-x-3.5">
-          {/* Help Button with Direct Contact Popover */}
-          <div className="group relative hidden sm:flex items-center">
+          {/* Help Button with Direct Contact Popover. Visible at all widths (not just sm+) — it's
+              the only entry point to replay the guided tour, and the target audience is mostly
+              on mobile. Hover works on desktop; the popover is also reachable on touch since
+              tapping keeps :hover/group-hover active until the next tap elsewhere. */}
+          <div data-tour="navbar-help-btn" className="group relative flex items-center">
             <button
               type="button"
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-xs font-bold transition shadow-2xs"
+              className="flex items-center gap-1.5 px-2 sm:px-2.5 py-1 rounded-full bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-xs font-bold transition shadow-2xs"
             >
               <HelpCircle className="w-3.5 h-3.5 text-rose-600" />
-              <span>Help</span>
+              <span className="hidden sm:inline">Help</span>
             </button>
 
             {/* Hover Support Card */}
@@ -288,6 +326,17 @@ export default function Navbar({ currentView, setCurrentView }) {
                   </div>
                   <span className="text-xs font-extrabold text-indigo-600">9429 980 244</span>
                 </a>
+
+                <button
+                  type="button"
+                  onClick={() => startTour(isAdmin ? 'Admin' : 'Staff')}
+                  className="w-full flex items-center justify-between p-2 rounded-xl bg-slate-50 hover:bg-indigo-50 border border-slate-200 hover:border-indigo-300 transition group/item"
+                >
+                  <div className="flex items-center gap-2">
+                    <Compass className="w-3.5 h-3.5 text-indigo-600" />
+                    <span className="text-xs font-bold text-slate-800 group-hover/item:text-indigo-700">Start Guided Tour</span>
+                  </div>
+                </button>
               </div>
             </div>
           </div>
@@ -391,6 +440,9 @@ export default function Navbar({ currentView, setCurrentView }) {
                         n={n}
                         onClick={handleNotificationClick}
                         onDismiss={dismissSingleNotification}
+                        onApprove={n.targetType === 'ATTENDANCE_APPROVAL' ? () => handlePunchApprovalDecision(n, 'approve') : null}
+                        onReject={n.targetType === 'ATTENDANCE_APPROVAL' ? () => handlePunchApprovalDecision(n, 'reject') : null}
+                        deciding={decidingNotifId === n.id}
                       />
                     ))
                   )}
@@ -419,6 +471,7 @@ export default function Navbar({ currentView, setCurrentView }) {
             </div>
             <button
               type="button"
+              data-tour="navbar-profile-btn"
               onClick={() => window.dispatchEvent(new CustomEvent('OPEN_STAFF_PROFILE_POPUP'))}
               className="w-9 h-9 rounded-full bg-slate-100 hover:bg-rose-100 border border-slate-200 hover:border-rose-300 flex items-center justify-center text-slate-700 hover:text-rose-600 transition shadow-sm cursor-pointer overflow-hidden relative group"
               title="Open Profile & Quick Menu"
@@ -478,7 +531,7 @@ export default function Navbar({ currentView, setCurrentView }) {
   );
 }
 
-function NotificationItem({ n, onClick, onDismiss }) {
+function NotificationItem({ n, onClick, onDismiss, onApprove, onReject, deciding }) {
   const [touchStart, setTouchStart] = useState(0);
   const [swipeOffset, setSwipeOffset] = useState(0);
   const [isSwiping, setIsSwiping] = useState(false);
@@ -544,6 +597,30 @@ function NotificationItem({ n, onClick, onDismiss }) {
         <p className="text-xs text-slate-600 font-medium mt-1 leading-snug">
           {n.message}
         </p>
+
+        {/* Act right here without leaving the tray. Tapping the card itself still navigates to the
+            full Attendance-tab approval card (stopPropagation keeps that reachable for anyone who
+            wants the fuller context — map link, GPS accuracy — before deciding). */}
+        {(onApprove || onReject) && (
+          <div className="flex gap-2 pt-2" onClick={(e) => e.stopPropagation()}>
+            <button
+              type="button"
+              disabled={deciding}
+              onClick={onApprove}
+              className="flex-1 min-h-[36px] rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-extrabold transition disabled:opacity-50"
+            >
+              {deciding ? 'Saving…' : 'Approve'}
+            </button>
+            <button
+              type="button"
+              disabled={deciding}
+              onClick={onReject}
+              className="flex-1 min-h-[36px] rounded-lg border border-rose-300 bg-white text-rose-700 hover:bg-rose-50 text-[11px] font-extrabold transition disabled:opacity-50"
+            >
+              Reject
+            </button>
+          </div>
+        )}
       </div>
 
       <button

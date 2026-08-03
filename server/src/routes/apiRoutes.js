@@ -98,10 +98,15 @@ router.get('/sync/all', async (req, res) => {
       Effective_Permissions: resolvePermissions(rest, rest.Role)
     }));
 
-    // Enrich tasks with customer details robustly (case-insensitive & trimmed matching)
+    // Enrich tasks with customer details robustly (case-insensitive & trimmed matching).
+    // Built once as a Map instead of a per-task .find() — a linear scan per task turns this into
+    // O(tasks x customers), which gets slow as both lists grow.
+    const customerById = new Map(
+      allCustomers.map(c => [String(c.Customer_ID || '').trim().toLowerCase(), c])
+    );
     const enrichedTasks = allTasks.map(t => {
       const custId = String(t.Customer_ID || '').trim().toLowerCase();
-      const customer = allCustomers.find(c => String(c.Customer_ID || '').trim().toLowerCase() === custId) || {};
+      const customer = customerById.get(custId) || {};
       return {
         ...t,
         Customer_Name: customer.Company_Name || t.Customer_Name || (t.Customer_ID ? `Customer (${t.Customer_ID})` : 'General Client'),
@@ -1392,14 +1397,18 @@ router.get('/notifications/my', async (req, res) => {
     const role = req.user.role || req.user.Role;
     // Lower-cased throughout: Role is free-form on Staff_Master and 'Admin'/'admin' both occur.
     const isAdminRole = String(role || '').trim().toLowerCase() === 'admin';
-    const [tasks, leaves, staffList, advances, serviceReports, certificates, attendance] = await Promise.all([
+    const [tasks, leaves, staffList, advances, serviceReports, certificates, attendance, pendingPunchApprovals] = await Promise.all([
       sheetsService.getAllTasks(),
       sheetsService.getAllLeaves(),
       sheetsService.getAllStaff(),
       sheetsService.getAdvances(),
       isAdminRole ? sheetsService.getAllServiceReports() : Promise.resolve([]),
       isAdminRole ? sheetsService.getAllCertificates() : Promise.resolve([]),
-      isAdminRole ? sheetsService.getAllAttendance() : Promise.resolve([])
+      isAdminRole ? sheetsService.getAllAttendance() : Promise.resolve([]),
+      // Pulled into this same Promise.all instead of a separate sequential await further down —
+      // it has no dependency on any of the results above, so there's no reason to pay its Atlas
+      // round trip after the others instead of alongside them.
+      isAdminRole ? attendanceService.listApprovals({ status: attendanceService.APPROVAL_STATUS.PENDING }).catch(() => []) : Promise.resolve([])
     ]);
 
     const notifications = [];
@@ -1581,30 +1590,24 @@ router.get('/notifications/my', async (req, res) => {
       /*
        * Out-of-office punch requests waiting on a decision. Listed BEFORE the punch entries below
        * because someone is standing there unable to start work — an action needed outranks an FYI.
+       * Fetched above in the initial Promise.all (with its own .catch, matching the try/catch this
+       * used to have) rather than a separate sequential await here.
        */
-      try {
-        const pendingPunchApprovals = await attendanceService.listApprovals({
-          status: attendanceService.APPROVAL_STATUS.PENDING
+      (pendingPunchApprovals || []).forEach(a => {
+        const where = a.Address_Text
+          ? a.Address_Text.split(',').slice(0, 3).join(',')
+          : (a.Distance_M != null ? `${a.Distance_M} m from office` : 'outside the office');
+        notifications.push({
+          id: `attapproval-${a.Approval_ID}`,
+          title: '📍 Out-of-Office Punch — Approval Needed',
+          message: `${a.Staff_Name} wants to punch ${a.Punch_Type === 'IN' ? 'in' : 'out'} at ${a.Requested_Time} — ${a.Distance_M != null ? `${a.Distance_M} m away` : 'location unknown'} (${where}).`,
+          time: `${a.Requested_Date} ${a.Requested_Time}`,
+          type: 'APPROVAL_NEEDED',
+          targetId: a.Approval_ID,
+          targetType: 'ATTENDANCE_APPROVAL',
+          action: 'REVIEW_ATTENDANCE_APPROVAL'
         });
-        pendingPunchApprovals.forEach(a => {
-          const where = a.Address_Text
-            ? a.Address_Text.split(',').slice(0, 3).join(',')
-            : (a.Distance_M != null ? `${a.Distance_M} m from office` : 'outside the office');
-          notifications.push({
-            id: `attapproval-${a.Approval_ID}`,
-            title: '📍 Out-of-Office Punch — Approval Needed',
-            message: `${a.Staff_Name} wants to punch ${a.Punch_Type === 'IN' ? 'in' : 'out'} at ${a.Requested_Time} — ${a.Distance_M != null ? `${a.Distance_M} m away` : 'location unknown'} (${where}).`,
-            time: `${a.Requested_Date} ${a.Requested_Time}`,
-            type: 'APPROVAL_NEEDED',
-            targetId: a.Approval_ID,
-            targetType: 'ATTENDANCE_APPROVAL',
-            action: 'REVIEW_ATTENDANCE_APPROVAL'
-          });
-        });
-      } catch (e) {
-        // The tray must still render if this one source fails.
-        console.error('Pending punch approvals for notifications failed:', e.message);
-      }
+      });
 
       /*
        * Today's punch in / punch out, so Admin can see who has actually turned up without opening
@@ -4005,11 +4008,16 @@ router.delete('/subject-options/:id', requirePermission('quotation', 'edit'), as
 // --- QUOTATIONS (Module B) ---
 router.get('/quotations', requirePermission('quotation','view'), async (req, res) => {
   try {
-    const all = await sheetsService.getAllQuotations();
     const { customerId, status, latestOnly } = req.query;
-    let filtered = all;
-    if (customerId) filtered = filtered.filter(q => q.Customer_ID === customerId);
-    if (status) filtered = filtered.filter(q => q.Status === status);
+    // customerId/status are pushed down to Mongo (indexed — see ensureIndexes) instead of loading
+    // every quotation ever issued and filtering in JS; the collection only grows, one row per
+    // revision, so an unfiltered list view gets slower every month otherwise.
+    const mongoFilter = {};
+    if (customerId) mongoFilter.Customer_ID = customerId;
+    if (status) mongoFilter.Status = status;
+    let filtered = Object.keys(mongoFilter).length
+      ? await sheetsService.queryTab('Quotation_Master', mongoFilter)
+      : await sheetsService.getAllQuotations();
     // Hides superseded revisions so a list view shows one row per quotation thread.
     if (latestOnly === 'true') filtered = filtered.filter(q => q.Status !== quotationEngine.STATUS.REVISED);
     res.json(filtered.sort((a, b) => (Number(b.Created_At_Ms) || 0) - (Number(a.Created_At_Ms) || 0)));

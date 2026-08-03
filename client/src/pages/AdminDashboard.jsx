@@ -138,6 +138,10 @@ const SYSTEM_REMARK_BADGE_STYLES = {
   'PI Generated': 'bg-purple-100 text-purple-800 border border-purple-200',
   'Invoice Generated': 'bg-purple-100 text-purple-800 border border-purple-200',
   'Payment Received': 'bg-emerald-100 text-emerald-800 border border-emerald-200',
+  // Purchase
+  'PO Generated': 'bg-purple-100 text-purple-800 border border-purple-200',
+  'PO Cancelled': 'bg-slate-100 text-slate-700 border border-slate-200',
+  'Vendor Payment Released': 'bg-emerald-100 text-emerald-800 border border-emerald-200',
   // Needs attention
   'Stock Short': 'bg-rose-100 text-rose-800 border border-rose-200'
 };
@@ -1020,12 +1024,17 @@ export default function AdminDashboard() {
     };
   }, [draggedTaskId]);
 
-  const ORDER_KEY = 'expert_safety_task_sequence_order';
+  // Namespaced per staff being viewed — a single global key let one staff's dragged sequence bleed
+  // into another staff's view the moment the filter switched to a different person.
+  const orderKeyForStaff = (staffId) => `expert_safety_task_sequence_order_${staffId || 'default'}`;
 
   const sortTasksByOrder = (taskList) => {
     if (!Array.isArray(taskList)) return taskList;
     try {
-      const rawOrder = localStorage.getItem(ORDER_KEY);
+      if (filterSelectedUsers.length !== 1) return taskList;
+      const selectedStaffNameOrId = filterSelectedUsers[0];
+      const staffMember = staffList.find(s => s.Name === selectedStaffNameOrId || s.Staff_ID === selectedStaffNameOrId);
+      const rawOrder = localStorage.getItem(orderKeyForStaff(staffMember?.Staff_ID));
       if (!rawOrder) return taskList;
       const orderArr = JSON.parse(rawOrder);
       if (!Array.isArray(orderArr) || orderArr.length === 0) return taskList;
@@ -1042,11 +1051,12 @@ export default function AdminDashboard() {
     }
   };
 
+  // taskList must already be scoped to the one staff member being viewed (see handleDropTask) —
+  // saving a cross-staff mixed list here would write the wrong Task_Order onto that staff's row,
+  // which is what let an Admin's drag session (including while impersonating) desync from what the
+  // real staff member's own device showed afterward.
   const saveTasksOrder = async (taskList) => {
     try {
-      const orderArr = taskList.map(t => t.Task_ID);
-      localStorage.setItem(ORDER_KEY, JSON.stringify(orderArr));
-
       if (filterSelectedUsers.length === 1) {
         const selectedStaffNameOrId = filterSelectedUsers[0];
         const staffMember = staffList.find(s => s.Name === selectedStaffNameOrId || s.Staff_ID === selectedStaffNameOrId);
@@ -1054,6 +1064,8 @@ export default function AdminDashboard() {
           const staffTaskIds = taskList
             .filter(t => t.Assigned_Staff === staffMember.Staff_ID || t.Assigned_Staff_Name === staffMember.Name)
             .map(t => t.Task_ID);
+
+          localStorage.setItem(orderKeyForStaff(staffMember.Staff_ID), JSON.stringify(staffTaskIds));
 
           await fetch(`/api/staff/${staffMember.Staff_ID}/task-order`, {
             method: 'PUT',
@@ -1074,18 +1086,34 @@ export default function AdminDashboard() {
       setDragOverTaskId(null);
       return;
     }
-    const fromIdx = tasks.findIndex(t => t.Task_ID === fromTaskId);
-    const toIdx = tasks.findIndex(t => t.Task_ID === toTaskId);
+    // Reorder within the one staff member's own tasks only, not the raw cross-staff `tasks`
+    // state — matching the scope saveTasksOrder already persists, so what's dragged on screen is
+    // exactly what gets written.
+    let scopedList = tasks;
+    if (filterSelectedUsers.length === 1) {
+      const selectedStaffNameOrId = filterSelectedUsers[0];
+      const staffMember = staffList.find(s => s.Name === selectedStaffNameOrId || s.Staff_ID === selectedStaffNameOrId);
+      if (staffMember?.Staff_ID) {
+        scopedList = tasks.filter(t => t.Assigned_Staff === staffMember.Staff_ID || t.Assigned_Staff_Name === staffMember.Name);
+      }
+    }
+    const fromIdx = scopedList.findIndex(t => t.Task_ID === fromTaskId);
+    const toIdx = scopedList.findIndex(t => t.Task_ID === toTaskId);
     if (fromIdx === -1 || toIdx === -1) {
       setDraggedTaskId(null);
       setDragOverTaskId(null);
       return;
     }
-    const newTasks = [...tasks];
-    const [movedItem] = newTasks.splice(fromIdx, 1);
-    newTasks.splice(toIdx, 0, movedItem);
+    const newScoped = [...scopedList];
+    const [movedItem] = newScoped.splice(fromIdx, 1);
+    newScoped.splice(toIdx, 0, movedItem);
+
+    const scopedIds = new Set(newScoped.map(t => t.Task_ID));
+    let scopedCursor = 0;
+    const newTasks = tasks.map(t => scopedIds.has(t.Task_ID) ? newScoped[scopedCursor++] : t);
+
     setTasks(newTasks);
-    saveTasksOrder(newTasks);
+    saveTasksOrder(newScoped);
     setDraggedTaskId(null);
     setDragOverTaskId(null);
   };
@@ -1879,6 +1907,14 @@ export default function AdminDashboard() {
     return () => window.removeEventListener('OPEN_STAFF_PROFILE_POPUP', openPopup);
   }, []);
 
+  // Drives activeTab from the guided tour (client/src/tour/), which lives outside this page's
+  // local state — same event-bridge pattern as OPEN_STAFF_PROFILE_POPUP above.
+  useEffect(() => {
+    const handleTourNavigateTab = (e) => { if (e.detail?.tab) setActiveTab(e.detail.tab); };
+    window.addEventListener('TOUR_NAVIGATE_TAB', handleTourNavigateTab);
+    return () => window.removeEventListener('TOUR_NAVIGATE_TAB', handleTourNavigateTab);
+  }, []);
+
   // Keyed on the popup's visibility rather than on each button that opens it, so every entry
   // point refreshes the status without needing to remember to call the loader.
   useEffect(() => {
@@ -2317,6 +2353,7 @@ export default function AdminDashboard() {
     e.preventDefault();
     try {
       let targetCustomerId = selectedCustomer?.Customer_ID || taskForm.customerId;
+      let createdCust = null;
 
       if (isNewCustomerMode) {
         if (!customerForm.companyName.trim()) {
@@ -2339,7 +2376,7 @@ export default function AdminDashboard() {
           })
         });
         if (!custRes.ok) throw new Error('Failed to save customer to database');
-        const createdCust = await custRes.json();
+        createdCust = await custRes.json();
         targetCustomerId = createdCust.Customer_ID;
       } else if (!targetCustomerId) {
         alert('Please select a company from Customer Database or click "+ New Customer"');
@@ -2367,10 +2404,14 @@ export default function AdminDashboard() {
         })
       });
       if (!res.ok) throw new Error('Failed to create task');
+      const createdTask = await res.json();
       setShowNewTaskModal(false);
       setSelectedCustomer(null);
       setIsNewCustomerMode(false);
-      loadAdminData();
+      // Merge locally instead of reloading /sync/all (12 full-collection fetches) for one new row.
+      const nextCustomers = createdCust ? [...customers, createdCust] : customers;
+      if (createdCust) setCustomers(nextCustomers);
+      setTasks(prev => sortTasksByOrder([...prev, ...enrichTasksWithCustomers([createdTask], nextCustomers)]));
     } catch (err) {
       alert(err.message);
     }
@@ -2388,8 +2429,11 @@ export default function AdminDashboard() {
         body: JSON.stringify(customerForm)
       });
       if (!res.ok) throw new Error('Failed to create customer');
+      const createdCust = await res.json();
       setShowNewCustomerModal(false);
-      loadAdminData();
+      // Merge the new row into local state instead of re-fetching all of /sync/all — a single
+      // insert doesn't need every collection in the app reloaded.
+      setCustomers(prev => [...prev, createdCust]);
     } catch (err) {
     }
   };
@@ -3270,12 +3314,12 @@ export default function AdminDashboard() {
         <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
           {[
             { id: 'OVERVIEW', label: 'Overview & Stats', shortLabel: 'Overview', icon: LayoutDashboard },
-            { id: 'PIPELINE', label: '1. Work Orders & Pipeline', shortLabel: '1. Pipeline', icon: Layers },
-            { id: 'STAFF', label: '2. Staff Roster & Scope', shortLabel: '2. Staff', icon: Users },
-            { id: 'CUSTOMERS', label: '3. Client Database & CRM', shortLabel: '3. CRM', icon: Building2 },
-            { id: 'ATTENDANCE', label: '4. Attendance & Leave Roster', shortLabel: '4. Attendance', icon: Clock },
-            { id: 'LOGS', label: '5. Live Activity Logs', shortLabel: '5. Logs', icon: Activity },
-            { id: 'CERTIFICATES', label: '6. Certificate Module', shortLabel: '6. Certificates', icon: Award },
+            { id: 'PIPELINE', label: '1. Work Orders & Pipeline', shortLabel: '1. Pipeline', icon: Layers, tourId: 'admin-card-pipeline' },
+            { id: 'STAFF', label: '2. Staff Roster & Scope', shortLabel: '2. Staff', icon: Users, tourId: 'admin-card-staff' },
+            { id: 'CUSTOMERS', label: '3. Client Database & CRM', shortLabel: '3. CRM', icon: Building2, tourId: 'admin-card-customers' },
+            { id: 'ATTENDANCE', label: '4. Attendance & Leave Roster', shortLabel: '4. Attendance', icon: Clock, tourId: 'admin-card-attendance' },
+            { id: 'LOGS', label: '5. Live Activity Logs', shortLabel: '5. Logs', icon: Activity, tourId: 'admin-card-logs' },
+            { id: 'CERTIFICATES', label: '6. Certificate Module', shortLabel: '6. Certificates', icon: Award, tourId: 'admin-card-certificates' },
             { id: 'SERVICE_REPORTS', label: '7. Service Reports Queue', shortLabel: '7. Reports', icon: FileCheck },
             { id: 'RECYCLE_BIN', label: '8. Recycle Bin', shortLabel: '8. Recycle Bin', icon: Trash2 },
             { id: 'PUSH_SETTINGS', label: '9. Push Notifications', shortLabel: '9. Notifications', icon: Bell },
@@ -3285,6 +3329,7 @@ export default function AdminDashboard() {
             return (
               <button
                 key={tab.id}
+                data-tour={tab.tourId}
                 onClick={() => { setActiveTab(tab.id); setHeaderOpen(false); }}
                 className={`px-3 sm:px-3.5 py-2 sm:py-2.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition shadow-2xs ${
                   activeTab === tab.id
@@ -3414,7 +3459,7 @@ export default function AdminDashboard() {
 
       {/* OVERVIEW & STATS FRONT PAGE WITH THE 5 MENU CARDS */}
       {activeTab === 'OVERVIEW' && (
-        <div className="space-y-6 animate-fadeIn">
+        <div data-tour="admin-overview-tab" className="space-y-6 animate-fadeIn">
           {/* Clean Navigation Cards List */}
           <div className="space-y-3">
             <div className="flex items-center justify-between px-1">

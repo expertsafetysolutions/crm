@@ -432,56 +432,58 @@ export default function PurchasePage() {
 
                   {/* DESKTOP: a register — Company / Material Details / PO Date / PO No / Remark,
                       one row per order, the way the office reads this list on paper/Excel today. */}
-                  <div className="hidden md:block bg-white border border-slate-200 rounded-xl overflow-x-auto">
-                    <table className="w-full text-xs">
-                      <thead>
-                        <tr className="border-b border-slate-200 text-left text-[10px] font-extrabold uppercase tracking-wide text-slate-400">
-                          <th className="px-3 py-2">Company Name</th>
-                          <th className="px-3 py-2">Material Details</th>
-                          <th className="px-3 py-2">PO Date</th>
-                          <th className="px-3 py-2">PO No.</th>
-                          <th className="px-3 py-2">Remark</th>
-                          <th className="px-3 py-2">Status</th>
-                          <th className="px-3 py-2 text-right">Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {visibleOrders.map(po => {
-                          const vendor = vendorById.get(po.Vendor_ID);
-                          return (
-                            <tr key={po.PO_ID} className="border-b border-slate-100 last:border-0 hover:bg-slate-50">
-                              <td className="px-3 py-2 font-bold text-slate-900 cursor-pointer" onClick={() => navigate(`/purchase-orders/${po.PO_ID}`)}>
-                                {po.Vendor_Name}
-                              </td>
-                              <td className="px-3 py-2 text-slate-600 max-w-[280px] truncate" title={materialSummary(po)}>
-                                {materialSummary(po) || '—'}
-                              </td>
-                              <td className="px-3 py-2 text-slate-600 whitespace-nowrap">{po.PO_Date}</td>
-                              <td className="px-3 py-2 font-bold text-slate-900 whitespace-nowrap cursor-pointer" onClick={() => navigate(`/purchase-orders/${po.PO_ID}`)}>
-                                {po.PO_No}
-                              </td>
-                              <td className="px-3 py-2 text-slate-500 max-w-[200px] truncate" title={po.Notes || ''}>
-                                {po.Notes || '—'}
-                              </td>
-                              <td className="px-3 py-2"><StatusChip status={po.Status} /></td>
-                              <td className="px-3 py-2">
-                                <div className="flex items-center justify-end gap-1.5">
-                                  <PoActionBar po={po} vendor={vendor} busy={dispatchBusyId === po.PO_ID}
-                                    onCall={callVendor} onWhatsapp={whatsappVendor} onEmail={emailPo}
-                                    onReminder={remindPo} onRemark={() => setRemarkModal({ po, vendor })} />
-                                  {po.Status !== 'Received' && po.Status !== 'Cancelled' && (
-                                    <button onClick={() => { setReceiving({ po, lines: {}, totalCharges: '', vendorInvoiceNo: '', rating: 0 }); setTab('RECEIVE'); }}
-                                      className="px-2.5 h-8 rounded-lg bg-slate-900 text-white text-[11px] font-extrabold active:bg-slate-800 shrink-0">
-                                      Receive
-                                    </button>
-                                  )}
-                                </div>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
+                  <div className="hidden md:block bg-white border border-slate-200 rounded-xl overflow-hidden">
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead className="bg-slate-50 text-[11px] uppercase text-slate-500">
+                          <tr>
+                            <th className="px-4 py-2.5 text-left font-bold">Company Name</th>
+                            <th className="px-4 py-2.5 text-left font-bold">Material Details</th>
+                            <th className="px-4 py-2.5 text-left font-bold">PO Date</th>
+                            <th className="px-4 py-2.5 text-left font-bold">PO No.</th>
+                            <th className="px-4 py-2.5 text-left font-bold">Remark</th>
+                            <th className="px-4 py-2.5 text-left font-bold">Status</th>
+                            <th className="px-4 py-2.5 text-right font-bold">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {visibleOrders.map(po => {
+                            const vendor = vendorById.get(po.Vendor_ID);
+                            return (
+                              <tr key={po.PO_ID} className="border-t border-slate-100 hover:bg-slate-50">
+                                <td className="px-4 py-2.5 font-semibold text-slate-900 cursor-pointer" onClick={() => navigate(`/purchase-orders/${po.PO_ID}`)}>
+                                  {po.Vendor_Name}
+                                </td>
+                                <td className="px-4 py-2.5 text-slate-600 max-w-[280px] truncate" title={materialSummary(po)}>
+                                  {materialSummary(po) || '—'}
+                                </td>
+                                <td className="px-4 py-2.5 text-slate-500 whitespace-nowrap">{po.PO_Date}</td>
+                                <td className="px-4 py-2.5 font-semibold text-slate-900 whitespace-nowrap cursor-pointer" onClick={() => navigate(`/purchase-orders/${po.PO_ID}`)}>
+                                  {po.PO_No}
+                                </td>
+                                <td className="px-4 py-2.5 text-slate-500 max-w-[200px] truncate" title={po.Notes || ''}>
+                                  {po.Notes || '—'}
+                                </td>
+                                <td className="px-4 py-2.5"><StatusChip status={po.Status} /></td>
+                                <td className="px-4 py-2.5">
+                                  <div className="flex items-center justify-end gap-1.5">
+                                    <PoActionBar po={po} vendor={vendor} busy={dispatchBusyId === po.PO_ID}
+                                      onCall={callVendor} onWhatsapp={whatsappVendor} onEmail={emailPo}
+                                      onReminder={remindPo} onRemark={() => setRemarkModal({ po, vendor })} />
+                                    {po.Status !== 'Received' && po.Status !== 'Cancelled' && (
+                                      <button onClick={() => { setReceiving({ po, lines: {}, totalCharges: '', vendorInvoiceNo: '', rating: 0 }); setTab('RECEIVE'); }}
+                                        className="px-2.5 h-8 rounded-lg bg-slate-900 text-white text-[11px] font-extrabold active:bg-slate-800 shrink-0">
+                                        Receive
+                                      </button>
+                                    )}
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
                 </>
               )}
@@ -797,11 +799,11 @@ function Row({ label, value, strong, tone = '' }) {
 }
 
 function StatusChip({ status }) {
-  const tone = /Received$/.test(status) ? 'bg-emerald-100 text-emerald-700'
-    : /Partial/.test(status) ? 'bg-amber-100 text-amber-800'
-    : /Cancelled/.test(status) ? 'bg-slate-100 text-slate-500'
-    : 'bg-blue-100 text-blue-700';
-  return <span className={`px-2 py-0.5 rounded text-[10px] font-extrabold shrink-0 ${tone}`}>{status}</span>;
+  const tone = /Received$/.test(status) ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+    : /Partial/.test(status) ? 'bg-amber-50 text-amber-800 border-amber-200'
+    : /Cancelled/.test(status) ? 'bg-slate-100 text-slate-500 border-slate-200'
+    : 'bg-blue-50 text-blue-700 border-blue-200';
+  return <span className={`px-2 py-0.5 rounded-full border text-[10px] font-bold shrink-0 ${tone}`}>{status}</span>;
 }
 
 /**

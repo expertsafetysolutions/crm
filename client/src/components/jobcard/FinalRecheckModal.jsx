@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { AlertTriangle, X } from 'lucide-react';
 import { RECHECK, RECHECK_LABELS } from '../../utils/jobCardSchema';
+import useModalBackButton from '../../utils/useModalBackButton';
 
 /**
  * FinalRecheckModal — the gate between "we noticed the safety pin was missing" and handing the
@@ -12,6 +13,10 @@ import { RECHECK, RECHECK_LABELS } from '../../utils/jobCardSchema';
  * a record of who accepted that. The server enforces the same rule; this is the humane version.
  */
 export default function FinalRecheckModal({ pending = [], onSubmit, onClose, busy = false }) {
+  // Only mounted while open, so `true` is always correct: the phone back button closes this modal
+  // instead of exiting the app. See useModalBackButton.
+  useModalBackButton(true, onClose);
+
   const [answers, setAnswers] = useState(() => {
     const seed = {};
     for (const p of pending) {

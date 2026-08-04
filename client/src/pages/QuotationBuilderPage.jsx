@@ -18,6 +18,7 @@ import {
 import { createSubjectOption, renameSubjectOption, deleteSubjectOption } from '../utils/subjectOptions';
 import SubjectCombo from '../components/SubjectCombo';
 import { stateOptions, extractStateCode, detectStateCode, getStateName } from '../utils/gstinUtils';
+import useModalBackButton from '../utils/useModalBackButton';
 
 // Must match ORDER_LOST_REASONS in server/src/routes/apiRoutes.js — the server rejects anything
 // outside this list when an enquiry is closed as Lost.
@@ -101,6 +102,14 @@ export default function QuotationBuilderPage() {
   const [editingReminderDays, setEditingReminderDays] = useState(false);
   const [reminderDaysDraft, setReminderDaysDraft] = useState('');
   const [savingReminderDays, setSavingReminderDays] = useState(false);
+
+  // Phone back button closes the open popup instead of exiting the app (installed PWAs run in
+  // standalone mode, where back on an empty history stack quits). See useModalBackButton.
+  useModalBackButton(showPreview, () => setShowPreview(false));
+  useModalBackButton(showActions, () => setShowActions(false));
+  useModalBackButton(Boolean(custEdit), () => setCustEdit(null));
+  useModalBackButton(Boolean(closeForm), () => setCloseForm(null));
+  useModalBackButton(Boolean(itemCreate), () => setItemCreate(null));
 
   // Draft form state (only meaningful before the quotation is issued)
   const [form, setForm] = useState({
@@ -248,21 +257,6 @@ export default function QuotationBuilderPage() {
     window.addEventListener('resize', fit);
     return () => window.removeEventListener('resize', fit);
   }, [showPreview]);
-
-  // Tracks the preview's real (possibly multi-page) natural height so the modal's scroll box isn't
-  // hard-pinned to one A4 sheet — QuotationPdfTemplate paginates internally and the parent has no
-  // other way to know the page count in advance.
-  useEffect(() => {
-    if (!showPreview) return undefined;
-    const el = previewRef.current;
-    if (!el) return undefined;
-    const measure = () => setPreviewNaturalHeight(el.scrollHeight || 1123);
-    measure();
-    if (typeof ResizeObserver === 'undefined') return undefined;
-    const ro = new ResizeObserver(measure);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [showPreview, printDoc]);
 
   // ---- historical rates when the customer changes ----
   useEffect(() => {
@@ -817,6 +811,25 @@ export default function QuotationBuilderPage() {
     ...quotation,
     Line_Items: (quotation.Line_Items || []).map(l => ({ ...l, Photo_URL: linePhoto(l) }))
   };
+
+  // Tracks the preview's real (possibly multi-page) natural height so the modal's scroll box isn't
+  // hard-pinned to one A4 sheet — QuotationPdfTemplate paginates internally and the parent has no
+  // other way to know the page count in advance.
+  //
+  // MUST stay below `printDoc`: it is a dep of this effect, and a `const` read from above its own
+  // declaration is a TDZ error — which crashed the whole page ("Cannot access 'printDoc' before
+  // initialization") the instant a quotation was opened, not just when the preview was shown.
+  useEffect(() => {
+    if (!showPreview) return undefined;
+    const el = previewRef.current;
+    if (!el) return undefined;
+    const measure = () => setPreviewNaturalHeight(el.scrollHeight || 1123);
+    measure();
+    if (typeof ResizeObserver === 'undefined') return undefined;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [showPreview, printDoc]);
 
   // POST /api/items is gated on inventory.add, so hide the inline creator rather than let it 403.
   const canAddItem = isAdmin || Boolean(perms?.inventory?.add);

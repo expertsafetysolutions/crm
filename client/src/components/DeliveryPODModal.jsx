@@ -3,6 +3,7 @@ import { X, Camera, Eraser, MapPin, AlertTriangle } from 'lucide-react';
 import { getAccurateGpsPosition } from '../utils/gpsHelper';
 import { compressImageToDataURL } from '../utils/imageCompression';
 import { watermarkWithLocation } from '../utils/geoWatermark';
+import useModalBackButton from '../utils/useModalBackButton';
 
 /**
  * DeliveryPODModal — signature, geo-stamped photos and the receiver's name, captured at the gate.
@@ -13,6 +14,10 @@ import { watermarkWithLocation } from '../utils/geoWatermark';
  * the control.
  */
 export default function DeliveryPODModal({ challan, pendingStandby = [], onSubmit, onReturnStandby, onRetainStandby, onClose, busy = false }) {
+  // Only mounted while open, so `true` is always correct: the phone back button closes this modal
+  // instead of exiting the app. See useModalBackButton.
+  useModalBackButton(true, onClose);
+
   const canvasRef = useRef(null);
   const drawing = useRef(false);
   const [hasSignature, setHasSignature] = useState(false);

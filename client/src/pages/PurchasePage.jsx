@@ -8,6 +8,7 @@ import {
 import { useAuth } from '../context/AuthContext';
 import SmartSearchSelect from '../components/SmartSearchSelect';
 import { filterByQuery } from '../utils/searchUtils';
+import useModalBackButton from '../utils/useModalBackButton';
 
 /**
  * PurchasePage — vendors, enquiries, orders and goods receipt in one tabbed screen.
@@ -860,6 +861,11 @@ function VendorRemarkModal({ po, vendor, headers, onClose, onLogged }) {
   const [loading, setLoading] = useState(true);
   const [text, setText] = useState('');
   const [saving, setSaving] = useState(false);
+
+  // Registered inside the modal rather than at the call site: this component only exists while it
+  // is open, so `true` is always correct here and every caller is covered without remembering to
+  // wire it up. Phone back button closes it instead of exiting the app.
+  useModalBackButton(true, onClose);
 
   useEffect(() => {
     let cancelled = false;

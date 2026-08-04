@@ -9,6 +9,7 @@ import { useAuth } from '../context/AuthContext';
 import { matchesQuery, filterByQuery } from '../utils/searchUtils';
 import { formatMoney, formatDate, todayISO } from '../utils/quotationUtils';
 import LazyImage from '../components/LazyImage';
+import useModalBackButton from '../utils/useModalBackButton';
 
 /**
  * Item Master + stock ledger (Modules B catalog and E inventory).
@@ -847,6 +848,11 @@ function Table({ head, rows, empty }) {
  * on-screen keyboard on mobile, whereas a bottom sheet stays anchored and scrolls naturally.
  */
 function Modal({ title, children, onClose, onSave }) {
+  // Registered inside the modal rather than at each call site: this component only exists while it
+  // is open, so `true` is always correct here and both callers (item form, stock movement) are
+  // covered. Phone back button closes it instead of exiting the app.
+  useModalBackButton(true, onClose);
+
   return (
     <div className="fixed inset-0 bg-slate-900/50 flex items-end md:items-center justify-center md:p-4 z-50" onClick={onClose}>
       <div

@@ -4,6 +4,7 @@ import { ArrowLeft, Search, AlertTriangle, Plus, X, Loader2, ToggleLeft, ToggleR
 import { useAuth } from '../context/AuthContext';
 import { matchesQuery } from '../utils/searchUtils';
 import SmartSearchSelect from '../components/SmartSearchSelect';
+import useModalBackButton from '../utils/useModalBackButton';
 
 /**
  * CertificateDueReportPage — every piece of equipment whose validity is expiring soon, flattened
@@ -307,6 +308,10 @@ export default function CertificateDueReportPage() {
 }
 
 function AddManualDueEntryModal({ token, customers, onClose, onSaved }) {
+  // Only mounted while open, so `true` is always correct: the phone back button closes this modal
+  // instead of exiting the app. See useModalBackButton.
+  useModalBackButton(true, onClose);
+
   const [customer, setCustomer] = useState(null);
   const [items, setItems] = useState([{ itemName: '', capacity: '', qty: '1' }]);
   const [dueDate, setDueDate] = useState('');

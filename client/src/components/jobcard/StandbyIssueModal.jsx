@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { X, Plus, Trash2, Loader2 } from 'lucide-react';
 import EuidScanner from '../EuidScanner';
+import useModalBackButton from '../../utils/useModalBackButton';
 
 /**
  * StandbyIssueModal — lends the customer a working extinguisher while theirs is on our bench.
@@ -13,6 +14,10 @@ import EuidScanner from '../EuidScanner';
 export default function StandbyIssueModal({ categories = [], onIssue, onClose, busy = false }) {
   const [rows, setRows] = useState([{ EUID_No: '', Equipment_Type: '', Capacity: '', gatePassNo: '' }]);
   const [error, setError] = useState('');
+
+  // Only mounted while open, so `true` is always correct: the phone back button closes this modal
+  // instead of exiting the app. See useModalBackButton.
+  useModalBackButton(true, onClose);
 
   const update = (i, patch) => setRows(rs => rs.map((r, n) => (n === i ? { ...r, ...patch } : r)));
   const addRow = () => setRows(rs => [...rs, {

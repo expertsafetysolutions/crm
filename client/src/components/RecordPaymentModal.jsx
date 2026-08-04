@@ -2,6 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { X, Loader2, ReceiptIndianRupee } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { formatMoney, balanceDue, todayISO, PAYMENT_MODES } from '../utils/quotationUtils';
+import useModalBackButton from '../utils/useModalBackButton';
 
 /**
  * Records a full or part payment against a Sales Invoice.
@@ -13,6 +14,10 @@ import { formatMoney, balanceDue, todayISO, PAYMENT_MODES } from '../utils/quota
 export default function RecordPaymentModal({ invoice, onClose, onRecorded }) {
   const { token } = useAuth();
   const due = balanceDue(invoice);
+
+  // Only mounted while open, so `true` is always correct: the phone back button closes this modal
+  // instead of exiting the app. See useModalBackButton.
+  useModalBackButton(true, onClose);
 
   const [amount, setAmount] = useState(due ? String(due.toFixed(2)) : '');
   const [paymentMode, setPaymentMode] = useState(PAYMENT_MODES[0]);

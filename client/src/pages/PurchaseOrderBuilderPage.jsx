@@ -16,6 +16,7 @@ import { formatMoney, formatDate } from '../utils/quotationUtils';
 import { createSubjectOption } from '../utils/subjectOptions';
 import SubjectCombo from '../components/SubjectCombo';
 import CollapsibleSection from '../components/CollapsibleSection';
+import useModalBackButton from '../utils/useModalBackButton';
 
 const istToday = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
 
@@ -71,6 +72,13 @@ export default function PurchaseOrderBuilderPage() {
   const [perms, setPerms] = useState(null);
   const [itemCreate, setItemCreate] = useState(null);
   const [savingItem, setSavingItem] = useState(false);
+
+  // Phone back button closes the open popup instead of exiting the app (installed PWAs run in
+  // standalone mode, where back on an empty history stack quits). See useModalBackButton.
+  useModalBackButton(showPreview, () => setShowPreview(false));
+  useModalBackButton(showActions, () => setShowActions(false));
+  useModalBackButton(Boolean(vendEdit), () => setVendEdit(null));
+  useModalBackButton(Boolean(itemCreate), () => setItemCreate(null));
   // Receive/pay-on-save panel: only offered while creating, mirroring the old inline form.
   const [instant, setInstant] = useState({
     markReceived: false, vendorInvoiceNo: '', vendorInvoiceAmount: '', totalCharges: '',

@@ -8,6 +8,7 @@ import SmartSearchSelect from '../components/SmartSearchSelect';
 import DeliveryPODModal from '../components/DeliveryPODModal';
 import { downloadPdfFromElement, safeFileName } from '../utils/pdfGenerator';
 import { enqueueOfflineAction } from '../utils/offlineQueue';
+import useModalBackButton from '../utils/useModalBackButton';
 
 /**
  * ChallanBuilderPage — reviews the generated draft and turns it into an issued delivery challan.
@@ -48,6 +49,12 @@ export default function ChallanBuilderPage() {
   const [certPrompt, setCertPrompt] = useState(null);
   const [mapping, setMapping] = useState(null);
   const [pod, setPod] = useState(null);
+
+  // Phone back button closes the open popup instead of exiting the app (installed PWAs run in
+  // standalone mode, where back on an empty history stack quits). See useModalBackButton.
+  // DeliveryPODModal registers itself internally, so it is deliberately NOT listed here —
+  // registering a popup twice would make it take two back presses to close.
+  useModalBackButton(Boolean(certPrompt), () => setCertPrompt(null));
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');

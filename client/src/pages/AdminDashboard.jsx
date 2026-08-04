@@ -20,6 +20,7 @@ import {
   formatDialerNumber
 } from '../utils/dateUtils';
 import { validatePasswordPolicy } from '../utils/passwordUtils';
+import useModalBackButton from '../utils/useModalBackButton';
 import {
   Users,
   Briefcase,
@@ -1437,119 +1438,40 @@ export default function AdminDashboard() {
 
   const lastSyncRef = useRef(0);
 
-  // Intercept back button to close modals instead of exiting/closing the app.
-  // `window.history.state` is browser session-history state, not React state — it survives a
-  // page reload. If a tap opened a modal (pushing { modalOpen: true }) and this component was
-  // then remounted WITHOUT that modal's own close path running (e.g. the guided tour's spotlight
-  // lets its underlying button be tapped, then the tour's own Done/Skip closes the tour without
-  // touching this modal state), the stale `modalOpen: true` is still sitting on the current
-  // history entry on the very next mount — with every modal flag correctly reset to false.
-  // Without the mountedRef guard below, that first render's `else` branch would call
-  // `history.back()` unconditionally before the user does anything, which can strand the page on
-  // a blank entry and — because nothing here ever clears the stale flag — repeats on every
-  // subsequent reload until something else (e.g. logout's `location.replace`) discards the entry.
-  const modalHistoryMountedRef = useRef(false);
-  useEffect(() => {
-    const isAnyModalOpen = showStaffProgressReport ||
-                           showRemarksModal ||
-                           showAdvanceModal ||
-                           showAdminLeaveModal ||
-                           showTagManagerModal ||
-                           showClientEquipmentModal ||
-                           showNewTaskModal ||
-                           showEditTaskModal ||
-                           showNewCustomerModal ||
-                           showNewStaffModal ||
-                           showChangePasswordModal ||
-                           showStaffAccessModal ||
-                           showAdminProfilePopup ||
-                           showEditCustomerModal ||
-                           showFilterModal ||
-                           showCompanyDetailsModal ||
-                           showICardModal ||
-                           Boolean(zoomedImage) ||
-                           Boolean(selectedStaffProfile) ||
-                           (contactModal && contactModal.isOpen) ||
-                           Boolean(activeModal);
-
-    if (!modalHistoryMountedRef.current) {
-      modalHistoryMountedRef.current = true;
-      // First render ever for this mount: no modal was opened by an in-app tap this session, so
-      // any `modalOpen: true` on the current history entry is stale from before a reload. Clear
-      // it instead of ever calling history.back() on a flag we didn't just set ourselves.
-      if (window.history.state?.modalOpen === true) {
-        window.history.replaceState({ ...window.history.state, modalOpen: false }, '');
-      }
-      if (isAnyModalOpen) {
-        window.history.pushState({ modalOpen: true }, '');
-      }
-    } else if (isAnyModalOpen) {
-      if (window.history.state?.modalOpen !== true) {
-        window.history.pushState({ modalOpen: true }, '');
-      }
-    } else {
-      if (window.history.state?.modalOpen === true) {
-        window.history.back();
-      }
-    }
-
-    const handlePopState = (e) => {
-      if (isAnyModalOpen) {
-        // Prevent default back behavior by closing modals
-        if (zoomedImage) {
-          setZoomedImage(null);
-        } else {
-          setShowStaffProgressReport(false);
-          setShowRemarksModal(false);
-          setShowAdvanceModal(false);
-          setShowAdminLeaveModal(false);
-          setShowTagManagerModal(false);
-          setShowClientEquipmentModal(false);
-          setShowNewTaskModal(false);
-          setShowEditTaskModal(false);
-          setShowNewCustomerModal(false);
-          setShowNewStaffModal(false);
-          setShowChangePasswordModal(false);
-          setShowStaffAccessModal(false);
-          setShowAdminProfilePopup(false);
-          setShowEditCustomerModal(false);
-          setShowFilterModal(false);
-          setShowCompanyDetailsModal(false);
-          setShowICardModal(false);
-          setSelectedStaffProfile(null);
-          if (contactModal) setContactModal(prev => ({ ...prev, isOpen: false }));
-          setActiveModal(null);
-        }
-      }
-    };
-
-    window.addEventListener('popstate', handlePopState);
-    return () => {
-      window.removeEventListener('popstate', handlePopState);
-    };
-  }, [
-    showStaffProgressReport,
-    showRemarksModal,
-    showAdvanceModal,
-    showAdminLeaveModal,
-    showTagManagerModal,
-    showClientEquipmentModal,
-    showNewTaskModal,
-    showEditTaskModal,
-    showNewCustomerModal,
-    showNewStaffModal,
-    showChangePasswordModal,
-    showStaffAccessModal,
-    showAdminProfilePopup,
-    showEditCustomerModal,
-    showFilterModal,
-    showCompanyDetailsModal,
-    showICardModal,
-    zoomedImage,
-    selectedStaffProfile,
-    contactModal,
-    activeModal
-  ]);
+  // Back button closes the topmost popup instead of exiting the app — see useModalBackButton for
+  // why an installed (standalone) PWA needs this at all. One call per popup: the previous version
+  // of this was a single hand-maintained OR-chain of every modal flag, and the Menu drawer
+  // (`headerOpen`) was never added to it, so back-pressing with the menu open closed the whole app.
+  // Registering each popup on its own line is what stops the next new popup from repeating that.
+  useModalBackButton(headerOpen, () => setHeaderOpen(false));
+  useModalBackButton(showTagPopover, () => setShowTagPopover(false));
+  useModalBackButton(showStaffProgressReport, () => setShowStaffProgressReport(false));
+  useModalBackButton(showRemarksModal, () => setShowRemarksModal(false));
+  useModalBackButton(showAdvanceModal, () => setShowAdvanceModal(false));
+  useModalBackButton(showAdminLeaveModal, () => setShowAdminLeaveModal(false));
+  useModalBackButton(showTagManagerModal, () => setShowTagManagerModal(false));
+  useModalBackButton(showCertTypeManagerModal, () => setShowCertTypeManagerModal(false));
+  useModalBackButton(showClientEquipmentModal, () => setShowClientEquipmentModal(false));
+  useModalBackButton(showNewTaskModal, () => setShowNewTaskModal(false));
+  useModalBackButton(showEditTaskModal, () => setShowEditTaskModal(false));
+  useModalBackButton(showNewCustomerModal, () => setShowNewCustomerModal(false));
+  useModalBackButton(showNewStaffModal, () => setShowNewStaffModal(false));
+  useModalBackButton(showChangePasswordModal, () => setShowChangePasswordModal(false));
+  useModalBackButton(showStaffAccessModal, () => setShowStaffAccessModal(false));
+  useModalBackButton(showAdminProfilePopup, () => setShowAdminProfilePopup(false));
+  useModalBackButton(showEditCustomerModal, () => setShowEditCustomerModal(false));
+  useModalBackButton(showFilterModal, () => setShowFilterModal(false));
+  useModalBackButton(showCompanyDetailsModal, () => setShowCompanyDetailsModal(false));
+  useModalBackButton(showICardModal, () => setShowICardModal(false));
+  useModalBackButton(Boolean(zoomedImage), () => setZoomedImage(null));
+  useModalBackButton(Boolean(cropImageSrc), () => setCropImageSrc(null));
+  useModalBackButton(Boolean(selectedStaffProfile), () => setSelectedStaffProfile(null));
+  useModalBackButton(Boolean(selectedCustomerModal), () => setSelectedCustomerModal(null));
+  useModalBackButton(Boolean(salaryModalRecord), () => setSalaryModalRecord(null));
+  useModalBackButton(Boolean(passwordResetTarget), () => setPasswordResetTarget(null));
+  useModalBackButton(Boolean(callReceivedContactPicker?.isOpen), () => setCallReceivedContactPicker(prev => ({ ...prev, isOpen: false })));
+  useModalBackButton(Boolean(contactModal?.isOpen), () => setContactModal(prev => ({ ...prev, isOpen: false })));
+  useModalBackButton(Boolean(activeModal), () => setActiveModal(null));
 
   const enrichTasksWithCustomers = (taskList, custList) => {
     if (!Array.isArray(taskList)) return taskList;

@@ -60,6 +60,10 @@ export default function QuotationBuilderPage() {
 
   const isAdmin = String(user?.Role || '').toLowerCase() === 'admin';
   const pdfRef = useRef(null);
+  const previewRef = useRef(null);
+  // Multi-page documents render a natural height taller than one A4 sheet; measured so the modal's
+  // scroll box matches the real (possibly multi-page) preview instead of assuming exactly one page.
+  const [previewNaturalHeight, setPreviewNaturalHeight] = useState(1123);
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -244,6 +248,21 @@ export default function QuotationBuilderPage() {
     window.addEventListener('resize', fit);
     return () => window.removeEventListener('resize', fit);
   }, [showPreview]);
+
+  // Tracks the preview's real (possibly multi-page) natural height so the modal's scroll box isn't
+  // hard-pinned to one A4 sheet — QuotationPdfTemplate paginates internally and the parent has no
+  // other way to know the page count in advance.
+  useEffect(() => {
+    if (!showPreview) return undefined;
+    const el = previewRef.current;
+    if (!el) return undefined;
+    const measure = () => setPreviewNaturalHeight(el.scrollHeight || 1123);
+    measure();
+    if (typeof ResizeObserver === 'undefined') return undefined;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [showPreview, printDoc]);
 
   // ---- historical rates when the customer changes ----
   useEffect(() => {
@@ -1818,10 +1837,12 @@ export default function QuotationBuilderPage() {
 
           <div className="flex justify-center py-6 px-4" onClick={e => e.stopPropagation()}>
             {/* Scaled wrapper: transform doesn't affect layout size, so the outer box is sized
-                manually to keep the modal's scroll height correct. */}
-            <div style={{ width: 794 * previewScale, height: 1123 * previewScale }}>
+                manually to keep the modal's scroll height correct. Height tracks the template's
+                real (possibly multi-page) natural height via previewNaturalHeight rather than
+                assuming exactly one A4 sheet. */}
+            <div style={{ width: 794 * previewScale, height: previewNaturalHeight * previewScale }}>
               <div style={{ transform: `scale(${previewScale})`, transformOrigin: 'top left' }}>
-                <div className="shadow-2xl bg-white">
+                <div className="shadow-2xl bg-white" ref={previewRef}>
                   <QuotationPdfTemplate
                     doc={printDoc}
                     docType="QUOTATION"

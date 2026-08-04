@@ -309,12 +309,14 @@ export default function AdminDashboard() {
   const isAdmin = (realUser?.Role || user?.Role) === 'Admin' || (realUser?.Role || user?.Role) === 'ADMIN';
   const taskTapTrackerRef = useRef({});
   // Self-heals a bad persisted value (e.g. a Staff-only tab name like 'TASKS' that leaked in here
-  // before TOUR_NAVIGATE_TAB was scoped per-dashboard) back to 'OVERVIEW' instead of matching none
-  // of this page's tab sections and rendering nothing below the navbar.
-  const ADMIN_TAB_NAMES = new Set(['OVERVIEW', 'PIPELINE', 'STAFF', 'CUSTOMERS', 'ATTENDANCE', 'LOGS', 'CERTIFICATES', 'SERVICE_REPORTS', 'RECYCLE_BIN', 'PUSH_SETTINGS', 'GEOFENCE']);
+  // before TOUR_NAVIGATE_TAB was scoped per-dashboard, or a pre-redesign 'OVERVIEW' from
+  // localStorage) back to the PIPELINE default below, instead of matching none of this page's tab
+  // sections and rendering nothing below the navbar. 'OVERVIEW' is deliberately excluded: its
+  // standalone cards page was removed once the Menu drawer took over as the sole navigation surface.
+  const ADMIN_TAB_NAMES = new Set(['PIPELINE', 'STAFF', 'CUSTOMERS', 'ATTENDANCE', 'LOGS', 'CERTIFICATES', 'SERVICE_REPORTS', 'RECYCLE_BIN', 'PUSH_SETTINGS', 'GEOFENCE']);
   const [activeTab, setActiveTab] = useState(() => {
     const stored = localStorage.getItem('expert_admin_active_tab');
-    return ADMIN_TAB_NAMES.has(stored) ? stored : 'OVERVIEW';
+    return ADMIN_TAB_NAMES.has(stored) ? stored : 'PIPELINE';
   }); // 'OVERVIEW' | 'PIPELINE' | 'STAFF' | 'CUSTOMERS' | 'LOGS' | 'ATTENDANCE'
   const [filterStatus, setFilterStatus] = useState(() => localStorage.getItem('expert_admin_filter_status') || 'Pending');
   const [lastNotificationTab, setLastNotificationTab] = useState(null);
@@ -409,11 +411,17 @@ export default function AdminDashboard() {
   const searchContainerRef = useRef(null);
   const searchInputRef = useRef(null);
 
-  // The header block (welcome card, KPI tiles, staff report, tabs, action buttons) is collapsed by
-  // default on every load so a fresh page shows the pinned search bar and the actual work straight
-  // away. It is opened only by the Menu toggle — deliberately not persisted, and deliberately not
-  // driven by scroll position, so a refresh always lands in the same predictable state.
+  // Controls the navigation drawer (welcome card, KPI tiles, module tabs, quick actions) — a
+  // slide-in side panel rather than an inline block, so opening it never pushes the actual work
+  // off-screen. Closed by default on every load so a fresh page shows the pinned search bar and
+  // the work straight away; deliberately not persisted, so a refresh always lands closed.
   const [headerOpen, setHeaderOpen] = useState(false);
+
+  // Tag filter chips used to sit permanently open under the status row, eating a full line of
+  // scroll real estate on every task list. Now a popover: closed by default, opens on tap, and
+  // auto-closes on scroll/outside-click/Escape so it never competes with the task list for space.
+  const [showTagPopover, setShowTagPopover] = useState(false);
+  const tagPopoverRef = useRef(null);
 
   useEffect(() => {
     const handleOutsideClick = (e) => {
@@ -424,6 +432,35 @@ export default function AdminDashboard() {
     document.addEventListener('mousedown', handleOutsideClick);
     return () => document.removeEventListener('mousedown', handleOutsideClick);
   }, []);
+
+  useEffect(() => {
+    if (!headerOpen) return;
+    const handleEscape = (e) => { if (e.key === 'Escape') setHeaderOpen(false); };
+    document.addEventListener('keydown', handleEscape);
+    return () => document.removeEventListener('keydown', handleEscape);
+  }, [headerOpen]);
+
+  // Tag filter popover: closes on a tap outside it, Escape, or the page being scrolled at all —
+  // a floating panel left open while the list scrolls underneath it reads as a stuck/broken menu,
+  // so any scroll (not just a big one) is treated as "done browsing the panel, close it."
+  useEffect(() => {
+    if (!showTagPopover) return;
+    const handleOutsideClick = (e) => {
+      if (tagPopoverRef.current && !tagPopoverRef.current.contains(e.target)) {
+        setShowTagPopover(false);
+      }
+    };
+    const handleEscape = (e) => { if (e.key === 'Escape') setShowTagPopover(false); };
+    const handleScroll = () => setShowTagPopover(false);
+    document.addEventListener('mousedown', handleOutsideClick);
+    document.addEventListener('keydown', handleEscape);
+    window.addEventListener('scroll', handleScroll, { passive: true });
+    return () => {
+      document.removeEventListener('mousedown', handleOutsideClick);
+      document.removeEventListener('keydown', handleEscape);
+      window.removeEventListener('scroll', handleScroll);
+    };
+  }, [showTagPopover]);
 
   // Scrolls a section into view clearing the navbar + the sticky search bar, which together cover
   // the top of the viewport — a bare scrollIntoView() lands the target underneath them.
@@ -2901,21 +2938,19 @@ export default function AdminDashboard() {
               <PlusCircle className="w-4 h-4" />
             </button>
 
-            {/* Opens the collapsed header block. Without this the block would be unreachable at
-                scrollY 0, since a fresh load starts collapsed and there is no scroll gesture. */}
+            {/* Opens the navigation drawer (stats, module tabs, quick actions) as a slide-in
+                panel rather than pushing the whole page down — a full-width inline block here
+                used to visually take over the screen every time Menu was tapped. */}
             <button
               type="button"
-              onClick={() => setHeaderOpen(o => !o)}
-              className={`px-3 py-2.5 rounded-xl border transition shadow-sm shrink-0 flex items-center gap-1.5 font-bold text-xs ${
-                headerOpen
-                  ? 'bg-rose-600 border-rose-600 text-white hover:bg-rose-700'
-                  : 'bg-slate-50 border-slate-200 hover:bg-slate-100 text-slate-700'
-              }`}
-              title={headerOpen ? 'Hide menu, tabs & stats' : 'Show menu, tabs & stats'}
+              data-tour="admin-overview-tab"
+              onClick={() => setHeaderOpen(true)}
+              className="px-3 py-2.5 rounded-xl border bg-slate-50 border-slate-200 hover:bg-slate-100 text-slate-700 transition shadow-sm shrink-0 flex items-center gap-1.5 font-bold text-xs"
+              title="Open menu: tabs, stats & quick actions"
               aria-expanded={headerOpen}
             >
-              {headerOpen ? <ChevronUp className="w-4 h-4" /> : <LayoutDashboard className="w-4 h-4" />}
-              <span className="hidden sm:inline">{headerOpen ? 'Hide' : 'Menu'}</span>
+              <LayoutDashboard className="w-4 h-4" />
+              <span className="hidden sm:inline">Menu</span>
             </button>
           </div>
         </div>
@@ -3030,32 +3065,42 @@ export default function AdminDashboard() {
         )}
       </div>
 
-      {/* COLLAPSIBLE HEADER BLOCK — stats banner, staff report, tabs and action buttons. Hidden on
-          load; the Menu button in the search bar is the only way in or out. max-h is generous
-          because the staff progress report expands inside it. */}
-      <div className={`admin-header-collapse overflow-hidden transition-all duration-300 ease-in-out ${
-        headerOpen ? 'max-h-[4000px] opacity-100' : 'max-h-0 opacity-0 !mt-0'
-      }`}>
-        <div className="space-y-4 sm:space-y-8">
-
-      {/* ADMIN EXECUTIVE DASHBOARD TOP STATS BANNER (Clean Light & Professional Color Palette) */}
-      <div className="bg-gradient-to-br from-white via-slate-50 to-indigo-50/40 rounded-3xl p-6 text-slate-900 shadow-xl border border-slate-200 relative overflow-hidden">
-        <div className="absolute top-0 right-0 -mt-8 -mr-8 w-64 h-64 bg-rose-500/5 rounded-full blur-3xl pointer-events-none" />
-        <div className="absolute bottom-0 left-1/3 w-64 h-64 bg-indigo-500/5 rounded-full blur-3xl pointer-events-none" />
-        <div className="relative z-10 space-y-6">
-          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-b border-slate-200/80 pb-5">
-            <div>
-              <span className="px-3 py-1 rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-extrabold tracking-wider uppercase border border-indigo-200/60">
-                Admin Executive Dashboard
-              </span>
-              <h2 className="text-xl sm:text-2xl font-black text-slate-900 mt-2 tracking-tight">
-                Welcome back, {user?.Name || 'Nilesh Padaya'}
-              </h2>
-              <p className="text-xs text-slate-500 mt-1 font-medium">
-                System-wide live analytics and module management for Expert Safety Solutions.
+      {/* NAVIGATION DRAWER — stats, module tabs and quick actions. A right-side slide-in panel
+          (Gmail/Notion-style) rather than an inline block that used to push the whole page down
+          and cover the screen every time Menu was tapped. Backdrop click, the X, and Escape all
+          close it; the Menu button in the search bar is the only way to open it. */}
+      {headerOpen && (
+        <div className="fixed inset-0 z-[60]" role="dialog" aria-modal="true" aria-label="Admin menu">
+          <div
+            className="absolute inset-0 bg-slate-900/50 backdrop-blur-sm animate-fadeIn"
+            onClick={() => setHeaderOpen(false)}
+          />
+          <div className="admin-drawer absolute right-0 top-0 h-full w-full sm:w-[380px] bg-white shadow-2xl overflow-y-auto animate-slideInRight flex flex-col">
+            {/* Identity strip */}
+            <div className="sticky top-0 z-10 bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 text-white px-4 sm:px-5 pt-4 pb-4 shrink-0">
+              <div className="flex items-center justify-between">
+                <span className="px-2.5 py-1 rounded-full bg-white/10 border border-white/15 text-[10px] font-extrabold tracking-wider uppercase text-indigo-200">
+                  Admin Executive
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setHeaderOpen(false)}
+                  className="w-8 h-8 rounded-lg bg-white/10 hover:bg-white/20 text-white flex items-center justify-center transition"
+                  title="Close menu"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              <h3 className="text-base font-black mt-2.5 tracking-tight truncate">
+                {user?.Name || 'Nilesh Padaya'}
+              </h3>
+              <p className="text-[11px] text-slate-300 mt-0.5 font-medium">
+                Expert Safety Solutions &middot; System Menu
               </p>
             </div>
-            <div className="flex items-center gap-2 flex-wrap">
+
+            {/* Primary actions */}
+            <div className="px-4 sm:px-5 py-3.5 flex items-center gap-2 border-b border-slate-100 shrink-0">
               <button
                 onClick={() => {
                   if (customers.length > 0) {
@@ -3065,145 +3110,108 @@ export default function AdminDashboard() {
                     setTaskForm(prev => ({ ...prev, assignedStaff: staffList[1]?.Staff_ID || staffList[0].Staff_ID }));
                   }
                   setShowNewTaskModal(true);
+                  setHeaderOpen(false);
                 }}
-                className="px-4 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs flex items-center gap-2 shadow-lg shadow-rose-600/20 transition active:scale-95 shrink-0"
+                className="flex-1 h-11 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm shadow-rose-600/20 transition active:scale-95"
               >
                 <PlusCircle className="w-4 h-4" />
                 <span>New Work Order</span>
               </button>
               <button
-                onClick={() => setShowNewCustomerModal(true)}
-                className="px-3.5 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs flex items-center gap-1.5 transition border border-slate-300 active:scale-95 shrink-0 shadow-2xs"
+                onClick={() => { setShowNewCustomerModal(true); setHeaderOpen(false); }}
+                className="flex-1 h-11 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs flex items-center justify-center gap-1.5 transition border border-slate-200 active:scale-95"
               >
                 <UserPlus className="w-4 h-4 text-indigo-600" />
                 <span>New Customer</span>
               </button>
             </div>
-          </div>
 
-          {/* Statistic Data Cards Grid (Light Professional Scheme) */}
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 sm:gap-4">
-            <div 
-              onClick={() => {
-                setActiveTab('PIPELINE');
-                setHeaderOpen(false);
-                setTimeout(() => scrollToSection('section-pipeline-list'), 350);
-              }}
-              className="p-2.5 sm:p-4 rounded-xl sm:rounded-2xl bg-white hover:bg-indigo-50/50 border border-slate-200 hover:border-indigo-300 shadow-sm transition-all duration-200 cursor-pointer group"
-            >
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] sm:text-[11px] font-bold text-indigo-600 uppercase tracking-wider">Work Orders</span>
-                <div className="w-6 h-6 sm:w-7 sm:h-7 rounded-lg bg-indigo-50 flex items-center justify-center">
-                  <Layers className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-indigo-600 group-hover:scale-110 transition" />
-                </div>
+            {/* Modules — the primary navigation surface */}
+            <div className="px-2.5 sm:px-3 py-3">
+              <h4 className="px-2.5 pb-1.5 text-[10px] font-black text-slate-400 uppercase tracking-widest">
+                Dashboard &amp; Modules
+              </h4>
+              <div className="space-y-0.5">
+                {[
+                  { id: 'PIPELINE', label: 'Work Orders & Pipeline', icon: Layers, tourId: 'admin-card-pipeline' },
+                  { id: 'STAFF', label: 'Staff Roster & Scope', icon: Users, tourId: 'admin-card-staff' },
+                  { id: 'CUSTOMERS', label: 'Client Database & CRM', icon: Building2, tourId: 'admin-card-customers' },
+                  { id: 'ATTENDANCE', label: 'Attendance & Leave Roster', icon: Clock, tourId: 'admin-card-attendance' },
+                  { id: 'LOGS', label: 'Live Activity Logs', icon: Activity, tourId: 'admin-card-logs' },
+                  { id: 'CERTIFICATES', label: 'Certificate Module', icon: Award, tourId: 'admin-card-certificates' },
+                  { id: 'SERVICE_REPORTS', label: 'Service Reports Queue', icon: FileCheck },
+                  { id: 'RECYCLE_BIN', label: 'Recycle Bin', icon: Trash2 },
+                  { id: 'PUSH_SETTINGS', label: 'Push Notifications', icon: Bell },
+                  { id: 'GEOFENCE', label: 'Office Location & Geofence', icon: MapPin }
+                ].map((tab, idx) => {
+                  const isActive = activeTab === tab.id;
+                  return (
+                    <button
+                      key={tab.id}
+                      data-tour={tab.tourId}
+                      onClick={() => { setActiveTab(tab.id); setHeaderOpen(false); }}
+                      className={`w-full h-12 px-2.5 rounded-xl text-[13px] font-bold flex items-center gap-3 transition ${
+                        isActive
+                          ? 'bg-rose-50 text-rose-700'
+                          : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
+                      }`}
+                    >
+                      <span className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${
+                        isActive ? 'bg-rose-600 text-white' : 'bg-slate-100 text-slate-500'
+                      }`}>
+                        <span className="text-[10px] font-black">{idx + 1}</span>
+                      </span>
+                      <span className="truncate flex-1 text-left">{tab.label}</span>
+                      {isActive && <span className="w-1.5 h-1.5 rounded-full bg-rose-600 shrink-0" />}
+                    </button>
+                  );
+                })}
               </div>
-              <p className="text-xl sm:text-2xl font-black text-slate-900 mt-1.5 sm:mt-2">{tasks.length}</p>
-              <p className="text-[9px] sm:text-[10px] text-slate-500 mt-0.5 sm:mt-1 font-medium">
-                {tasks.filter(t => t.Status === 'Started' || t.Status === 'In Progress').length} Active
-              </p>
             </div>
 
-            <div 
-              onClick={() => {
-                setActiveTab('PIPELINE');
-                setHeaderOpen(false);
-                setTimeout(() => scrollToSection('section-pipeline-list'), 350);
-              }}
-              className="p-2.5 sm:p-4 rounded-xl sm:rounded-2xl bg-white hover:bg-emerald-50/50 border border-slate-200 hover:border-emerald-300 shadow-sm transition-all duration-200 cursor-pointer group"
-            >
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] sm:text-[11px] font-bold text-emerald-600 uppercase tracking-wider">Completed</span>
-                <div className="w-6 h-6 sm:w-7 sm:h-7 rounded-lg bg-emerald-50 flex items-center justify-center">
-                  <CheckCircle2 className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-emerald-600 group-hover:scale-110 transition" />
-                </div>
+            {/* Quick Actions — shortcuts into standalone pages/modals */}
+            <div className="px-2.5 sm:px-3 py-3 border-t border-slate-100">
+              <h4 className="px-2.5 pb-1.5 text-[10px] font-black text-slate-400 uppercase tracking-widest">
+                Quick Actions
+              </h4>
+              <div className="grid grid-cols-2 gap-1.5">
+                {[
+                  { label: 'Generate Certificate', icon: Award, color: 'text-amber-600', onClick: () => navigate('/certificate-compliance/new') },
+                  { label: 'Quotations', icon: FileText, color: 'text-blue-600', onClick: () => navigate('/quotations') },
+                  { label: 'Invoices & Payments', icon: ReceiptIndianRupee, color: 'text-emerald-600', onClick: () => navigate('/sales-documents') },
+                  { label: 'Customer Prices', icon: ReceiptIndianRupee, color: 'text-emerald-600', onClick: () => navigate('/price-list') },
+                  { label: 'Delivery Challans', icon: ReceiptIndianRupee, color: 'text-indigo-600', onClick: () => navigate('/challans') },
+                  { label: 'Items & Inventory', icon: Package, color: 'text-amber-600', onClick: () => navigate('/inventory') },
+                  { label: 'Purchase', icon: ShoppingCart, color: 'text-teal-600', onClick: () => navigate('/purchase') },
+                  { label: 'Quotation Settings', icon: Settings, color: 'text-slate-500', onClick: () => navigate('/settings/quotations') },
+                  { label: 'Module Access', icon: Shield, color: 'text-violet-600', onClick: () => navigate('/settings/permissions') },
+                  { label: 'Equipment Types', icon: Wrench, color: 'text-amber-600', onClick: () => navigate('/settings/equipment-categories') },
+                  { label: 'New Staff Profile', icon: UserPlus, color: 'text-emerald-600', onClick: () => { setShowNewStaffModal(true); setHeaderOpen(false); } },
+                  { label: 'Use Staff Interface', icon: Shield, color: 'text-rose-600', onClick: () => { setShowStaffAccessModal(true); setHeaderOpen(false); } }
+                ].map(action => {
+                  const Icon = action.icon;
+                  return (
+                    <button
+                      key={action.label}
+                      onClick={action.onClick}
+                      className="h-14 px-2.5 rounded-xl bg-slate-50 hover:bg-slate-100 border border-slate-200 text-slate-700 text-[11px] font-semibold flex flex-col items-center justify-center gap-1 text-center transition active:scale-95"
+                    >
+                      <Icon className={`w-4 h-4 shrink-0 ${action.color}`} />
+                      <span className="leading-tight line-clamp-2">{action.label}</span>
+                    </button>
+                  );
+                })}
               </div>
-              <p className="text-xl sm:text-2xl font-black text-slate-900 mt-1.5 sm:mt-2">
-                {tasks.filter(t => t.Status === 'Completed' || t.Status === 'Closed').length}
-              </p>
-              <p className="text-[9px] sm:text-[10px] text-slate-500 mt-0.5 sm:mt-1 font-medium">Tasks resolved</p>
-            </div>
-
-            <div 
-              onClick={() => {
-                setActiveTab('STAFF');
-                setHeaderOpen(false);
-                setTimeout(() => scrollToSection('section-staff-roster'), 350);
-              }}
-              className="p-2.5 sm:p-4 rounded-xl sm:rounded-2xl bg-white hover:bg-amber-50/50 border border-slate-200 hover:border-amber-300 shadow-sm transition-all duration-200 cursor-pointer group"
-            >
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] sm:text-[11px] font-bold text-amber-600 uppercase tracking-wider">Staff Force</span>
-                <div className="w-6 h-6 sm:w-7 sm:h-7 rounded-lg bg-amber-50 flex items-center justify-center">
-                  <Users className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-amber-600 group-hover:scale-110 transition" />
-                </div>
-              </div>
-              <p className="text-xl sm:text-2xl font-black text-slate-900 mt-1.5 sm:mt-2">{staffList.length}</p>
-              <p className="text-[9px] sm:text-[10px] text-slate-500 mt-0.5 sm:mt-1 font-medium">Active staff profiles</p>
-            </div>
-
-            <div 
-              onClick={() => {
-                setActiveTab('ATTENDANCE');
-                setHeaderOpen(false);
-                setTimeout(() => scrollToSection('section-attendance-logs'), 350);
-              }}
-              className="p-2.5 sm:p-4 rounded-xl sm:rounded-2xl bg-white hover:bg-teal-50/60 border border-slate-200 hover:border-teal-400 shadow-sm transition-all duration-200 cursor-pointer group"
-            >
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] sm:text-[11px] font-bold text-teal-600 uppercase tracking-wider">Present Today</span>
-                <div className="w-6 h-6 sm:w-7 sm:h-7 rounded-lg bg-teal-50 flex items-center justify-center">
-                  <UserCheck className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-teal-600 group-hover:scale-110 transition" />
-                </div>
-              </div>
-              <p className="text-xl sm:text-2xl font-black text-slate-900 mt-1.5 sm:mt-2">
-                {new Set(attendanceLogs.filter(a => (a.Date === getLocalDateStr() || String(a.Date).trim() === getLocalDateStr()) && a.Punch_In_Time && a.Punch_In_Time !== '').map(a => a.Staff_ID)).size}
-              </p>
-              <p className="text-[9px] sm:text-[10px] text-slate-500 mt-0.5 sm:mt-1 font-medium">Staff checked in</p>
-            </div>
-
-            <div 
-              onClick={() => {
-                setActiveTab('CUSTOMERS');
-                setHeaderOpen(false);
-                setTimeout(() => scrollToSection('section-customers-list'), 350);
-              }}
-              className="p-2.5 sm:p-4 rounded-xl sm:rounded-2xl bg-white hover:bg-sky-50/50 border border-slate-200 hover:border-sky-300 shadow-sm transition-all duration-200 cursor-pointer group"
-            >
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] sm:text-[11px] font-bold text-sky-600 uppercase tracking-wider">Clients</span>
-                <div className="w-6 h-6 sm:w-7 sm:h-7 rounded-lg bg-sky-50 flex items-center justify-center">
-                  <Building2 className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-sky-600 group-hover:scale-110 transition" />
-                </div>
-              </div>
-              <p className="text-xl sm:text-2xl font-black text-slate-900 mt-1.5 sm:mt-2">{customers.length}</p>
-              <p className="text-[9px] sm:text-[10px] text-slate-500 mt-0.5 sm:mt-1 font-medium">CRM directory</p>
-            </div>
-
-            <div 
-              onClick={() => {
-                setActiveTab('ATTENDANCE');
-                setHeaderOpen(false);
-                setTimeout(() => scrollToSection('section-leave-queue'), 350);
-              }}
-              className="p-2.5 sm:p-4 rounded-xl sm:rounded-2xl bg-white hover:bg-rose-50/50 border border-slate-200 hover:border-rose-300 shadow-sm transition-all duration-200 cursor-pointer group"
-            >
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] sm:text-[11px] font-bold text-rose-600 uppercase tracking-wider">Leave Requests</span>
-                <div className="w-6 h-6 sm:w-7 sm:h-7 rounded-lg bg-rose-50 flex items-center justify-center">
-                  <AlertTriangle className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-rose-600 group-hover:scale-110 transition" />
-                </div>
-              </div>
-              <p className="text-xl sm:text-2xl font-black text-slate-900 mt-1.5 sm:mt-2">
-                {leaveRequests.filter(r => r.Status === 'Pending').length}
-              </p>
-              <p className="text-[9px] sm:text-[10px] text-slate-500 mt-0.5 sm:mt-1 font-medium">Pending approval</p>
             </div>
           </div>
         </div>
-      </div>
+      )}
+      {/* END NAVIGATION DRAWER */}
 
-      {/* COLLAPSIBLE STAFF PROGRESS REPORT & QUICK ACTIONS (Taps to Expand/Collapse, Mobile Friendly) */}
-      <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden transition-all duration-200">
+      {/* Staff-Wise Task Progress Report — kept as an always-visible dashboard-body section
+          (not in the drawer above): it's data content, not navigation, so it shouldn't need the
+          menu open to be seen or re-opened every time it's checked. */}
+      <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden transition-all duration-200 mb-4 sm:mb-8">
         {/* Main Title Tag - Click/Tap to Expand */}
         <div
           onClick={() => setShowStaffProgressReport(!showStaffProgressReport)}
@@ -3407,360 +3415,31 @@ export default function AdminDashboard() {
         )}
       </div>
 
-
-      {/* ADMIN TOP NAV TABS & ACTION BUTTONS */}
-      <div className="space-y-3.5 border-b border-slate-200 pb-4">
-        {/* Row 1: Module Navigation Tabs Bar */}
-        <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
-          {[
-            { id: 'OVERVIEW', label: 'Overview & Stats', shortLabel: 'Overview', icon: LayoutDashboard },
-            { id: 'PIPELINE', label: '1. Work Orders & Pipeline', shortLabel: '1. Pipeline', icon: Layers, tourId: 'admin-card-pipeline' },
-            { id: 'STAFF', label: '2. Staff Roster & Scope', shortLabel: '2. Staff', icon: Users, tourId: 'admin-card-staff' },
-            { id: 'CUSTOMERS', label: '3. Client Database & CRM', shortLabel: '3. CRM', icon: Building2, tourId: 'admin-card-customers' },
-            { id: 'ATTENDANCE', label: '4. Attendance & Leave Roster', shortLabel: '4. Attendance', icon: Clock, tourId: 'admin-card-attendance' },
-            { id: 'LOGS', label: '5. Live Activity Logs', shortLabel: '5. Logs', icon: Activity, tourId: 'admin-card-logs' },
-            { id: 'CERTIFICATES', label: '6. Certificate Module', shortLabel: '6. Certificates', icon: Award, tourId: 'admin-card-certificates' },
-            { id: 'SERVICE_REPORTS', label: '7. Service Reports Queue', shortLabel: '7. Reports', icon: FileCheck },
-            { id: 'RECYCLE_BIN', label: '8. Recycle Bin', shortLabel: '8. Recycle Bin', icon: Trash2 },
-            { id: 'PUSH_SETTINGS', label: '9. Push Notifications', shortLabel: '9. Notifications', icon: Bell },
-            { id: 'GEOFENCE', label: '10. Office Location & Geofence', shortLabel: '10. Geofence', icon: MapPin }
-          ].map(tab => {
-            const Icon = tab.icon;
-            return (
-              <button
-                key={tab.id}
-                data-tour={tab.tourId}
-                onClick={() => { setActiveTab(tab.id); setHeaderOpen(false); }}
-                className={`px-3 sm:px-3.5 py-2 sm:py-2.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition shadow-2xs ${
-                  activeTab === tab.id
-                    ? 'bg-rose-600 text-white shadow-rose-600/25 ring-2 ring-rose-600/20'
-                    : 'bg-white text-slate-600 hover:text-slate-900 border border-slate-200 hover:bg-slate-50 hover:border-slate-300'
-                }`}
-              >
-                <Icon className="w-4 h-4 shrink-0" />
-                <span className="hidden md:inline">{tab.label}</span>
-                <span className="md:hidden">{tab.shortLabel}</span>
-              </button>
-            );
-          })}
-        </div>
-
-        {/* Row 2: Quick Action Buttons Bar */}
-        <div className="flex flex-wrap items-center gap-2 pt-1.5 border-t border-slate-100/80">
-          <button
-            onClick={() => navigate('/certificate-compliance/new')}
-            className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 text-white text-xs font-bold flex items-center justify-center gap-1.5 transition shadow-sm border border-amber-400/30 shrink-0"
-          >
-            <Award className="w-4 h-4 text-amber-100 shrink-0" />
-            <span>Generate Certificate</span>
-          </button>
-          <button
-            onClick={() => navigate('/quotations')}
-            className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:opacity-95 text-white text-xs font-bold flex items-center justify-center gap-1.5 transition shadow-sm border border-blue-400/30 shrink-0"
-          >
-            <FileText className="w-4 h-4 text-blue-100 shrink-0" />
-            <span>Quotations</span>
-          </button>
-          <button
-            onClick={() => navigate('/sales-documents')}
-            className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:opacity-95 text-white text-xs font-bold flex items-center justify-center gap-1.5 transition shadow-sm border border-emerald-400/30 shrink-0"
-          >
-            <ReceiptIndianRupee className="w-4 h-4 text-emerald-100 shrink-0" />
-            <span>Invoices &amp; Payments</span>
-          </button>
-          <button
-            onClick={() => navigate('/price-list')}
-            className="px-3.5 py-2 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5 transition shadow-sm shrink-0"
-          >
-            <ReceiptIndianRupee className="w-4 h-4 text-emerald-600 shrink-0" />
-            <span>Customer Prices</span>
-          </button>
-          <button
-            onClick={() => navigate('/challans')}
-            className="px-3.5 py-2 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5 transition shadow-sm shrink-0"
-          >
-            <ReceiptIndianRupee className="w-4 h-4 text-indigo-600 shrink-0" />
-            <span>Delivery Challans</span>
-          </button>
-          <button
-            onClick={() => navigate('/inventory')}
-            className="px-3.5 py-2 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5 transition shadow-sm shrink-0"
-          >
-            <Package className="w-4 h-4 text-amber-600 shrink-0" />
-            <span>Items &amp; Inventory</span>
-          </button>
-          <button
-            onClick={() => navigate('/settings/quotations')}
-            className="px-3.5 py-2 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5 transition shadow-sm shrink-0"
-          >
-            <Settings className="w-4 h-4 text-slate-500 shrink-0" />
-            <span>Quotation Settings</span>
-          </button>
-          <button
-            onClick={() => navigate('/settings/permissions')}
-            className="px-3.5 py-2 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5 transition shadow-sm shrink-0"
-          >
-            <Shield className="w-4 h-4 text-violet-600 shrink-0" />
-            <span>Module Access</span>
-          </button>
-          <button
-            onClick={() => navigate('/settings/equipment-categories')}
-            className="px-3.5 py-2 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5 transition shadow-sm shrink-0"
-          >
-            <Wrench className="w-4 h-4 text-amber-600 shrink-0" />
-            <span>Equipment Types</span>
-          </button>
-          <button
-            onClick={() => navigate('/purchase')}
-            className="px-3.5 py-2 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5 transition shadow-sm shrink-0"
-          >
-            <ShoppingCart className="w-4 h-4 text-teal-600 shrink-0" />
-            <span>Purchase</span>
-          </button>
-          <button
-            onClick={() => { setShowNewCustomerModal(true); setHeaderOpen(false); }}
-            className="px-3.5 py-2 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5 transition shadow-sm shrink-0"
-          >
-            <PlusCircle className="w-4 h-4 text-indigo-600 shrink-0" />
-            <span>New Customer</span>
-          </button>
-          <button
-            onClick={() => { setShowNewStaffModal(true); setHeaderOpen(false); }}
-            className="px-3.5 py-2 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5 transition shadow-sm shrink-0"
-          >
-            <UserPlus className="w-4 h-4 text-emerald-600 shrink-0" />
-            <span>New Staff Profile</span>
-          </button>
-          <button
-            onClick={() => { setShowStaffAccessModal(true); setHeaderOpen(false); }}
-            className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-rose-600 to-indigo-600 hover:opacity-95 text-white text-xs font-bold flex items-center justify-center gap-1.5 transition shadow-sm shrink-0"
-          >
-            <Shield className="w-4 h-4 text-rose-200 shrink-0" />
-            <span>Use Staff Interface</span>
-          </button>
-          <button
-            onClick={() => {
-              if (customers.length > 0) {
-                setTaskForm(prev => ({ ...prev, customerId: customers[0].Customer_ID }));
-              }
-              if (staffList.length > 0) {
-                setTaskForm(prev => ({ ...prev, assignedStaff: staffList[1]?.Staff_ID || staffList[0].Staff_ID }));
-              }
-              setShowNewTaskModal(true);
-              setHeaderOpen(false);
-            }}
-            className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition shrink-0"
-          >
-            <PlusCircle className="w-4 h-4 shrink-0" />
-            <span>New Work Order</span>
-          </button>
-        </div>
+      {/* Current-module banner — opens the Menu drawer to switch modules, now that it's the only
+          navigation surface (the standalone Overview cards page was removed). */}
+      <div className="flex items-center justify-between bg-white border border-slate-200 rounded-2xl p-3 shadow-2xs mb-4">
+        <button
+          onClick={() => setHeaderOpen(true)}
+          className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-xs transition active:scale-95"
+        >
+          <LayoutDashboard className="w-4 h-4" />
+          <span>Menu</span>
+        </button>
+        <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+          {activeTab === 'PIPELINE' && '1. Work Orders & Pipeline'}
+          {activeTab === 'STAFF' && '2. Staff Roster & Workload'}
+          {activeTab === 'CUSTOMERS' && '3. Customer Directory & CRM'}
+          {activeTab === 'ATTENDANCE' && '4. Attendance & Payroll'}
+          {activeTab === 'LOGS' && '5. Field GPS Activity Logs'}
+          {activeTab === 'CERTIFICATES' && '6. Certificate Generator & Compliance Module'}
+        </span>
       </div>
-
-      {/* OVERVIEW & STATS FRONT PAGE WITH THE 5 MENU CARDS */}
-      {activeTab === 'OVERVIEW' && (
-        <div data-tour="admin-overview-tab" className="space-y-6 animate-fadeIn">
-          {/* Clean Navigation Cards List */}
-          <div className="space-y-3">
-            <div className="flex items-center justify-between px-1">
-              <h3 className="text-sm font-extrabold text-slate-800 uppercase tracking-wider">
-                Management Modules & Profiles
-              </h3>
-              <span className="text-xs text-slate-500">Select a section to manage records</span>
-            </div>
-
-            <div className="space-y-3">
-              {/* Card 1 */}
-              <div
-                onClick={() => { const next = expandedOverviewModule === 'PIPELINE' ? null : 'PIPELINE'; setExpandedOverviewModule(next); if (next) setHeaderOpen(false); }}
-                className="group p-4 sm:p-5 rounded-2xl bg-white border border-slate-200 hover:border-rose-300 shadow-sm hover:shadow-md transition-all duration-200 flex items-center justify-between cursor-pointer select-none"
-              >
-                <div className="flex items-center gap-4 min-w-0">
-                  <div className="w-12 h-12 rounded-2xl bg-rose-50 border border-rose-100 flex items-center justify-center shrink-0 group-hover:scale-105 transition">
-                    <Briefcase className="w-6 h-6 text-rose-600" />
-                  </div>
-                  <div className="min-w-0">
-                    <h4 className="text-base font-extrabold text-slate-900 group-hover:text-rose-600 transition truncate">
-                      1. Task Pipeline & Work Orders
-                    </h4>
-                    <p className="text-xs text-slate-500 mt-0.5 truncate">
-                      Assign tasks, track work order progression, handle remarks, and manage client visits
-                    </p>
-                  </div>
-                </div>
-                <div className="flex items-center gap-2 sm:gap-3 shrink-0">
-                  <span className="hidden sm:inline-block px-3 py-1 rounded-full bg-slate-100 text-slate-700 text-xs font-bold">
-                    {tasks.length} Orders
-                  </span>
-                  <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition shadow-2xs ${
-                    expandedOverviewModule === 'PIPELINE' ? 'bg-rose-600 text-white' : 'bg-slate-100 text-slate-700 group-hover:bg-rose-50 group-hover:text-rose-600'
-                  }`}>
-                    <span>{expandedOverviewModule === 'PIPELINE' ? 'Collapse' : 'Tap to Expand'}</span>
-                    {expandedOverviewModule === 'PIPELINE' ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                  </div>
-                </div>
-              </div>
-
-              {/* Card 2 */}
-              <div
-                onClick={() => { const next = expandedOverviewModule === 'STAFF' ? null : 'STAFF'; setExpandedOverviewModule(next); if (next) setHeaderOpen(false); }}
-                className="group p-4 sm:p-5 rounded-2xl bg-white border border-slate-200 hover:border-indigo-300 shadow-sm hover:shadow-md transition-all duration-200 flex items-center justify-between cursor-pointer select-none"
-              >
-                <div className="flex items-center gap-4 min-w-0">
-                  <div className="w-12 h-12 rounded-2xl bg-indigo-50 border border-indigo-100 flex items-center justify-center shrink-0 group-hover:scale-105 transition">
-                    <Users className="w-6 h-6 text-indigo-600" />
-                  </div>
-                  <div className="min-w-0">
-                    <h4 className="text-base font-extrabold text-slate-900 group-hover:text-indigo-600 transition truncate">
-                      2. Staff Roster, Salary & Scope
-                    </h4>
-                    <p className="text-xs text-slate-500 mt-0.5 truncate">
-                      Manage staff accounts, assign daily salary rates, set permission scopes, and view assigned work
-                    </p>
-                  </div>
-                </div>
-                <div className="flex items-center gap-2 sm:gap-3 shrink-0">
-                  <span className="hidden sm:inline-block px-3 py-1 rounded-full bg-slate-100 text-slate-700 text-xs font-bold">
-                    {staffList.length} Staff
-                  </span>
-                  <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition shadow-2xs ${
-                    expandedOverviewModule === 'STAFF' ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-700 group-hover:bg-indigo-50 group-hover:text-indigo-600'
-                  }`}>
-                    <span>{expandedOverviewModule === 'STAFF' ? 'Collapse' : 'Tap to Expand'}</span>
-                    {expandedOverviewModule === 'STAFF' ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                  </div>
-                </div>
-              </div>
-
-              {/* Card 3 */}
-              <div
-                onClick={() => { const next = expandedOverviewModule === 'CUSTOMERS' ? null : 'CUSTOMERS'; setExpandedOverviewModule(next); if (next) setHeaderOpen(false); }}
-                className="group p-4 sm:p-5 rounded-2xl bg-white border border-slate-200 hover:border-amber-300 shadow-sm hover:shadow-md transition-all duration-200 flex items-center justify-between cursor-pointer select-none"
-              >
-                <div className="flex items-center gap-4 min-w-0">
-                  <div className="w-12 h-12 rounded-2xl bg-amber-50 border border-amber-100 flex items-center justify-center shrink-0 group-hover:scale-105 transition">
-                    <Building2 className="w-6 h-6 text-amber-600" />
-                  </div>
-                  <div className="min-w-0">
-                    <h4 className="text-base font-extrabold text-slate-900 group-hover:text-amber-600 transition truncate">
-                      3. Client Database & CRM Profiles
-                    </h4>
-                    <p className="text-xs text-slate-500 mt-0.5 truncate">
-                      Company directory, contact persons, GPS coordinates, location links, and site visit history
-                    </p>
-                  </div>
-                </div>
-                <div className="flex items-center gap-2 sm:gap-3 shrink-0">
-                  <span className="hidden sm:inline-block px-3 py-1 rounded-full bg-slate-100 text-slate-700 text-xs font-bold">
-                    {customers.length} Clients
-                  </span>
-                  <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition shadow-2xs ${
-                    expandedOverviewModule === 'CUSTOMERS' ? 'bg-amber-600 text-white' : 'bg-slate-100 text-slate-700 group-hover:bg-amber-50 group-hover:text-amber-600'
-                  }`}>
-                    <span>{expandedOverviewModule === 'CUSTOMERS' ? 'Collapse' : 'Tap to Expand'}</span>
-                    {expandedOverviewModule === 'CUSTOMERS' ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                  </div>
-                </div>
-              </div>
-
-              {/* Card 4 */}
-              <div
-                onClick={() => { const next = expandedOverviewModule === 'ATTENDANCE' ? null : 'ATTENDANCE'; setExpandedOverviewModule(next); if (next) setHeaderOpen(false); }}
-                className="group p-4 sm:p-5 rounded-2xl bg-white border border-slate-200 hover:border-emerald-300 shadow-sm hover:shadow-md transition-all duration-200 flex items-center justify-between cursor-pointer select-none"
-              >
-                <div className="flex items-center gap-4 min-w-0">
-                  <div className="w-12 h-12 rounded-2xl bg-emerald-50 border border-emerald-100 flex items-center justify-center shrink-0 group-hover:scale-105 transition">
-                    <Clock className="w-6 h-6 text-emerald-600" />
-                  </div>
-                  <div className="min-w-0">
-                    <h4 className="text-base font-extrabold text-slate-900 group-hover:text-emerald-600 transition truncate">
-                      4. Staff Attendance & Leave Roster
-                    </h4>
-                    <p className="text-xs text-slate-500 mt-0.5 truncate">
-                      Check-in/out logs, live GPS attendance verification, salary calculation, and leave request management
-                    </p>
-                  </div>
-                </div>
-                <div className="flex items-center gap-2 sm:gap-3 shrink-0">
-                  {leaveRequests.filter(r => r.Status === 'Pending').length > 0 && (
-                    <span className="hidden sm:inline-block px-2.5 py-1 rounded-full bg-rose-100 text-rose-700 text-xs font-bold animate-pulse">
-                      {leaveRequests.filter(r => r.Status === 'Pending').length} Pending Leaves
-                    </span>
-                  )}
-                  <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition shadow-2xs ${
-                    expandedOverviewModule === 'ATTENDANCE' ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-700 group-hover:bg-emerald-50 group-hover:text-emerald-600'
-                  }`}>
-                    <span>{expandedOverviewModule === 'ATTENDANCE' ? 'Collapse' : 'Tap to Expand'}</span>
-                    {expandedOverviewModule === 'ATTENDANCE' ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                  </div>
-                </div>
-              </div>
-
-              {/* Card 5 */}
-              <div
-                onClick={() => { const next = expandedOverviewModule === 'LOGS' ? null : 'LOGS'; setExpandedOverviewModule(next); if (next) setHeaderOpen(false); }}
-                className="group p-4 sm:p-5 rounded-2xl bg-white border border-slate-200 hover:border-teal-300 shadow-sm hover:shadow-md transition-all duration-200 flex items-center justify-between cursor-pointer select-none"
-              >
-                <div className="flex items-center gap-4 min-w-0">
-                  <div className="w-12 h-12 rounded-2xl bg-teal-50 border border-teal-100 flex items-center justify-center shrink-0 group-hover:scale-105 transition">
-                    <Activity className="w-6 h-6 text-teal-600" />
-                  </div>
-                  <div className="min-w-0">
-                    <h4 className="text-base font-extrabold text-slate-900 group-hover:text-teal-600 transition truncate">
-                      5. Live Activity Logs & Audit Trail
-                    </h4>
-                    <p className="text-xs text-slate-500 mt-0.5 truncate">
-                      Real-time GPS tracking logs, system events, user actions, and audit trail records
-                    </p>
-                  </div>
-                </div>
-                <div className="flex items-center gap-2 sm:gap-3 shrink-0">
-                  <span className="hidden sm:inline-block px-3 py-1 rounded-full bg-slate-100 text-slate-700 text-xs font-bold">
-                    {logs.length} Logs
-                  </span>
-                  <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition shadow-2xs ${
-                    expandedOverviewModule === 'LOGS' ? 'bg-teal-600 text-white' : 'bg-slate-100 text-slate-700 group-hover:bg-teal-50 group-hover:text-teal-600'
-                  }`}>
-                    <span>{expandedOverviewModule === 'LOGS' ? 'Collapse' : 'Tap to Expand'}</span>
-                    {expandedOverviewModule === 'LOGS' ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-        </div>
-      </div>
-      {/* END COLLAPSIBLE HEADER BLOCK */}
-
-      {/* Return to Overview Banner when inside any module */}
-      {activeTab !== 'OVERVIEW' && (
-        <div className="flex items-center justify-between bg-white border border-slate-200 rounded-2xl p-3 shadow-2xs mb-4">
-          <button
-            onClick={() => setActiveTab('OVERVIEW')}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-xs transition active:scale-95"
-          >
-            <ChevronRight className="w-4 h-4 rotate-180" />
-            <span>← Back to Overview & Menu</span>
-          </button>
-          <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
-            {activeTab === 'PIPELINE' && '1. Work Orders & Pipeline'}
-            {activeTab === 'STAFF' && '2. Staff Roster & Workload'}
-            {activeTab === 'CUSTOMERS' && '3. Customer Directory & CRM'}
-            {activeTab === 'ATTENDANCE' && '4. Attendance & Payroll'}
-            {activeTab === 'LOGS' && '5. Field GPS Activity Logs'}
-            {activeTab === 'CERTIFICATES' && '6. Certificate Generator & Compliance Module'}
-          </span>
-        </div>
-      )}
 
       {/* TAB CONTENT 1: PIPELINE - SINGLE-ROW EXPANDABLE WITH UP/DOWN ROUTE SCROLLER */}
       {(activeTab === 'PIPELINE' || (activeTab === 'OVERVIEW' && expandedOverviewModule === 'PIPELINE')) && (
         <div className="space-y-3">
-          {/* Status filter tags */}
-          <div className="flex flex-wrap gap-2 pt-1 pb-2">
+          {/* Status filter tags + Tags popover trigger, on one row */}
+          <div className="flex flex-wrap items-center gap-2 pt-1 pb-2">
             {['Pending', 'Started', 'In Progress', 'Completed', 'ALL'].map(status => (
               <button
                 key={status}
@@ -3774,56 +3453,89 @@ export default function AdminDashboard() {
                 {status}
               </button>
             ))}
-          </div>
 
-          {/* Dynamic Tag Filter Chips (admin-editable, multi-select) */}
-          <div className="flex flex-wrap items-center gap-1.5 pb-2 -mt-1">
-            <button
-              type="button"
-              onClick={() => setShowTagManagerModal(true)}
-              className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold rounded-lg border border-dashed border-indigo-300 text-indigo-600 bg-indigo-50 hover:bg-indigo-100 transition"
-              title="Create, rename or delete tags"
-            >
-              <Settings className="w-3 h-3" />
-              <span>Manage Tags</span>
-            </button>
-            {tags.map(tag => {
-              const isActive = activeTagFilters.includes(tag.Tag_ID);
-              const tagCount = tasks.filter(t => (t.Tags || []).includes(tag.Tag_ID)).length;
-              return (
-                <button
-                  key={tag.Tag_ID}
-                  type="button"
-                  onClick={() => toggleTagFilter(tag.Tag_ID)}
-                  className="relative flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold rounded-full border transition"
-                  style={isActive
-                    ? { backgroundColor: tag.color, borderColor: tag.color, color: '#fff' }
-                    : { backgroundColor: `${tag.color}14`, borderColor: `${tag.color}55`, color: tag.color }}
-                >
-                  <TagIcon className="w-2.5 h-2.5" />
-                  <span>{tag.name}</span>
-                  {tagCount > 0 && (
-                    <span
-                      className="absolute -top-1.5 -right-1.5 min-w-[14px] h-[14px] px-0.5 rounded-full text-[9px] font-bold flex items-center justify-center shadow-sm"
-                      style={isActive
-                        ? { backgroundColor: '#fff', color: tag.color }
-                        : { backgroundColor: tag.color, color: '#fff' }}
-                    >
-                      {tagCount}
-                    </span>
-                  )}
-                </button>
-              );
-            })}
-            {activeTagFilters.length > 0 && (
+            {/* Tags trigger — the filter chip row used to sit open under this row permanently,
+                which ate a full line of scroll space on every task list. It's a popover now:
+                closed by default, opens on tap, and the effect above closes it again on scroll,
+                an outside click, or Escape. The badge keeps the active-filter count visible even
+                while the popover itself is closed. */}
+            <div className="relative" ref={tagPopoverRef}>
               <button
                 type="button"
-                onClick={() => setActiveTagFilters([])}
-                className="text-[11px] font-bold text-slate-400 hover:text-rose-600 px-1.5"
+                onClick={() => setShowTagPopover(v => !v)}
+                className={`flex items-center gap-1.5 px-3 py-1 text-xs font-bold rounded-lg border transition ${
+                  activeTagFilters.length > 0
+                    ? 'bg-indigo-100 border-indigo-300 text-indigo-800 shadow-sm'
+                    : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+                }`}
+                aria-expanded={showTagPopover}
               >
-                Clear tag filters ✕
+                <TagIcon className="w-3.5 h-3.5" />
+                <span>Tags</span>
+                {activeTagFilters.length > 0 && (
+                  <span className="min-w-[16px] h-4 px-1 rounded-full bg-indigo-600 text-white text-[10px] font-bold flex items-center justify-center">
+                    {activeTagFilters.length}
+                  </span>
+                )}
+                <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showTagPopover ? 'rotate-180' : ''}`} />
               </button>
-            )}
+
+              {showTagPopover && (
+                <div className="absolute top-full left-0 mt-1.5 z-50 w-[min(90vw,380px)] max-h-[60vh] overflow-y-auto bg-white border border-slate-200 rounded-2xl shadow-xl p-2.5 animate-fadeIn">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => { setShowTagManagerModal(true); setShowTagPopover(false); }}
+                      className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold rounded-lg border border-dashed border-indigo-300 text-indigo-600 bg-indigo-50 hover:bg-indigo-100 transition"
+                      title="Create, rename or delete tags"
+                    >
+                      <Settings className="w-3 h-3" />
+                      <span>Manage Tags</span>
+                    </button>
+                    {tags.map(tag => {
+                      const isActive = activeTagFilters.includes(tag.Tag_ID);
+                      const tagCount = tasks.filter(t => (t.Tags || []).includes(tag.Tag_ID)).length;
+                      return (
+                        <button
+                          key={tag.Tag_ID}
+                          type="button"
+                          onClick={() => toggleTagFilter(tag.Tag_ID)}
+                          className="relative flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold rounded-full border transition"
+                          style={isActive
+                            ? { backgroundColor: tag.color, borderColor: tag.color, color: '#fff' }
+                            : { backgroundColor: `${tag.color}14`, borderColor: `${tag.color}55`, color: tag.color }}
+                        >
+                          <TagIcon className="w-2.5 h-2.5" />
+                          <span>{tag.name}</span>
+                          {tagCount > 0 && (
+                            <span
+                              className="absolute -top-1.5 -right-1.5 min-w-[14px] h-[14px] px-0.5 rounded-full text-[9px] font-bold flex items-center justify-center shadow-sm"
+                              style={isActive
+                                ? { backgroundColor: '#fff', color: tag.color }
+                                : { backgroundColor: tag.color, color: '#fff' }}
+                            >
+                              {tagCount}
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                    {tags.length === 0 && (
+                      <p className="text-[11px] text-slate-400 py-1">No tags yet. Use "Manage Tags" to create some.</p>
+                    )}
+                  </div>
+                  {activeTagFilters.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setActiveTagFilters([])}
+                      className="mt-2 text-[11px] font-bold text-slate-400 hover:text-rose-600 px-1"
+                    >
+                      Clear tag filters ✕
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
 
           <div className="space-y-2.5">

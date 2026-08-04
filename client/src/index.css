@@ -243,6 +243,21 @@
   animation: fadeIn 0.2s ease-out;
 }
 
+/* Slide-in navigation drawer (Admin menu). `transform: translateX(0)` is set as the element's own
+   base style (not just the keyframe's `to`), and the animation carries `forwards` — so if the
+   animation is ever skipped, interrupted mid-flight, or the reduced-motion rule below strips it
+   entirely, the drawer still resolves to its resting on-screen position instead of getting stuck
+   at the `from` offset (100% translateX = fully off the right edge, invisible). */
+@keyframes slideInRight {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+
+.animate-slideInRight {
+  transform: translateX(0);
+  animation: slideInRight 0.25s ease-out forwards;
+}
+
 /*
  * Job card form controls. Every tappable control is at least 44px tall because these forms are
  * filled one-handed on a phone at a workbench, often in gloves — the sizes are the floor, not a
@@ -282,7 +297,8 @@
 
 @media (prefers-reduced-motion: reduce) {
   .animate-fadeIn { animation: none; }
-  .admin-header-collapse { transition: none !important; }
+  .animate-slideInRight { animation: none; }
+  .admin-drawer { transition: none !important; }
 }
 
 /* Mobile action buttons: horizontal scroll with touch support */

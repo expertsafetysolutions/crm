@@ -51,12 +51,21 @@ function alertRecipients(settings) {
 /**
  * Deep link that opens this lead inside the CRM.
  *
- * Points at the task, not the customer: the task is the unit of work someone has to action, and
- * it carries the requirements and the draft quotation link. Staff hitting this while logged out
- * land on the login screen and arrive here afterwards, which is the existing app behaviour.
+ * Goes straight to the draft quotation builder (`/quotations/:id`) when one was auto-drafted —
+ * which is the normal case, and what the salesperson actually wants: price the lines and send it,
+ * not a task screen with an extra click in between. Falls back to a fresh quotation prefilled with
+ * the customer and task (QuotationBuilderPage already reads both from the query string) when there
+ * is no draft, i.e. createDraftQuotation failed — so the click still lands on a buildable quotation
+ * instead of a bare `/?taskId=` the app has no route for. Staff hitting this while logged out land
+ * on the login screen and arrive here afterwards, which is the existing app behaviour.
  */
-function crmLeadLink(task) {
-  return `${dispatchService.portalBaseUrl()}/?taskId=${encodeURIComponent(task.Task_ID)}`;
+function crmLeadLink(task, quotation) {
+  const base = dispatchService.portalBaseUrl();
+  if (quotation?.Quotation_ID) {
+    return `${base}/quotations/${encodeURIComponent(quotation.Quotation_ID)}`;
+  }
+  return `${base}/quotations/new?taskId=${encodeURIComponent(task.Task_ID)}`
+    + `&customerId=${encodeURIComponent(task.Customer_ID || '')}`;
 }
 
 /** IST, human-readable, for the alert body. */
@@ -155,7 +164,7 @@ function buildAlertHtml({ inquiryNo, data, customer, task, isReturning, quotatio
       </div>` : ''}
 
       <div style="margin-top:22px;text-align:center">
-        <a href="${escapeHtml(crmLeadLink(task))}"
+        <a href="${escapeHtml(crmLeadLink(task, quotation))}"
            style="display:inline-block;background:#9a3412;color:#ffffff;text-decoration:none;
                   padding:13px 26px;border-radius:12px;font-weight:800;font-size:14px">
           Open this lead in CRM →
@@ -207,7 +216,7 @@ function buildAlertText({ inquiryNo, data, customer, task, isReturning, quotatio
     `Lead/Task ID: ${task.Task_ID}`,
     quotation ? `Draft Quote:  ${quotation.Quote_No_Display} (unpriced)` : '',
     '',
-    `Open in CRM:  ${crmLeadLink(task)}`
+    `Open in CRM:  ${crmLeadLink(task, quotation)}`
   ].filter(Boolean).join('\n');
 }
 

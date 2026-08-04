@@ -272,15 +272,15 @@ export const adminTourSteps = [
   },
   {
     id: 'admin-overview-tab',
-    requiresTab: 'OVERVIEW',
+    requiresTab: null,
     requiresPopup: null,
-    requiresExpand: 'admin-header',
+    requiresExpand: null,
     permission: null,
     placement: 'bottom',
     title: { en: 'Overview & Menu', gu: 'ઓવરવ્યૂ અને મેનુ' },
     body: {
-      en: 'This is your home hub — a summary of everything, with cards for each module below.',
-      gu: 'આ તમારું હોમ હબ છે — બધાનો સારાંશ, અને નીચે દરેક મોડ્યુલ માટે કાર્ડ છે.',
+      en: 'Tap Menu anytime to see every module and jump straight to it.',
+      gu: 'કોઈ પણ સમયે Menu પર ટેપ કરો — બધા મોડ્યુલ જુઓ અને સીધા ત્યાં જાવ.',
     },
   },
   {

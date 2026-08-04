@@ -120,10 +120,10 @@ export default function QuotationListPage() {
           {view === 'list' && (
             <div className="max-w-6xl mx-auto px-4 py-3 flex flex-wrap gap-2 items-center border-t border-slate-100">
               <div className="relative flex-1 min-w-[200px]">
-                <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+                <Search className="w-4 h-4 absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
                 <input value={search} onChange={e => setSearch(e.target.value)}
                   placeholder="Search by number, customer or subject…"
-                  className="qt-input pl-10 py-2.5 text-sm" />
+                  className="qt-input pr-10 py-2.5 text-sm" />
               </div>
               <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)}
                 className="qt-select w-auto py-2.5 text-sm">

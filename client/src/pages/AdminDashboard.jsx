@@ -4931,6 +4931,7 @@ export default function AdminDashboard() {
                   stateCode: cust.State_Code || '',
                               coordinators: parsedCoords.length > 0 ? parsedCoords : []
                             });
+                            setIsEditCustomerGpsUnlocked(!cust.Location_Link);
                             setIsEditCustomerNotesUnlocked(!cust.Special_Notes);
                             setShowEditCustomerModal(true);
                           }}
@@ -6265,21 +6266,55 @@ export default function AdminDashboard() {
 
               {/* Location Link — GPS Map */}
               <div className="p-3.5 rounded-2xl bg-indigo-50 border border-indigo-200 space-y-2">
-                <label className="block font-bold text-indigo-900">📍 GPS Map Location Link</label>
-                <p className="text-[11px] text-indigo-700">Paste the Google Maps URL for this business location. Staff will use this to navigate directly.</p>
+                <div className="flex items-center justify-between">
+                  <label className="block font-bold text-indigo-900">📍 GPS Map Location Link</label>
+                  {editCustomerForm.locationLink?.trim() && !isEditCustomerGpsUnlocked ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (window.confirm('Unlock GPS Location Link to edit? Only do this if the business location has actually changed.')) {
+                          setIsEditCustomerGpsUnlocked(true);
+                        }
+                      }}
+                      className="px-2.5 py-1 bg-indigo-500 hover:bg-indigo-600 text-white font-extrabold text-[11px] rounded-lg shadow-2xs flex items-center gap-1 transition"
+                    >
+                      🔓 Unlock Link
+                    </button>
+                  ) : (
+                    editCustomerForm.locationLink?.trim() && (
+                      <button
+                        type="button"
+                        onClick={() => setIsEditCustomerGpsUnlocked(false)}
+                        className="px-2 py-0.5 bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold text-[10px] rounded-md transition"
+                      >
+                        🔒 Lock Link
+                      </button>
+                    )
+                  )}
+                </div>
+                <p className="text-[11px] text-indigo-700">
+                  {editCustomerForm.locationLink?.trim() && !isEditCustomerGpsUnlocked
+                    ? '🔒 Link is locked to prevent accidental overwrite. Click "Unlock Link" above if the location has actually changed.'
+                    : 'Paste the Google Maps URL for this business location. Staff will use this to navigate directly.'}
+                </p>
                 <div className="flex items-center gap-1.5">
                   <input
                     type="url"
+                    readOnly={Boolean(editCustomerForm.locationLink?.trim() && !isEditCustomerGpsUnlocked)}
                     value={editCustomerForm.locationLink}
                     onChange={e => setEditCustomerForm({ ...editCustomerForm, locationLink: e.target.value })}
-                    className="flex-1 px-3 py-2 bg-white border border-indigo-300 rounded-xl text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    className={`flex-1 px-3 py-2 border rounded-xl focus:outline-none focus:ring-2 ${
+                      editCustomerForm.locationLink?.trim() && !isEditCustomerGpsUnlocked
+                        ? 'bg-slate-100 border-slate-300 text-slate-600 cursor-not-allowed'
+                        : 'bg-white border-indigo-300 text-slate-900 focus:ring-indigo-500'
+                    }`}
                     placeholder="https://maps.google.com/?q=..."
                   />
                   <button
                     type="button"
-                    disabled={fetchingLocationFor === (editingCustomer?.Customer_ID || 'EDIT_MODAL')}
+                    disabled={fetchingLocationFor === (editingCustomer?.Customer_ID || 'EDIT_MODAL') || Boolean(editCustomerForm.locationLink?.trim() && !isEditCustomerGpsUnlocked)}
                     onClick={() => handleFetchAndSaveCustomerGps(editingCustomer || { Customer_ID: 'EDIT_MODAL' })}
-                    className="px-3 py-2 bg-white hover:bg-indigo-100 text-indigo-700 font-bold text-xs rounded-xl border border-indigo-300 flex items-center gap-1 transition shrink-0 shadow-2xs"
+                    className="px-3 py-2 bg-white hover:bg-indigo-100 text-indigo-700 font-bold text-xs rounded-xl border border-indigo-300 flex items-center gap-1 transition shrink-0 shadow-2xs disabled:opacity-50 disabled:cursor-not-allowed"
                     title="Fetch GPS directly from current client location"
                   >
                     <Navigation className={`w-3.5 h-3.5 text-indigo-600 ${fetchingLocationFor === (editingCustomer?.Customer_ID || 'EDIT_MODAL') ? 'animate-spin' : ''}`} />

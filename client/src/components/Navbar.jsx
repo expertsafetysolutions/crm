@@ -10,7 +10,7 @@ const APP_LAST_UPDATED_DATE = formatDateDDMMYYYY(__APP_BUILD_TIME__);
 const APP_LAST_UPDATED_TIME = getLocalTimeStr(new Date(__APP_BUILD_TIME__));
 
 export default function Navbar({ currentView, setCurrentView }) {
-  const { user, realUser, stopImpersonating, logout, isOnline, pendingSyncCount, syncOfflineData, refreshUserProfile } = useAuth();
+  const { user, realUser, stopImpersonating, logout, isOnline, pendingSyncCount, isSyncing, syncOfflineData, refreshUserProfile } = useAuth();
   const { start: startTour } = useTour();
   const [notifications, setNotifications] = useState([]);
   const [showNotifications, setShowNotifications] = useState(false);

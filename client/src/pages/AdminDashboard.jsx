@@ -89,10 +89,10 @@ import {
 import { QRCodeCanvas } from 'qrcode.react';
 import GstinInput from '../components/GstinInput';
 import { WORKFLOW_STAGES, PRODUCTION_STAGES_WITH_JOB_CARD, departmentForStage } from '../utils/workflowStages';
-import { matchesQuery, filterByQuery } from '../utils/searchUtils';
+import { matchesQuery, filterByQuery, rankByQuery } from '../utils/searchUtils';
 
 const REMARK_TAGS = [
-  'Call',
+  'Call Dialed',
   'Call Received',
   'WhatsApp',
   'Pickup',
@@ -117,7 +117,7 @@ const SYSTEM_REMARK_BADGE_STYLES = {
   'TASK COMPLETED': 'bg-emerald-100 text-emerald-800 border border-emerald-200',
   // Outbound messages
   'Email': 'bg-sky-100 text-sky-800 border border-sky-200',
-  'Whatsapp': 'bg-green-100 text-green-800 border border-green-200',
+  'WhatsApp': 'bg-green-100 text-green-800 border border-green-200',
   // Workshop
   'Material Received': 'bg-orange-100 text-orange-800 border border-orange-200',
   'Work In Progress': 'bg-amber-100 text-amber-800 border border-amber-200',
@@ -308,7 +308,14 @@ export default function AdminDashboard() {
   const { token, logout, user, realUser, startImpersonating } = useAuth();
   const isAdmin = (realUser?.Role || user?.Role) === 'Admin' || (realUser?.Role || user?.Role) === 'ADMIN';
   const taskTapTrackerRef = useRef({});
-  const [activeTab, setActiveTab] = useState(() => localStorage.getItem('expert_admin_active_tab') || 'OVERVIEW'); // 'OVERVIEW' | 'PIPELINE' | 'STAFF' | 'CUSTOMERS' | 'LOGS' | 'ATTENDANCE'
+  // Self-heals a bad persisted value (e.g. a Staff-only tab name like 'TASKS' that leaked in here
+  // before TOUR_NAVIGATE_TAB was scoped per-dashboard) back to 'OVERVIEW' instead of matching none
+  // of this page's tab sections and rendering nothing below the navbar.
+  const ADMIN_TAB_NAMES = new Set(['OVERVIEW', 'PIPELINE', 'STAFF', 'CUSTOMERS', 'ATTENDANCE', 'LOGS', 'CERTIFICATES', 'SERVICE_REPORTS', 'RECYCLE_BIN', 'PUSH_SETTINGS', 'GEOFENCE']);
+  const [activeTab, setActiveTab] = useState(() => {
+    const stored = localStorage.getItem('expert_admin_active_tab');
+    return ADMIN_TAB_NAMES.has(stored) ? stored : 'OVERVIEW';
+  }); // 'OVERVIEW' | 'PIPELINE' | 'STAFF' | 'CUSTOMERS' | 'LOGS' | 'ATTENDANCE'
   const [filterStatus, setFilterStatus] = useState(() => localStorage.getItem('expert_admin_filter_status') || 'Pending');
   const [lastNotificationTab, setLastNotificationTab] = useState(null);
   const [showStaffProgressReport, setShowStaffProgressReport] = useState(false);
@@ -317,52 +324,84 @@ export default function AdminDashboard() {
   const [showTagList, setShowTagList] = useState(true);
   const [showRemarkInputs, setShowRemarkInputs] = useState(true);
   const [showInteractionTagList, setShowInteractionTagList] = useState(true);
-  const [customRemarkTags, setCustomRemarkTags] = useState(() => {
-    try {
-      const saved = localStorage.getItem('expert_safety_custom_remark_tags');
-      return saved ? JSON.parse(saved) : [];
-    } catch {
-      return [];
-    }
-  });
+  // Server-shared Discussion Log tags (Remark_Tag_Master) — every staff member sees the same list,
+  // unlike the old localStorage version which only that one device ever saw. Admin-only to add/delete
+  // (this page already is Admin-only); `remarkTagRows` keeps the Tag_ID each name maps to, for deletes.
+  const [remarkTagRows, setRemarkTagRows] = useState([]);
+  const customRemarkTags = useMemo(() => remarkTagRows.map(t => t.name), [remarkTagRows]);
   const remarkTagsList = useMemo(() => {
     const combined = [...REMARK_TAGS, ...customRemarkTags];
     return Array.from(new Set(combined));
   }, [customRemarkTags]);
 
-  const handleAddCustomTag = (e, isInteractionForm = false, forcePrompt = false) => {
+  // Case/whitespace-insensitive lookup so "whatsapp", " WhatsApp ", "WHATSAPP" all resolve to the
+  // one existing "WhatsApp" tag instead of quietly spawning a near-duplicate — the WhatsApp/Whatsapp
+  // split that had to be merged by hand is exactly the mistake this prevents going forward.
+  const findExistingTagName = (raw) => {
+    const norm = String(raw || '').trim().toLowerCase();
+    if (!norm) return null;
+    const match = remarkTagsList.find(t => String(t).trim().toLowerCase() === norm);
+    return match || null;
+  };
+
+  const handleAddCustomTag = async (e, isInteractionForm = false, forcePrompt = false) => {
     if (e) e.stopPropagation();
     const promptVal = (!forcePrompt && tagSearch.trim()) ? tagSearch.trim() : window.prompt('Enter new custom tag name (e.g., Follow-up Call, Site Inspection):');
-    if (promptVal && promptVal.trim()) {
-      const cleanTag = promptVal.trim();
-      const updatedCustom = Array.from(new Set([...customRemarkTags, cleanTag]));
-      setCustomRemarkTags(updatedCustom);
-      try {
-        localStorage.setItem('expert_safety_custom_remark_tags', JSON.stringify(updatedCustom));
-      } catch {}
+    if (!promptVal || !promptVal.trim()) return;
+    const cleanTag = promptVal.trim();
+
+    const applyTag = (name) => {
       if (isInteractionForm) {
-        setInteractionForm({ ...interactionForm, type: cleanTag });
+        setInteractionForm({ ...interactionForm, type: name });
         setShowInteractionTagList(false);
       } else {
-        setRemarkForm({ ...remarkForm, type: cleanTag });
+        setRemarkForm({ ...remarkForm, type: name });
         setShowTagList(false);
       }
       setTagSearch('');
+    };
+
+    const existing = findExistingTagName(cleanTag);
+    if (existing) {
+      // Same tag already exists under a different case/spacing — reuse it, don't create a duplicate.
+      applyTag(existing);
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/remark-tags', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ name: cleanTag })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to add tag');
+      setRemarkTagRows(prev => [...prev, data.tag]);
+      applyTag(data.tag.name);
+    } catch (err) {
+      alert(err.message);
     }
   };
 
-  const handleDeleteCustomTag = (e, tagToDelete) => {
+  const handleDeleteCustomTag = async (e, tagToDelete) => {
     if (e) e.stopPropagation();
-    const updatedCustom = customRemarkTags.filter(t => t !== tagToDelete);
-    setCustomRemarkTags(updatedCustom);
+    const row = remarkTagRows.find(t => t.name === tagToDelete);
+    if (!row) return;
     try {
-      localStorage.setItem('expert_safety_custom_remark_tags', JSON.stringify(updatedCustom));
-    } catch {}
-    if (remarkForm.type === tagToDelete) {
-      setRemarkForm({ ...remarkForm, type: '' });
-    }
-    if (interactionForm.type === tagToDelete) {
-      setInteractionForm({ ...interactionForm, type: 'Call' });
+      const res = await fetch(`/api/remark-tags/${row.Tag_ID}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (!res.ok) throw new Error('Failed to delete tag');
+      setRemarkTagRows(prev => prev.filter(t => t.Tag_ID !== row.Tag_ID));
+      if (remarkForm.type === tagToDelete) {
+        setRemarkForm({ ...remarkForm, type: '' });
+      }
+      if (interactionForm.type === tagToDelete) {
+        setInteractionForm({ ...interactionForm, type: 'Call Dialed' });
+      }
+    } catch (err) {
+      alert(err.message);
     }
   };
   const [searchQuery, setSearchQuery] = useState('');
@@ -1361,7 +1400,18 @@ export default function AdminDashboard() {
 
   const lastSyncRef = useRef(0);
 
-  // Intercept back button to close modals instead of exiting/closing the app
+  // Intercept back button to close modals instead of exiting/closing the app.
+  // `window.history.state` is browser session-history state, not React state — it survives a
+  // page reload. If a tap opened a modal (pushing { modalOpen: true }) and this component was
+  // then remounted WITHOUT that modal's own close path running (e.g. the guided tour's spotlight
+  // lets its underlying button be tapped, then the tour's own Done/Skip closes the tour without
+  // touching this modal state), the stale `modalOpen: true` is still sitting on the current
+  // history entry on the very next mount — with every modal flag correctly reset to false.
+  // Without the mountedRef guard below, that first render's `else` branch would call
+  // `history.back()` unconditionally before the user does anything, which can strand the page on
+  // a blank entry and — because nothing here ever clears the stale flag — repeats on every
+  // subsequent reload until something else (e.g. logout's `location.replace`) discards the entry.
+  const modalHistoryMountedRef = useRef(false);
   useEffect(() => {
     const isAnyModalOpen = showStaffProgressReport ||
                            showRemarksModal ||
@@ -1385,7 +1435,18 @@ export default function AdminDashboard() {
                            (contactModal && contactModal.isOpen) ||
                            Boolean(activeModal);
 
-    if (isAnyModalOpen) {
+    if (!modalHistoryMountedRef.current) {
+      modalHistoryMountedRef.current = true;
+      // First render ever for this mount: no modal was opened by an in-app tap this session, so
+      // any `modalOpen: true` on the current history entry is stale from before a reload. Clear
+      // it instead of ever calling history.back() on a flag we didn't just set ourselves.
+      if (window.history.state?.modalOpen === true) {
+        window.history.replaceState({ ...window.history.state, modalOpen: false }, '');
+      }
+      if (isAnyModalOpen) {
+        window.history.pushState({ modalOpen: true }, '');
+      }
+    } else if (isAnyModalOpen) {
       if (window.history.state?.modalOpen !== true) {
         window.history.pushState({ modalOpen: true }, '');
       }
@@ -1494,6 +1555,7 @@ export default function AdminDashboard() {
         if (data.equipmentMaster) setEquipmentMasterList(data.equipmentMaster);
         if (data.serviceReports) setServiceReportsList(data.serviceReports);
         if (data.tags) setTags(data.tags);
+        if (data.remarkTags) setRemarkTagRows(data.remarkTags);
         if (data.tasks) {
           const enriched = enrichTasksWithCustomers(data.tasks, cList);
           setTasks(sortTasksByOrder(enriched));
@@ -1526,7 +1588,7 @@ export default function AdminDashboard() {
 
   const loadAdminDataSeparate = async (silent = false) => {
     try {
-      const [resAnal, resTasks, resStaff, resCust, resLogs, resAtt, resLev, resInt, resAdv, resCert, resEquip, resTags] = await Promise.all([
+      const [resAnal, resTasks, resStaff, resCust, resLogs, resAtt, resLev, resInt, resAdv, resCert, resEquip, resTags, resRemarkTags] = await Promise.all([
         fetch('/api/analytics', { headers: { 'Authorization': `Bearer ${token}` } }),
         fetch('/api/tasks?all=true', { headers: { 'Authorization': `Bearer ${token}` } }),
         fetch('/api/staff', { headers: { 'Authorization': `Bearer ${token}` } }),
@@ -1538,7 +1600,8 @@ export default function AdminDashboard() {
         fetch('/api/advances?all=true', { headers: { 'Authorization': `Bearer ${token}` } }),
         fetch('/api/certificates', { headers: { 'Authorization': `Bearer ${token}` } }),
         fetch('/api/equipment-master', { headers: { 'Authorization': `Bearer ${token}` } }),
-        fetch('/api/tags', { headers: { 'Authorization': `Bearer ${token}` } })
+        fetch('/api/tags', { headers: { 'Authorization': `Bearer ${token}` } }),
+        fetch('/api/remark-tags', { headers: { 'Authorization': `Bearer ${token}` } })
       ]);
       if (resAnal.ok) setAnalytics(await resAnal.json());
       if (resCust.ok) setCustomers(await resCust.json());
@@ -1557,6 +1620,7 @@ export default function AdminDashboard() {
         if (resCert.ok) setCertificatesRegistry(await resCert.json());
         if (resEquip.ok) setEquipmentMasterList(await resEquip.json());
         if (resTags.ok) setTags(await resTags.json());
+        if (resRemarkTags.ok) setRemarkTagRows(await resRemarkTags.json());
       } catch (e) {}
     } catch (err) { console.error(err); }
   };
@@ -1910,9 +1974,28 @@ export default function AdminDashboard() {
   // Drives activeTab from the guided tour (client/src/tour/), which lives outside this page's
   // local state — same event-bridge pattern as OPEN_STAFF_PROFILE_POPUP above.
   useEffect(() => {
-    const handleTourNavigateTab = (e) => { if (e.detail?.tab) setActiveTab(e.detail.tab); };
+    // TOUR_NAVIGATE_TAB is a plain window event — both AdminDashboard and StaffDashboard listen
+    // for it, since the tour has no way to know which one is actually mounted. Without this
+    // allowlist, a Staff-tour step (requiresTab: 'TASKS') could set this page's activeTab to a
+    // tab name that only exists on the OTHER dashboard, which then gets persisted to
+    // localStorage['expert_admin_active_tab'] — so the next time this dashboard opens, activeTab
+    // matches none of its own tab sections and the whole content area renders nothing.
+    const handleTourNavigateTab = (e) => { if (ADMIN_TAB_NAMES.has(e.detail?.tab)) setActiveTab(e.detail.tab); };
     window.addEventListener('TOUR_NAVIGATE_TAB', handleTourNavigateTab);
     return () => window.removeEventListener('TOUR_NAVIGATE_TAB', handleTourNavigateTab);
+  }, []);
+
+  // The stats banner / module cards / top nav tab bar all live inside the collapsible header
+  // block (see admin-header-collapse below), which starts CLOSED on every fresh load — collapsed
+  // via max-h-0, so its contents are in the DOM but render at zero height. Every admin tour step
+  // targets something inside that block, so the tour needs to open it first or every step there
+  // times out "not found" even though the element genuinely exists.
+  useEffect(() => {
+    const handleTourExpandTarget = (e) => {
+      if (e.detail?.expandId === 'admin-header') setHeaderOpen(true);
+    };
+    window.addEventListener('TOUR_EXPAND_TARGET', handleTourExpandTarget);
+    return () => window.removeEventListener('TOUR_EXPAND_TARGET', handleTourExpandTarget);
   }, []);
 
   // Keyed on the popup's visibility rather than on each button that opens it, so every entry
@@ -2228,7 +2311,7 @@ export default function AdminDashboard() {
     }
   };
 
-  // Opens the Discussion Log modal pre-tagged as 'Call'/'WhatsApp' with a prefilled title line,
+  // Opens the Discussion Log modal pre-tagged as 'Call Dialed'/'WhatsApp' with a prefilled title line,
   // and expands the task's remark history so it's visible right away — admin/staff just add
   // their notes below the title and save (no need to hunt for the tag in the dropdown).
   const triggerQuickInteraction = (type, task, contactName) => {
@@ -2236,7 +2319,7 @@ export default function AdminDashboard() {
     const staffName = user?.Name || user?.Staff_ID || 'Staff';
     const label = type === 'WhatsApp' ? 'WhatsApp Messaged' : 'Call Dialed';
     setRemarkTask(task);
-    setRemarkForm({ type, remarks: `${label}: ${staffName} - ${contactName || 'Contact'}\n` });
+    setRemarkForm({ type, remarks: `${label}: ${staffName} - ${contactName || 'Contact'}\n\n` });
     setShowTagList(false);
     setShowRemarkInputs(true);
     setShowRemarksModal(true);
@@ -2247,7 +2330,7 @@ export default function AdminDashboard() {
   // "Call Received: Parth - Nilesh" — contact name first (they called), staff name second.
   const applyCallReceivedTag = (contactName) => {
     const staffName = user?.Name || user?.Staff_ID || 'Staff';
-    setRemarkForm({ type: 'Call Received', remarks: `Call Received: ${contactName} - ${staffName}\n` });
+    setRemarkForm({ type: 'Call Received', remarks: `Call Received: ${contactName} - ${staffName}\n\n` });
     setShowTagList(false);
     setTagSearch('');
     setCallReceivedContactPicker({ isOpen: false, contacts: [] });
@@ -2283,7 +2366,7 @@ export default function AdminDashboard() {
     }
     if (contacts.length === 1) {
       if (task) {
-        triggerQuickInteraction('Call', task, contacts[0].name);
+        triggerQuickInteraction('Call Dialed', task, contacts[0].name);
       } else if (custObj?.Customer_ID) {
         handleLogCustomerCall(custObj);
       }
@@ -2693,8 +2776,13 @@ export default function AdminDashboard() {
   const getGroupedSuggestions = () => {
     if (!searchQuery || !searchQuery.trim()) return { customers: [], staff: [], tasks: [] };
     // Field lists and the 5-row caps are unchanged; only the matcher is tokenised.
-    const matchedCustomers = filterByQuery(customers, searchQuery,
-      c => [c.Company_Name, c.Contact, c.Auth_Person, c.Address, c.Customer_ID]).slice(0, 5);
+    // Ranked before the slice so a generic word (e.g. "enterprise") surfaces the best-matching
+    // company within the top 5 instead of an arbitrary array-order match hiding it.
+    const matchedCustomers = rankByQuery(
+      filterByQuery(customers, searchQuery, c => [c.Company_Name, c.Contact, c.Auth_Person, c.Address, c.Customer_ID]),
+      searchQuery,
+      c => c.Company_Name
+    ).slice(0, 5);
 
     const matchedStaff = filterByQuery(staffList, searchQuery,
       s => [s.Name, s.Mobile, s.Role, s.Department, s.Staff_ID]).slice(0, 5);
@@ -2745,23 +2833,20 @@ export default function AdminDashboard() {
           values. z-30 keeps it under the z-40 navbar so it scrolls beneath, not over. */}
       <div ref={searchContainerRef} className="sticky top-[57px] sm:top-[65px] z-30 bg-slate-50 pb-2">
         <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm flex flex-col sm:flex-row items-center justify-between gap-3">
-          <div className="flex items-center gap-2 text-slate-700 font-bold text-xs shrink-0">
-            <Search className="w-4 h-4 text-rose-600 animate-pulse" />
-            <span>Search All (Clients, Staff, Work Orders):</span>
-          </div>
           <div className="flex items-center gap-2 w-full sm:w-auto flex-1 max-w-3xl relative">
             <div className="relative flex-1">
+              <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-rose-600 pointer-events-none" />
               <input
                 ref={searchInputRef}
                 type="text"
-                placeholder="Search by Company Name, Staff Name, Task ID, Description, Mobile..."
+                placeholder="Search All (Clients, Staff, Work Orders)..."
                 value={searchQuery}
                 onFocus={() => setShowSuggestions(true)}
                 onChange={(e) => {
                   setSearchQuery(e.target.value);
                   setShowSuggestions(true);
                 }}
-                className="w-full pl-3.5 pr-8 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-900 placeholder-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-rose-500 font-medium"
+                className="w-full pl-10 pr-8 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-900 placeholder-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-rose-500 font-medium"
               />
               {searchQuery && (
                 <button
@@ -2780,15 +2865,6 @@ export default function AdminDashboard() {
 
             <button
               type="button"
-              onClick={() => {}}
-              className="px-4 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs flex items-center gap-1.5 shadow-sm transition shrink-0"
-            >
-              <Search className="w-3.5 h-3.5" />
-              <span>Search</span>
-            </button>
-
-            <button
-              type="button"
               onClick={() => setShowFilterModal(true)}
               className={`p-2.5 rounded-xl border transition shadow-sm shrink-0 flex items-center justify-center relative ${
                 filterSelectedDates.length > 0 || filterSelectedUsers.length > 0 || filterStartDate || filterEndDate
@@ -2801,6 +2877,28 @@ export default function AdminDashboard() {
               {(filterSelectedDates.length > 0 || filterSelectedUsers.length > 0 || filterStartDate || filterEndDate) && (
                 <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-rose-600 rounded-full border-2 border-white" />
               )}
+            </button>
+
+            {/* Staff Dashboard's sticky "+" mirrored here — the full "New Work Order" button
+                lives inside the collapsible header block below, which is hidden on load, so
+                Admin had no one-tap way to add a task without first opening Menu. */}
+            <button
+              type="button"
+              onClick={() => {
+                if (customers.length > 0) {
+                  setTaskForm(prev => ({ ...prev, customerId: customers[0].Customer_ID }));
+                }
+                if (staffList.length > 0) {
+                  setTaskForm(prev => ({ ...prev, assignedStaff: staffList[1]?.Staff_ID || staffList[0].Staff_ID }));
+                }
+                setSelectedCustomer(null);
+                setIsNewCustomerMode(false);
+                setShowNewTaskModal(true);
+              }}
+              className="p-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs flex items-center justify-center shadow-sm transition shrink-0"
+              title="Add New Task / Work Order"
+            >
+              <PlusCircle className="w-4 h-4" />
             </button>
 
             {/* Opens the collapsed header block. Without this the block would be unreachable at
@@ -2826,6 +2924,46 @@ export default function AdminDashboard() {
         {showSuggestions && hasSuggestions && (
           <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-slate-200 rounded-2xl shadow-xl z-50 max-h-[380px] overflow-y-auto divide-y divide-slate-100 animate-fadeIn">
             
+            {/* Tasks Section — listed first: Admin searches this box for work orders far more
+                often than for customer/staff lookups, so it must not sit below a long
+                Customers section and require scrolling. */}
+            {suggestions.tasks.length > 0 && (
+              <div className="p-2.5">
+                <h4 className="text-[10px] font-black text-amber-650 uppercase tracking-widest px-2.5 py-1 mb-1.5 flex items-center gap-1">
+                  <Briefcase className="w-3 h-3" />
+                  Work Orders / Tasks ({suggestions.tasks.length})
+                </h4>
+                <div className="space-y-0.5">
+                  {suggestions.tasks.map(t => (
+                    <button
+                      key={t.Task_ID}
+                      type="button"
+                      onClick={() => handleSelectSuggestion(t, 'task')}
+                      className="w-full text-left px-3 py-2 hover:bg-slate-50 rounded-xl transition flex items-center justify-between text-xs group"
+                    >
+                      <div className="min-w-0">
+                        <p className="font-extrabold text-slate-900 truncate group-hover:text-amber-600">
+                          {t.Customer_Name || 'No Name'}
+                        </p>
+                        <p className="text-[10px] text-slate-500 truncate mt-0.5">
+                          Task ID: <span className="font-bold text-slate-700">{t.Task_ID}</span> | {t.Description}
+                        </p>
+                      </div>
+                      <div className="text-right shrink-0 ml-3 text-xs">
+                        <p className="text-[9px] px-2 py-0.5 rounded-full font-bold uppercase inline-block"
+                           style={t.Status === 'Completed' ? { backgroundColor: '#dcfce7', color: '#15803d' } :
+                                  t.Status === 'In Progress' ? { backgroundColor: '#dbeafe', color: '#1d4ed8' } :
+                                  { backgroundColor: '#fef3c7', color: '#d97706' }}>
+                          {t.Status}
+                        </p>
+                        <p className="text-[9px] text-slate-400 mt-0.5 font-medium">By: {t.Assigned_Staff || 'Unassigned'}</p>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* Customers Section */}
             {suggestions.customers.length > 0 && (
               <div className="p-2.5">
@@ -2881,44 +3019,6 @@ export default function AdminDashboard() {
                       <div className="text-right shrink-0 ml-3 text-xs">
                         <p className="text-[10px] font-bold text-slate-700 font-mono">{s.Mobile}</p>
                         <p className="text-[9px] px-1.5 py-0.5 bg-indigo-50 text-indigo-600 rounded-md font-bold uppercase inline-block">Select Staff</p>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Tasks Section */}
-            {suggestions.tasks.length > 0 && (
-              <div className="p-2.5">
-                <h4 className="text-[10px] font-black text-amber-650 uppercase tracking-widest px-2.5 py-1 mb-1.5 flex items-center gap-1">
-                  <Briefcase className="w-3 h-3" />
-                  Work Orders / Tasks ({suggestions.tasks.length})
-                </h4>
-                <div className="space-y-0.5">
-                  {suggestions.tasks.map(t => (
-                    <button
-                      key={t.Task_ID}
-                      type="button"
-                      onClick={() => handleSelectSuggestion(t, 'task')}
-                      className="w-full text-left px-3 py-2 hover:bg-slate-50 rounded-xl transition flex items-center justify-between text-xs group"
-                    >
-                      <div className="min-w-0">
-                        <p className="font-extrabold text-slate-900 truncate group-hover:text-amber-600">
-                          {t.Customer_Name || 'No Name'}
-                        </p>
-                        <p className="text-[10px] text-slate-500 truncate mt-0.5">
-                          Task ID: <span className="font-bold text-slate-700">{t.Task_ID}</span> | {t.Description}
-                        </p>
-                      </div>
-                      <div className="text-right shrink-0 ml-3 text-xs">
-                        <p className="text-[9px] px-2 py-0.5 rounded-full font-bold uppercase inline-block"
-                           style={t.Status === 'Completed' ? { backgroundColor: '#dcfce7', color: '#15803d' } :
-                                  t.Status === 'In Progress' ? { backgroundColor: '#dbeafe', color: '#1d4ed8' } :
-                                  { backgroundColor: '#fef3c7', color: '#d97706' }}>
-                          {t.Status}
-                        </p>
-                        <p className="text-[9px] text-slate-400 mt-0.5 font-medium">By: {t.Assigned_Staff || 'Unassigned'}</p>
                       </div>
                     </button>
                   ))}
@@ -9087,8 +9187,11 @@ export default function AdminDashboard() {
                       </div>
                     ) : customerSearchQuery.trim().length > 0 ? (
                       <div className="max-h-32 overflow-y-auto space-y-1 bg-white border border-slate-200 rounded-xl p-1">
-                        {customers
-                          .filter(c => matchesQuery(customerSearchQuery, [c.Company_Name, c.Contact, c.Auth_Person, c.Address, c.Customer_ID]))
+                        {rankByQuery(
+                          customers.filter(c => matchesQuery(customerSearchQuery, [c.Company_Name, c.Contact, c.Auth_Person, c.Address, c.Customer_ID])),
+                          customerSearchQuery,
+                          c => c.Company_Name
+                        )
                           .slice(0, 5)
                           .map(c => (
                             <div
@@ -9875,7 +9978,7 @@ export default function AdminDashboard() {
                       {contactModal.mode === 'CALL' ? (
                         <a href={`tel:${formatDialerNumber(cleanPhone)}`} onClick={() => {
                           if (contactModal.task) {
-                            triggerQuickInteraction('Call', contactModal.task, contact.name);
+                            triggerQuickInteraction('Call Dialed', contactModal.task, contact.name);
                           } else if (contactModal.customer?.Customer_ID) {
                             handleLogCustomerCall(contactModal.customer);
                           }

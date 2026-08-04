@@ -4243,7 +4243,7 @@ export default function CertificateComplianceGeneratorPage() {
               </button>
               <button
                 type="button"
-                onClick={() => { setCertFilters(certFilterDraft); setShowCertFilterSheet(false); }}
+                onClick={() => { setCertFilters(certFilterDraft); setShowCertFilterSheet(false); setShowSearchModal(true); }}
                 className="flex-1 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition shadow-sm"
               >
                 <CheckCircle2 className="w-3.5 h-3.5" />

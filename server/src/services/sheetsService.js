@@ -27,6 +27,10 @@ const models = {
   Client_Equipment_Master: createModel('Client_Equipment_Master'),
   Document_Settings: createModel('Document_Settings'),
   Tag_Master: createModel('Tag_Master'),
+  // Discussion Log interaction-type tags ("Call Dialed", "Site Visit"...). Deliberately separate
+  // from Tag_Master, which labels TASK cards — sharing one list would mix the two pickers and let
+  // a task label get chosen as a remark type or vice versa.
+  Remark_Tag_Master: createModel('Remark_Tag_Master'),
   Field_Visits: createModel('Field_Visits'),
   Certificate_Type_Master: createModel('Certificate_Type_Master'),
   // Due-certificate tracking rows for legacy/paper customers with no certificate ever generated in
@@ -517,6 +521,7 @@ class MongoService {
   }
   async getAllServiceReports() { return this.getTab('Service_Reports'); }
   async getAllTags() { return this.getTab('Tag_Master'); }
+  async getAllRemarkTags() { return this.getTab('Remark_Tag_Master'); }
 
   async getAllCertificateTypes() { return this.getTab('Certificate_Type_Master'); }
 

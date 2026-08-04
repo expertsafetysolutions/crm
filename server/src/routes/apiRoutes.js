@@ -73,7 +73,8 @@ router.get('/sync/all', async (req, res) => {
       allCertificates,
       equipmentMaster,
       allServiceReports,
-      allTags
+      allTags,
+      allRemarkTags
     ] = await Promise.all([
       sheetsService.getAllTasks(),
       sheetsService.getAllCustomers(),
@@ -86,7 +87,8 @@ router.get('/sync/all', async (req, res) => {
       sheetsService.getAllCertificates(),
       sheetsService.getEquipmentMaster(),
       sheetsService.getAllServiceReports(),
-      sheetsService.getAllTags()
+      sheetsService.getAllTags(),
+      sheetsService.getAllRemarkTags()
     ]);
 
     // Effective_Permissions is attached here, on the single shared list, so BOTH the Admin and Staff
@@ -147,6 +149,7 @@ router.get('/sync/all', async (req, res) => {
         equipmentMaster: equipmentMaster,
         serviceReports: allServiceReports,
         tags: allTags,
+        remarkTags: allRemarkTags,
         analytics,
         timestamp: Date.now()
       });
@@ -169,6 +172,7 @@ router.get('/sync/all', async (req, res) => {
         equipmentMaster: equipmentMaster,
         serviceReports: allServiceReports,
         tags: allTags,
+        remarkTags: allRemarkTags,
         staff: cleanStaff,
         timestamp: Date.now()
       });
@@ -957,6 +961,45 @@ router.delete('/tags/:id', async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: 'Failed to delete tag' });
+  }
+});
+
+// --- REMARK TAGS (Discussion Log interaction types, e.g. "Call Dialed", "Site Visit") ---
+// Deliberately its own Admin-only list, separate from /tags above (task-card labels) — see the
+// comment on Remark_Tag_Master in sheetsService.js for why the two must not share one collection.
+router.get('/remark-tags', async (req, res) => {
+  try {
+    const tags = await sheetsService.getAllRemarkTags();
+    res.json(tags);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch remark tags' });
+  }
+});
+
+router.post('/remark-tags', async (req, res) => {
+  try {
+    if (req.user.role !== 'Admin') return res.status(403).json({ error: 'Admin access required' });
+    const { name } = req.body;
+    if (!name || !name.trim()) return res.status(400).json({ error: 'Tag name is required' });
+    const newTag = {
+      Tag_ID: 'rtag-' + Date.now(),
+      name: name.trim()
+    };
+    await sheetsService.insertRow('Remark_Tag_Master', newTag);
+    res.json({ success: true, tag: newTag });
+  } catch (err) {
+    console.error('Create remark tag failed:', err);
+    res.status(500).json({ error: 'Failed to create remark tag' });
+  }
+});
+
+router.delete('/remark-tags/:id', async (req, res) => {
+  try {
+    if (req.user.role !== 'Admin') return res.status(403).json({ error: 'Admin access required' });
+    await sheetsService.deleteRow('Remark_Tag_Master', 'Tag_ID', req.params.id);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to delete remark tag' });
   }
 });
 

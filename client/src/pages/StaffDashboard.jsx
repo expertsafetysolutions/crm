@@ -69,10 +69,10 @@ import {
 } from 'lucide-react';
 
 import { WORKFLOW_STAGES, PRODUCTION_STAGES_WITH_JOB_CARD } from '../utils/workflowStages';
-import { matchesQuery } from '../utils/searchUtils';
+import { matchesQuery, rankByQuery } from '../utils/searchUtils';
 
 const REMARK_TAGS = [
-  'Call',
+  'Call Dialed',
   'Call Received',
   'WhatsApp',
   'Pickup',
@@ -97,7 +97,7 @@ const SYSTEM_REMARK_BADGE_STYLES = {
   'TASK COMPLETED': 'bg-emerald-100 text-emerald-800 border border-emerald-200',
   // Outbound messages
   'Email': 'bg-sky-100 text-sky-800 border border-sky-200',
-  'Whatsapp': 'bg-green-100 text-green-800 border border-green-200',
+  'WhatsApp': 'bg-green-100 text-green-800 border border-green-200',
   // Workshop
   'Material Received': 'bg-orange-100 text-orange-800 border border-orange-200',
   'Work In Progress': 'bg-amber-100 text-amber-800 border border-amber-200',
@@ -341,8 +341,14 @@ export default function StaffDashboard() {
     assignedStaff: ''
   });
 
-  // Active Tab
-  const [activeTab, setActiveTab] = useState(() => localStorage.getItem('expert_staff_active_tab') || 'TASKS'); // 'TASKS' | 'ATTENDANCE'
+  // Active Tab. Self-heals a bad persisted value (e.g. an Admin-only tab name like 'OVERVIEW'
+  // that leaked in here before TOUR_NAVIGATE_TAB was scoped per-dashboard) back to 'TASKS'
+  // instead of matching none of this page's tab sections and rendering nothing below the navbar.
+  const STAFF_TAB_NAMES = new Set(['TASKS', 'ATTENDANCE_HISTORY', 'ATTENDANCE', 'APPLY_LEAVE', 'LEAVE_APPLICATIONS', 'EARNINGS', 'REPORTS']);
+  const [activeTab, setActiveTab] = useState(() => {
+    const stored = localStorage.getItem('expert_staff_active_tab');
+    return STAFF_TAB_NAMES.has(stored) ? stored : 'TASKS';
+  });
   const [lastNotificationTab, setLastNotificationTab] = useState(null);
   const [attendanceLogs, setAttendanceLogs] = useState([]);
   const [leaveRequests, setLeaveRequests] = useState([]);
@@ -431,44 +437,76 @@ export default function StaffDashboard() {
   const [tagSearch, setTagSearch] = useState('');
   const [showTagList, setShowTagList] = useState(true);
   const [showRemarkInputs, setShowRemarkInputs] = useState(true);
-  const [customRemarkTags, setCustomRemarkTags] = useState(() => {
-    try {
-      const saved = localStorage.getItem('expert_safety_custom_remark_tags');
-      return saved ? JSON.parse(saved) : [];
-    } catch {
-      return [];
-    }
-  });
+  // Server-shared Discussion Log tags (Remark_Tag_Master) — every staff member sees the same list,
+  // unlike the old localStorage version which only that one device ever saw. Admin-only to add/delete
+  // (enforced server-side too); `remarkTagRows` keeps the Tag_ID each name maps to, for deletes.
+  const [remarkTagRows, setRemarkTagRows] = useState([]);
+  const customRemarkTags = useMemo(() => remarkTagRows.map(t => t.name), [remarkTagRows]);
   const remarkTagsList = useMemo(() => {
     const combined = [...REMARK_TAGS, ...customRemarkTags];
     return Array.from(new Set(combined));
   }, [customRemarkTags]);
 
-  const handleAddCustomTag = (e, forcePrompt = false) => {
+  // Case/whitespace-insensitive lookup so "whatsapp", " WhatsApp ", "WHATSAPP" all resolve to the
+  // one existing "WhatsApp" tag instead of quietly spawning a near-duplicate — the WhatsApp/Whatsapp
+  // split that had to be merged by hand is exactly the mistake this prevents going forward.
+  const findExistingTagName = (raw) => {
+    const norm = String(raw || '').trim().toLowerCase();
+    if (!norm) return null;
+    const match = remarkTagsList.find(t => String(t).trim().toLowerCase() === norm);
+    return match || null;
+  };
+
+  const handleAddCustomTag = async (e, forcePrompt = false) => {
     if (e) e.stopPropagation();
+    if (!isAdmin) return;
     const promptVal = (!forcePrompt && tagSearch.trim()) ? tagSearch.trim() : window.prompt('Enter new custom tag name (e.g., Follow-up Call, Site Inspection):');
-    if (promptVal && promptVal.trim()) {
-      const cleanTag = promptVal.trim();
-      const updatedCustom = Array.from(new Set([...customRemarkTags, cleanTag]));
-      setCustomRemarkTags(updatedCustom);
-      try {
-        localStorage.setItem('expert_safety_custom_remark_tags', JSON.stringify(updatedCustom));
-      } catch { }
-      setRemarkForm({ ...remarkForm, type: cleanTag });
+    if (!promptVal || !promptVal.trim()) return;
+    const cleanTag = promptVal.trim();
+
+    const existing = findExistingTagName(cleanTag);
+    if (existing) {
+      // Same tag already exists under a different case/spacing — reuse it, don't create a duplicate.
+      setRemarkForm({ ...remarkForm, type: existing });
       setShowTagList(false);
       setTagSearch('');
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/remark-tags', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ name: cleanTag })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to add tag');
+      setRemarkTagRows(prev => [...prev, data.tag]);
+      setRemarkForm({ ...remarkForm, type: data.tag.name });
+      setShowTagList(false);
+      setTagSearch('');
+    } catch (err) {
+      alert(err.message);
     }
   };
 
-  const handleDeleteCustomTag = (e, tagToDelete) => {
+  const handleDeleteCustomTag = async (e, tagToDelete) => {
     if (e) e.stopPropagation();
-    const updatedCustom = customRemarkTags.filter(t => t !== tagToDelete);
-    setCustomRemarkTags(updatedCustom);
+    if (!isAdmin) return;
+    const row = remarkTagRows.find(t => t.name === tagToDelete);
+    if (!row) return;
     try {
-      localStorage.setItem('expert_safety_custom_remark_tags', JSON.stringify(updatedCustom));
-    } catch { }
-    if (remarkForm.type === tagToDelete) {
-      setRemarkForm({ ...remarkForm, type: '' });
+      const res = await fetch(`/api/remark-tags/${row.Tag_ID}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (!res.ok) throw new Error('Failed to delete tag');
+      setRemarkTagRows(prev => prev.filter(t => t.Tag_ID !== row.Tag_ID));
+      if (remarkForm.type === tagToDelete) {
+        setRemarkForm({ ...remarkForm, type: '' });
+      }
+    } catch (err) {
+      alert(err.message);
     }
   };
   const [editingInteractionId, setEditingInteractionId] = useState(null);
@@ -501,22 +539,44 @@ export default function StaffDashboard() {
   const [dragOverTaskId, setDragOverTaskId] = useState(null);
   const [reorderingTaskId, setReorderingTaskId] = useState(null);
 
-  // Intercept back button to close modals instead of exiting/closing the app
+  // Intercept back button to close modals instead of exiting/closing the app.
+  // `window.history.state` is browser session-history state, not React state — it survives a
+  // page reload. If a tap opened a modal (pushing { modalOpen: true }) and the tab/session was
+  // then closed or reloaded WITHOUT that modal's own close path running (e.g. the guided tour's
+  // spotlight lets its underlying button be tapped, then the tour's own Done/Skip closes the
+  // tour without touching this modal state), the stale `modalOpen: true` is still sitting on the
+  // current history entry on the very next mount — with every modal flag correctly reset to
+  // false. Without the mountedRef guard below, that first render's `else` branch would call
+  // `history.back()` unconditionally before the user does anything, which can strand the page on
+  // a blank entry and — because nothing here ever clears the stale flag — repeats on every
+  // subsequent reload until something else (e.g. logout's `location.replace`) discards the entry.
+  const modalHistoryMountedRef = useRef(false);
   useEffect(() => {
-    const isAnyModalOpen = showNewTaskModal || 
-                           showEditTaskModal || 
-                           showRemarksModal || 
-                           showEditCustomerModal || 
-                           (contactModal && contactModal.isOpen) || 
-                           showPunchOutConfirmModal || 
-                           showProfilePopup || 
+    const isAnyModalOpen = showNewTaskModal ||
+                           showEditTaskModal ||
+                           showRemarksModal ||
+                           showEditCustomerModal ||
+                           (contactModal && contactModal.isOpen) ||
+                           showPunchOutConfirmModal ||
+                           showProfilePopup ||
                            showChangePasswordModal ||
                            showFilterModal ||
                            showCompanyDetailsModal ||
                            showICardModal ||
                            Boolean(zoomedImage);
 
-    if (isAnyModalOpen) {
+    if (!modalHistoryMountedRef.current) {
+      modalHistoryMountedRef.current = true;
+      // First render ever for this mount: no modal was opened by an in-app tap this session, so
+      // any `modalOpen: true` on the current history entry is stale from before a reload. Clear
+      // it instead of ever calling history.back() on a flag we didn't just set ourselves.
+      if (window.history.state?.modalOpen === true) {
+        window.history.replaceState({ ...window.history.state, modalOpen: false }, '');
+      }
+      if (isAnyModalOpen) {
+        window.history.pushState({ modalOpen: true }, '');
+      }
+    } else if (isAnyModalOpen) {
       if (window.history.state?.modalOpen !== true) {
         window.history.pushState({ modalOpen: true }, '');
       }
@@ -960,6 +1020,13 @@ export default function StaffDashboard() {
   const [leaveError, setLeaveError] = useState('');
 
   const handleUpdateStatus = async (taskId, newStatus) => {
+    // Move the task to its new tab immediately — the tab filter reads t.Status straight off
+    // local state, so this alone is enough to reflect the change without waiting on the network.
+    // A full syncAllData() (customers+attendance+leaves+advances+...+tasks, with setLoading(true)
+    // blocking the whole page) used to run after every single status flip, which is what made
+    // Pending -> Started/In Progress feel like a full page reload.
+    const prevTasks = tasks;
+    setTasks(prev => sortTasksByOrder(prev.map(t => (t.Task_ID === taskId ? { ...t, Status: newStatus } : t))));
     try {
       const res = await fetch(`/api/tasks/${taskId}/status`, {
         method: 'PUT',
@@ -967,8 +1034,16 @@ export default function StaffDashboard() {
         body: JSON.stringify({ status: newStatus })
       });
       if (!res.ok) throw new Error('Failed to update status');
-      fetchTasks();
+      const updated = await res.json();
+      // Reconcile with whatever the server actually stored, still purely local — no resync of the
+      // rest of the dashboard's data. Re-enrich so raw Task_Master fields (e.g. a blank/legacy
+      // Customer_Name) don't clobber the nicer customer-derived display fields merged in earlier.
+      setTasks(prev => sortTasksByOrder(enrichTasksWithCustomers(
+        prev.map(t => (t.Task_ID === taskId ? { ...t, ...updated } : t)),
+        customersList
+      )));
     } catch (err) {
+      setTasks(prevTasks);
       alert(err.message);
     }
   };
@@ -1009,7 +1084,7 @@ export default function StaffDashboard() {
     }
   };
 
-  // Opens the Discussion Log modal pre-tagged as 'Call'/'WhatsApp' with a prefilled title line,
+  // Opens the Discussion Log modal pre-tagged as 'Call Dialed'/'WhatsApp' with a prefilled title line,
   // and expands the task's remark history so it's visible right away — staff just add
   // their notes below the title and save (no need to hunt for the tag in the dropdown).
   const triggerQuickInteraction = (type, task, contactName) => {
@@ -1017,7 +1092,7 @@ export default function StaffDashboard() {
     const staffName = user?.Name || user?.Staff_ID || 'Staff';
     const label = type === 'WhatsApp' ? 'WhatsApp Messaged' : 'Call Dialed';
     setRemarkTask(task);
-    setRemarkForm({ type, remarks: `${label}: ${staffName} - ${contactName || 'Contact'}\n` });
+    setRemarkForm({ type, remarks: `${label}: ${staffName} - ${contactName || 'Contact'}\n\n` });
     setShowTagList(false);
     setShowRemarkInputs(true);
     setShowRemarksModal(true);
@@ -1028,7 +1103,7 @@ export default function StaffDashboard() {
   // "Call Received: Parth - Nilesh" — contact name first (they called), staff name second.
   const applyCallReceivedTag = (contactName) => {
     const staffName = user?.Name || user?.Staff_ID || 'Staff';
-    setRemarkForm({ type: 'Call Received', remarks: `Call Received: ${contactName} - ${staffName}\n` });
+    setRemarkForm({ type: 'Call Received', remarks: `Call Received: ${contactName} - ${staffName}\n\n` });
     setShowTagList(false);
     setCallReceivedContactPicker({ isOpen: false, contacts: [] });
   };
@@ -1059,7 +1134,7 @@ export default function StaffDashboard() {
       return;
     }
     if (contacts.length === 1) {
-      if (task) triggerQuickInteraction('Call', task, contacts[0].name);
+      if (task) triggerQuickInteraction('Call Dialed', task, contacts[0].name);
       window.location.href = `tel:${formatDialerNumber(contacts[0].cleanPhone)}`;
       return;
     }
@@ -1132,6 +1207,7 @@ export default function StaffDashboard() {
         if (data.serviceReports) setServiceReportsList(data.serviceReports);
         if (data.equipmentMaster) setEquipmentMasterList(data.equipmentMaster);
         if (data.tags) setTags(data.tags);
+        if (data.remarkTags) setRemarkTagRows(data.remarkTags);
         if (data.tasks) {
           const enriched = enrichTasksWithCustomers(data.tasks, cList);
           setTasks(sortTasksByOrder(enriched));
@@ -1148,6 +1224,7 @@ export default function StaffDashboard() {
             timestamp: Date.now()
           }));
         } catch (e) {}
+        return data;
       } else {
         await Promise.all([fetchTasksSeparate(isSilent), fetchAttendanceSeparate()]);
       }
@@ -1171,6 +1248,10 @@ export default function StaffDashboard() {
     try {
       const resTags = await fetch('/api/tags', { headers: { 'Authorization': `Bearer ${token}` } });
       if (resTags.ok) setTags(await resTags.json());
+    } catch (err) { console.error(err); }
+    try {
+      const resRemarkTags = await fetch('/api/remark-tags', { headers: { 'Authorization': `Bearer ${token}` } });
+      if (resRemarkTags.ok) setRemarkTagRows(await resRemarkTags.json());
     } catch (err) { console.error(err); }
     try {
       const resStaff = await fetch('/api/staff', { headers: { 'Authorization': `Bearer ${token}` } });
@@ -1200,7 +1281,7 @@ export default function StaffDashboard() {
   };
 
   const fetchAttendanceAndLeaves = async () => {
-    await syncAllData(true);
+    return syncAllData(true);
   };
 
   /**
@@ -1237,7 +1318,17 @@ export default function StaffDashboard() {
         if (data.status === 'Approved') {
           // The punch is already written server-side by the time we see this — only refresh.
           setApprovalOutcome({ status: 'Approved', message: `Approved. Your punch at ${data.requestedTime} has been recorded.` });
-          await fetchAttendanceAndLeaves();
+          const synced = await fetchAttendanceAndLeaves();
+          // Same on-time celebration as a direct punch-in (doPunch above) — an approved
+          // out-of-office punch used to skip this entirely because it never runs through doPunch's
+          // success branch, so anyone who arrived on time but outside the geofence never saw it.
+          if (data.punchType === 'IN' && data.resultingRecordId) {
+            const rec = (synced?.attendance || []).find(r => r.Record_ID === data.resultingRecordId);
+            if (rec && Number(rec.Late_By_Minutes || 0) === 0) {
+              setOnTimeCelebration(rec.Punch_In_Time || data.requestedTime);
+              setTimeout(() => setOnTimeCelebration(null), 4000);
+            }
+          }
           window.dispatchEvent(new CustomEvent('ATTENDANCE_REFRESHED', { detail: null }));
         } else if (data.status === 'Rejected') {
           setApprovalOutcome({
@@ -1302,11 +1393,40 @@ export default function StaffDashboard() {
     const handleNavbarPunchOut = () => setShowPunchOutConfirmModal(true);
     // Drives activeTab from the guided tour (client/src/tour/), which lives outside this page's
     // local state — same event-bridge pattern as OPEN_STAFF_PROFILE_POPUP above.
-    const handleTourNavigateTab = (e) => { if (e.detail?.tab) setActiveTab(e.detail.tab); };
+    // TOUR_NAVIGATE_TAB is a plain window event — both StaffDashboard and AdminDashboard listen
+    // for it, since the tour has no way to know which one is actually mounted. Without this
+    // allowlist, an Admin-tour step (e.g. requiresTab: 'OVERVIEW') could set this page's
+    // activeTab to a tab name that only exists on the OTHER dashboard, which then gets persisted
+    // to localStorage['expert_staff_active_tab'] — so the next time this dashboard opens,
+    // activeTab matches none of its own tab sections and the whole content area renders nothing.
+    const handleTourNavigateTab = (e) => { if (STAFF_TAB_NAMES.has(e.detail?.tab)) setActiveTab(e.detail.tab); };
+    // Expands the first rendered task card so the tour can spotlight the icon row inside it,
+    // which only exists in the DOM once expanded. Reads the current card straight from the DOM
+    // (via the data-task-id every card already carries) instead of the sorted/filtered task list
+    // in render scope, so this stays correct without needing tasks/expandedTaskIds in the deps of
+    // this mount-once effect. Retries briefly because this can fire right after login while the
+    // task list is still being fetched — a single immediate query would find nothing and never
+    // try again, silently stranding the tour's own (separately retried) search for the icon row.
+    const handleTourExpandTarget = (e) => {
+      if (e.detail?.expandId !== 'staff-task-row-actions') return;
+      let attempts = 0;
+      const tryExpand = () => {
+        const firstCard = document.querySelector('[data-task-id]');
+        const taskId = firstCard?.getAttribute('data-task-id');
+        if (taskId) {
+          setExpandedTaskIds(prev => (prev[taskId] ? prev : { ...prev, [taskId]: true }));
+          return;
+        }
+        attempts += 1;
+        if (attempts < 40) setTimeout(tryExpand, 200);
+      };
+      tryExpand();
+    };
     window.addEventListener('OPEN_STAFF_PROFILE_POPUP', handleOpenProfile);
     window.addEventListener('NAVBAR_PUNCH_IN', handleNavbarPunchIn);
     window.addEventListener('NAVBAR_PUNCH_OUT', handleNavbarPunchOut);
     window.addEventListener('TOUR_NAVIGATE_TAB', handleTourNavigateTab);
+    window.addEventListener('TOUR_EXPAND_TARGET', handleTourExpandTarget);
     return () => {
       window.removeEventListener('focus', handleFocusSync);
       document.removeEventListener('visibilitychange', handleVis);
@@ -1315,6 +1435,7 @@ export default function StaffDashboard() {
       window.removeEventListener('NAVBAR_PUNCH_IN', handleNavbarPunchIn);
       window.removeEventListener('NAVBAR_PUNCH_OUT', handleNavbarPunchOut);
       window.removeEventListener('TOUR_NAVIGATE_TAB', handleTourNavigateTab);
+      window.removeEventListener('TOUR_EXPAND_TARGET', handleTourExpandTarget);
     };
   }, [token]);
 
@@ -2077,7 +2198,6 @@ export default function StaffDashboard() {
         key={task.Task_ID}
         id={`task-card-${task.Task_ID}`}
         data-task-id={task.Task_ID}
-        data-tour={idx === 0 ? 'staff-task-row-actions' : undefined}
         onDragOver={(e) => {
           e.preventDefault();
           handleAutoScroll(e.clientY);
@@ -2439,6 +2559,7 @@ export default function StaffDashboard() {
               {/* CONVERSATION / ADD REMARK BUTTON (FIRST BUTTON) */}
               <button
                 type="button"
+                data-tour={idx === 0 ? 'staff-icon-conversation' : undefined}
                 onClick={() => {
                   setRemarkTask(task);
                   setRemarkForm({ type: '', remarks: '' });
@@ -2459,6 +2580,7 @@ export default function StaffDashboard() {
               {hasContacts && (
                 <button
                   type="button"
+                  data-tour={idx === 0 ? 'staff-icon-call' : undefined}
                   onClick={(e) => { e.stopPropagation(); handlePhoneButtonClick(custObj, task); }}
                   className="group relative w-8 h-8 rounded-xl bg-emerald-50 hover:bg-emerald-100 active:bg-emerald-200 border border-emerald-200 text-emerald-700 flex items-center justify-center transition shrink-0"
                   title="Call Customer"
@@ -2474,6 +2596,7 @@ export default function StaffDashboard() {
               {hasContacts && (
                 <button
                   type="button"
+                  data-tour={idx === 0 ? 'staff-icon-whatsapp' : undefined}
                   onClick={(e) => { e.stopPropagation(); setContactModal({ isOpen: true, mode: 'WHATSAPP', customer: custObj, task }); }}
                   className="group relative w-8 h-8 rounded-xl bg-green-50 hover:bg-green-100 active:bg-green-200 border border-green-300 text-green-600 flex items-center justify-center transition shrink-0"
                   title="WhatsApp Chat"
@@ -2492,6 +2615,7 @@ export default function StaffDashboard() {
                     href={mapUrl}
                     target="_blank"
                     rel="noopener noreferrer"
+                    data-tour={idx === 0 ? 'staff-icon-directions' : undefined}
                     className="group relative w-8 h-8 rounded-xl bg-indigo-50 hover:bg-indigo-100 active:bg-indigo-200 border border-indigo-200 text-indigo-700 flex items-center justify-center transition shrink-0"
                     title="Open Google Directions"
                   >
@@ -2521,6 +2645,7 @@ export default function StaffDashboard() {
               {/* EDIT BUTTON */}
               <button
                 type="button"
+                data-tour={idx === 0 ? 'staff-icon-edit' : undefined}
                 onClick={(e) => { e.stopPropagation(); setEditingTask({ ...task }); setShowEditTaskModal(true); }}
                 className="group relative w-8 h-8 rounded-xl bg-teal-50 hover:bg-teal-100 active:bg-teal-200 border border-teal-200 text-teal-700 flex items-center justify-center transition shrink-0"
                 title="Edit Task"
@@ -2534,6 +2659,7 @@ export default function StaffDashboard() {
               {/* RESCHEDULE BUTTON */}
               <button
                 type="button"
+                data-tour={idx === 0 ? 'staff-icon-reschedule' : undefined}
                 onClick={(e) => { e.stopPropagation(); openModal(task, 'RESCHEDULE'); }}
                 className="group relative w-8 h-8 rounded-xl bg-sky-50 hover:bg-sky-100 active:bg-sky-200 border border-sky-200 text-sky-700 flex items-center justify-center transition shrink-0"
                 title="Reschedule Task"
@@ -2547,6 +2673,7 @@ export default function StaffDashboard() {
               {/* STATUS BUTTON */}
               <button
                 type="button"
+                data-tour={idx === 0 ? 'staff-icon-status' : undefined}
                 onClick={(e) => { e.stopPropagation(); openModal(task, 'STATUS'); }}
                 className="group relative w-8 h-8 rounded-xl bg-orange-50 hover:bg-orange-100 active:bg-orange-200 border border-orange-200 text-orange-700 flex items-center justify-center transition shrink-0"
                 title="Change Status"
@@ -2562,6 +2689,7 @@ export default function StaffDashboard() {
                 <button
                   type="button"
                   id={`tag-btn-${task.Task_ID}`}
+                  data-tour={idx === 0 ? 'staff-icon-tags' : undefined}
                   onClick={(e) => { e.stopPropagation(); setTagSearchQuery(''); setTaskTagPickerId(prev => prev === task.Task_ID ? null : task.Task_ID); }}
                   className="group relative w-8 h-8 rounded-xl bg-teal-50 hover:bg-teal-100 active:bg-teal-200 border border-teal-200 text-teal-700 flex items-center justify-center transition shrink-0"
                   title="View/Toggle Tags"
@@ -2670,6 +2798,7 @@ export default function StaffDashboard() {
               {!isCompleted && PRODUCTION_STAGES_WITH_JOB_CARD.includes(task.Stage) && (
                 <button
                   type="button"
+                  data-tour={idx === 0 ? 'staff-icon-jobcard' : undefined}
                   onClick={(e) => { e.stopPropagation(); navigate(`/job-card/task/${task.Task_ID}`); }}
                   className="group relative w-8 h-8 rounded-xl bg-indigo-50 hover:bg-indigo-100 active:bg-indigo-200 border border-indigo-300 text-indigo-700 flex items-center justify-center transition shrink-0"
                   title={task.Job_Card_ID ? 'Open Job Card' : 'Create Job Card'}
@@ -2688,6 +2817,7 @@ export default function StaffDashboard() {
               {!isCompleted && (
                 <button
                   type="button"
+                  data-tour={idx === 0 ? 'staff-icon-advance' : undefined}
                   onClick={(e) => { e.stopPropagation(); openModal(task, 'ADVANCE'); }}
                   className="group relative w-8 h-8 rounded-xl bg-rose-50 hover:bg-rose-100 active:bg-rose-200 border border-rose-300 text-rose-700 flex items-center justify-center transition shrink-0"
                   title="Advance Work Stage"
@@ -2702,6 +2832,7 @@ export default function StaffDashboard() {
               {/* REMOVE BUTTON */}
               <button
                 type="button"
+                data-tour={idx === 0 ? 'staff-icon-remove' : undefined}
                 onClick={() => handleDeleteTask(task.Task_ID, task.Description || task.Task_ID)}
                 className="group relative w-8 h-8 rounded-xl bg-rose-50 hover:bg-rose-100 active:bg-rose-200 border border-rose-200 text-rose-600 flex items-center justify-center transition shrink-0"
                 title="Remove Task"
@@ -3728,14 +3859,16 @@ export default function StaffDashboard() {
                           </span>
                           <ChevronDown className={`w-4 h-4 text-slate-400 shrink-0 transition-transform ${showTagList ? 'rotate-180 text-amber-600' : ''}`} />
                         </button>
-                        <button
-                          type="button"
-                          onClick={(e) => handleAddCustomTag(e, true)}
-                          className="shrink-0 w-10 h-10 rounded-xl bg-amber-600 hover:bg-amber-700 active:bg-amber-800 text-white flex items-center justify-center shadow-2xs transition"
-                          title="Add New Tag"
-                        >
-                          <Plus className="w-4 h-4" />
-                        </button>
+                        {isAdmin && (
+                          <button
+                            type="button"
+                            onClick={(e) => handleAddCustomTag(e, true)}
+                            className="shrink-0 w-10 h-10 rounded-xl bg-amber-600 hover:bg-amber-700 active:bg-amber-800 text-white flex items-center justify-center shadow-2xs transition"
+                            title="Add New Tag"
+                          >
+                            <Plus className="w-4 h-4" />
+                          </button>
+                        )}
                       </div>
 
                       {/* Dropdown Menu when showTagList is true */}
@@ -3777,7 +3910,7 @@ export default function StaffDashboard() {
                                   </div>
                                   <div className="flex items-center gap-1.5 shrink-0">
                                     {remarkForm.type === tag && <span className="text-[11px] bg-amber-700/60 px-1.5 py-0.5 rounded text-white">✓ Selected</span>}
-                                    {isCustom && (
+                                    {isCustom && isAdmin && (
                                       <button
                                         type="button"
                                         onClick={(e) => handleDeleteCustomTag(e, tag)}
@@ -3794,7 +3927,7 @@ export default function StaffDashboard() {
                                 </div>
                               );
                             })}
-                            {remarkTagsList.filter(t => matchesQuery(tagSearch, [t])).length === 0 && (
+                            {isAdmin && remarkTagsList.filter(t => matchesQuery(tagSearch, [t])).length === 0 && (
                               <div className="p-4 text-center space-y-2">
                                 <p className="text-xs text-slate-400 font-medium">No matching tag found.</p>
                                 <button
@@ -3805,6 +3938,11 @@ export default function StaffDashboard() {
                                   <Plus className="w-3.5 h-3.5 text-amber-700" />
                                   <span>Add "{tagSearch}" as new tag</span>
                                 </button>
+                              </div>
+                            )}
+                            {!isAdmin && remarkTagsList.filter(t => matchesQuery(tagSearch, [t])).length === 0 && (
+                              <div className="p-4 text-center">
+                                <p className="text-xs text-slate-400 font-medium">No matching tag found. Ask an Admin to add it.</p>
                               </div>
                             )}
                           </div>
@@ -4908,8 +5046,11 @@ export default function StaffDashboard() {
                       </div>
                     ) : customerSearchQuery.trim().length > 0 ? (
                       <div className="max-h-36 overflow-y-auto space-y-1.5 border border-slate-200 rounded-xl p-1.5 bg-white">
-                        {customersList
-                          .filter(c => matchesQuery(customerSearchQuery, [c.Company_Name, c.Contact, c.Auth_Person, c.Address]))
+                        {rankByQuery(
+                          customersList.filter(c => matchesQuery(customerSearchQuery, [c.Company_Name, c.Contact, c.Auth_Person, c.Address])),
+                          customerSearchQuery,
+                          c => c.Company_Name
+                        )
                           .slice(0, 5)
                           .map(c => (
                             <div
@@ -5969,7 +6110,7 @@ export default function StaffDashboard() {
 
                       {contactModal.mode === 'CALL' ? (
                         <a href={`tel:${formatDialerNumber(cleanPhone)}`} onClick={() => {
-                          if (contactModal.task) triggerQuickInteraction('Call', contactModal.task, contact.name);
+                          if (contactModal.task) triggerQuickInteraction('Call Dialed', contactModal.task, contact.name);
                           setContactModal({ isOpen: false, mode: 'CALL', customer: null, task: null });
                         }} className="w-full flex items-center justify-center gap-2 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold transition shadow-sm">
                           <PhoneCall className="w-3.5 h-3.5" />

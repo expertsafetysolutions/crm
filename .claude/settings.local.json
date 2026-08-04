@@ -49,7 +49,9 @@
       "Bash(node -c server/src/routes/apiRoutes.js)",
       "Bash(node -c server/src/services/quotationEngine.js)",
       "Bash(awk 'NR>=6374 && NR<=6900' client/src/pages/AdminDashboard.jsx)",
-      "Bash(awk 'NR>=6374 && NR<=7200 && /^      \\\\\\)\\\\}/ {print NR\": \"$0}' client/src/pages/AdminDashboard.jsx)"
+      "Bash(awk 'NR>=6374 && NR<=7200 && /^      \\\\\\)\\\\}/ {print NR\": \"$0}' client/src/pages/AdminDashboard.jsx)",
+      "Bash(node -c server/src/services/attendanceService.js)",
+      "Bash(node -c server/src/services/sheetsService.js)"
     ]
   }
 }

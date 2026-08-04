@@ -2,12 +2,18 @@
 // (see CLAUDE.md directory map), so the steps are not derived from one shared list.
 //
 // Step shape:
-//   id            matches a data-tour="<id>" attribute on the real element
-//   requiresTab   dashboard tab to switch to first (TOUR_NAVIGATE_TAB event) — null if already visible
-//   requiresPopup 'PROFILE_POPUP' to open the profile popup first (reuses OPEN_STAFF_PROFILE_POPUP)
-//   permission    key into AuthContext's `permissions` map; step is dropped if permissions[key]?.view is falsy
-//   placement     preferred tooltip side; TourOverlay flips it if it doesn't fit
-//   title/body    { en, gu }
+//   id             matches a data-tour="<id>" attribute on the real element
+//   requiresTab    dashboard tab to switch to first (TOUR_NAVIGATE_TAB event) — null if already visible
+//   requiresPopup  'PROFILE_POPUP' to open the profile popup first (reuses OPEN_STAFF_PROFILE_POPUP)
+//   requiresExpand id of a TOUR_EXPAND_TARGET the dashboard should act on first (e.g. expand the
+//                  first task card so its icon row exists in the DOM) — null if nothing to expand
+//   permission     key into AuthContext's `permissions` map; step is dropped if permissions[key]?.view is falsy
+//   placement      preferred tooltip side; TourOverlay flips it if it doesn't fit
+//   title/body     { en, gu }
+//
+// A step whose target never appears (e.g. this task has no phone number, so Call isn't rendered)
+// is never silently skipped — TourOverlay shows a waiting card with an active Skip button and
+// lets the user decide. See TourOverlay.jsx's FIND_TIMEOUT_MS comment for why.
 
 export const staffTourSteps = [
   {
@@ -35,15 +41,146 @@ export const staffTourSteps = [
     },
   },
   {
-    id: 'staff-task-row-actions',
+    id: 'staff-icon-conversation',
     requiresTab: 'TASKS',
     requiresPopup: null,
+    requiresExpand: 'staff-task-row-actions',
     permission: null,
     placement: 'bottom',
-    title: { en: 'A Task Card', gu: 'ટાસ્ક કાર્ડ' },
+    title: { en: 'Conversation / Remark', gu: 'Conversation / રિમાર્ક' },
     body: {
-      en: 'Tap a task card to expand it — you\'ll see icons for Conversation/Remark, Call, WhatsApp, and Directions to the customer.',
-      gu: 'ટાસ્ક કાર્ડ ખોલવા માટે તેના પર ટેપ કરો — તમને Conversation/Remark, Call, WhatsApp અને ગ્રાહક સુધીની Directions માટેના આઇકોન દેખાશે.',
+      en: 'Tap this to log a call, visit, or any conversation with the customer as a timestamped remark on this task.',
+      gu: 'ગ્રાહક સાથે થયેલ ફોન, વિઝિટ અથવા કોઈપણ વાતચીતને આ ટાસ્ક પર સમય સાથે રિમાર્ક તરીકે નોંધવા માટે આના પર ટેપ કરો.',
+    },
+  },
+  {
+    id: 'staff-icon-call',
+    requiresTab: 'TASKS',
+    requiresPopup: null,
+    requiresExpand: 'staff-task-row-actions',
+    permission: null,
+    placement: 'bottom',
+    title: { en: 'Call Customer', gu: 'ગ્રાહકને ફોન કરો' },
+    body: {
+      en: 'Directly dials the customer\'s saved number. Only shows up when a phone number exists for this task.',
+      gu: 'ગ્રાહકનો સેવ કરેલો નંબર સીધો ડાયલ કરે છે. આ ટાસ્ક માટે ફોન નંબર હોય ત્યારે જ દેખાય છે.',
+    },
+  },
+  {
+    id: 'staff-icon-whatsapp',
+    requiresTab: 'TASKS',
+    requiresPopup: null,
+    requiresExpand: 'staff-task-row-actions',
+    permission: null,
+    placement: 'bottom',
+    title: { en: 'WhatsApp Chat', gu: 'WhatsApp ચેટ' },
+    body: {
+      en: 'Opens WhatsApp with the customer so you can send messages, photos, or documents.',
+      gu: 'ગ્રાહક સાથે WhatsApp ખોલે છે જેથી તમે મેસેજ, ફોટો અથવા ડોક્યુમેન્ટ મોકલી શકો.',
+    },
+  },
+  {
+    id: 'staff-icon-directions',
+    requiresTab: 'TASKS',
+    requiresPopup: null,
+    requiresExpand: 'staff-task-row-actions',
+    permission: null,
+    placement: 'bottom',
+    title: { en: 'Directions', gu: 'દિશા (Directions)' },
+    body: {
+      en: 'Opens Google Maps directions straight to the customer\'s site.',
+      gu: 'ગ્રાહકના સ્થળ સુધીની Google Maps દિશા સીધી ખોલે છે.',
+    },
+  },
+  {
+    id: 'staff-icon-edit',
+    requiresTab: 'TASKS',
+    requiresPopup: null,
+    requiresExpand: 'staff-task-row-actions',
+    permission: null,
+    placement: 'bottom',
+    title: { en: 'Edit Task', gu: 'ટાસ્ક એડિટ કરો' },
+    body: {
+      en: 'Change task details like description, assigned staff, or scheduled date.',
+      gu: 'ટાસ્કની વિગતો જેમ કે વર્ણન, સોંપાયેલ સ્ટાફ અથવા નિર્ધારિત તારીખ બદલો.',
+    },
+  },
+  {
+    id: 'staff-icon-reschedule',
+    requiresTab: 'TASKS',
+    requiresPopup: null,
+    requiresExpand: 'staff-task-row-actions',
+    permission: null,
+    placement: 'bottom',
+    title: { en: 'Reschedule', gu: 'ફરીથી શેડ્યૂલ કરો' },
+    body: {
+      en: 'Move this task to a different date if today isn\'t possible.',
+      gu: 'જો આજે શક્ય ન હોય તો આ ટાસ્કને બીજી તારીખ પર ખસેડો.',
+    },
+  },
+  {
+    id: 'staff-icon-status',
+    requiresTab: 'TASKS',
+    requiresPopup: null,
+    requiresExpand: 'staff-task-row-actions',
+    permission: null,
+    placement: 'bottom',
+    title: { en: 'Change Status', gu: 'સ્ટેટસ બદલો' },
+    body: {
+      en: 'Update the task\'s status — Pending, Started, In Progress, or Completed — as work progresses.',
+      gu: 'કામ આગળ વધે તેમ ટાસ્કનું સ્ટેટસ અપડેટ કરો — Pending, Started, In Progress અથવા Completed.',
+    },
+  },
+  {
+    id: 'staff-icon-tags',
+    requiresTab: 'TASKS',
+    requiresPopup: null,
+    requiresExpand: 'staff-task-row-actions',
+    permission: null,
+    placement: 'bottom',
+    title: { en: 'Tags', gu: 'ટેગ (Tags)' },
+    body: {
+      en: 'Add or view labels on this task for quick filtering later, e.g. "Urgent" or "AMC".',
+      gu: 'પછીથી ઝડપી ફિલ્ટર માટે આ ટાસ્ક પર લેબલ ઉમેરો અથવા જુઓ, જેમ કે "Urgent" અથવા "AMC".',
+    },
+  },
+  {
+    id: 'staff-icon-jobcard',
+    requiresTab: 'TASKS',
+    requiresPopup: null,
+    requiresExpand: 'staff-task-row-actions',
+    permission: null,
+    placement: 'bottom',
+    title: { en: 'Job Card', gu: 'જોબ કાર્ડ' },
+    body: {
+      en: 'Opens or creates the workshop job card for this task — only appears once the job reaches a production stage.',
+      gu: 'આ ટાસ્ક માટે વર્કશોપ જોબ કાર્ડ ખોલે અથવા બનાવે છે — કામ production stage પર પહોંચે ત્યારે જ દેખાય છે.',
+    },
+  },
+  {
+    id: 'staff-icon-advance',
+    requiresTab: 'TASKS',
+    requiresPopup: null,
+    requiresExpand: 'staff-task-row-actions',
+    permission: null,
+    placement: 'bottom',
+    title: { en: 'Advance Stage', gu: 'સ્ટેજ આગળ વધારો' },
+    body: {
+      en: 'Pushes this task to its next workflow stage, e.g. from Material Arrangement to Delivery.',
+      gu: 'આ ટાસ્કને તેના આગલા workflow સ્ટેજ પર લઈ જાય છે, જેમ કે Material Arrangement થી Delivery.',
+    },
+  },
+  {
+    id: 'staff-icon-remove',
+    requiresTab: 'TASKS',
+    requiresPopup: null,
+    requiresExpand: 'staff-task-row-actions',
+    permission: null,
+    placement: 'bottom',
+    title: { en: 'Remove Task', gu: 'ટાસ્ક દૂર કરો' },
+    body: {
+      en: 'Deletes this task. Use carefully — this cannot be undone from here.',
+      gu: 'આ ટાસ્ક ડિલીટ કરે છે. કાળજીપૂર્વક વાપરો — આ અહીંથી પાછું લાવી શકાતું નથી.',
     },
   },
   {
@@ -137,6 +274,7 @@ export const adminTourSteps = [
     id: 'admin-overview-tab',
     requiresTab: 'OVERVIEW',
     requiresPopup: null,
+    requiresExpand: 'admin-header',
     permission: null,
     placement: 'bottom',
     title: { en: 'Overview & Menu', gu: 'ઓવરવ્યૂ અને મેનુ' },
@@ -149,6 +287,7 @@ export const adminTourSteps = [
     id: 'admin-card-pipeline',
     requiresTab: null,
     requiresPopup: null,
+    requiresExpand: 'admin-header',
     permission: null,
     placement: 'bottom',
     title: { en: 'Task Pipeline & Work Orders', gu: 'ટાસ્ક પાઇપલાઇન અને વર્ક ઓર્ડર' },
@@ -161,6 +300,7 @@ export const adminTourSteps = [
     id: 'admin-card-staff',
     requiresTab: null,
     requiresPopup: null,
+    requiresExpand: 'admin-header',
     permission: null,
     placement: 'bottom',
     title: { en: 'Staff Roster, Salary & Scope', gu: 'સ્ટાફ રોસ્ટર, પગાર અને પરવાનગીઓ' },
@@ -173,6 +313,7 @@ export const adminTourSteps = [
     id: 'admin-card-customers',
     requiresTab: null,
     requiresPopup: null,
+    requiresExpand: 'admin-header',
     permission: null,
     placement: 'bottom',
     title: { en: 'Client Database & CRM', gu: 'ક્લાયન્ટ ડેટાબેઝ અને CRM' },
@@ -185,6 +326,7 @@ export const adminTourSteps = [
     id: 'admin-card-attendance',
     requiresTab: null,
     requiresPopup: null,
+    requiresExpand: 'admin-header',
     permission: null,
     placement: 'bottom',
     title: { en: 'Attendance & Payroll', gu: 'હાજરી અને પગાર' },
@@ -197,6 +339,7 @@ export const adminTourSteps = [
     id: 'admin-card-logs',
     requiresTab: null,
     requiresPopup: null,
+    requiresExpand: 'admin-header',
     permission: null,
     placement: 'bottom',
     title: { en: 'Field GPS Activity Logs', gu: 'ફિલ્ડ GPS એક્ટિવિટી લોગ' },
@@ -209,6 +352,7 @@ export const adminTourSteps = [
     id: 'admin-card-certificates',
     requiresTab: null,
     requiresPopup: null,
+    requiresExpand: 'admin-header',
     permission: null,
     placement: 'bottom',
     title: { en: 'Certificate Generator & Compliance', gu: 'સર્ટિફિકેટ જનરેટર અને કમ્પ્લાયન્સ' },

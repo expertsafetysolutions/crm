@@ -9,6 +9,7 @@ export const TOUR_STRINGS = {
     stepOf: (i, n) => `Step ${i} of ${n}`,
     startTour: 'Start Guided Tour',
     languageToggle: 'ગુ',
+    locating: 'Finding this on your screen…',
   },
   gu: {
     next: 'આગળ',
@@ -18,5 +19,6 @@ export const TOUR_STRINGS = {
     stepOf: (i, n) => `પગલું ${i} માંથી ${n}`,
     startTour: 'ગાઇડેડ ટૂર શરૂ કરો',
     languageToggle: 'EN',
+    locating: 'સ્ક્રીન પર શોધી રહ્યાં છીએ…',
   },
 };

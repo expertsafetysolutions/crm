@@ -19,8 +19,10 @@ const sheetsService = require('./sheetsService');
  * actions are logged on the same path as ordinary HTTP calls.
  */
 
-// Tag shown on the timeline entry for a dispatch. One per channel.
-const TAG = { Email: 'Email', WhatsApp: 'Whatsapp' };
+// Tag shown on the timeline entry for a dispatch. One per channel. Was 'Whatsapp' (lowercase p),
+// which meant an auto-logged WhatsApp dispatch and a staff-typed 'WhatsApp' remark showed as two
+// different tags in the Discussion Log picker — merged to one spelling on 2026-08-04.
+const TAG = { Email: 'Email', WhatsApp: 'WhatsApp' };
 
 /**
  * Every tag the modules write. Kept here as the single source of truth so the server and the two

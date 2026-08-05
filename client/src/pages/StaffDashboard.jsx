@@ -178,7 +178,15 @@ export default function StaffDashboard() {
 
   // Dynamic Task Tags (created by Admin; staff can view and toggle them on their own tasks)
   const [tags, setTags] = useState([]);
-  
+
+  // Tag filter chips used to sit permanently open under the status row, eating a full line of
+  // scroll real estate on every task list — worse on a phone than on the Admin screen it was
+  // fixed on first. Now the same popover: closed by default, opens on tap, and auto-closes on
+  // scroll/outside-click/Escape so it never competes with the task list for space.
+  const [showTagPopover, setShowTagPopover] = useState(false);
+  const tagPopoverRef = useRef(null);
+
+
   // Date & User filters state
   const [showFilterModal, setShowFilterModal] = useState(false);
   const [filterSelectedDates, setFilterSelectedDates] = useState([]);
@@ -697,6 +705,40 @@ export default function StaffDashboard() {
     };
   }, [taskTagPickerId]);
 
+  // Tag filter popover: closes on a tap outside it, Escape, or the page being scrolled at all —
+  // a floating panel left open while the list scrolls underneath it reads as a stuck/broken menu,
+  // so any scroll (not just a big one) is treated as "done browsing the panel, close it."
+  //
+  // The listeners are attached on the NEXT frame, not immediately. The tap that opens the popover
+  // is still travelling when this effect runs, so a listener bound synchronously catches that same
+  // gesture, sees a target outside the panel it has not rendered yet, and closes it — the panel
+  // flickers and the button reads as dead. Waiting one frame lets the opening gesture finish first.
+  //
+  // Touch matters as much as mouse here: a phone fires pointerdown/touchstart, and binding only
+  // mousedown left the panel unclosable by tapping the list behind it.
+  useEffect(() => {
+    if (!showTagPopover) return;
+    const handleOutsideClick = (e) => {
+      if (tagPopoverRef.current && !tagPopoverRef.current.contains(e.target)) {
+        setShowTagPopover(false);
+      }
+    };
+    const handleEscape = (e) => { if (e.key === 'Escape') setShowTagPopover(false); };
+    const handleScroll = () => setShowTagPopover(false);
+
+    const frame = requestAnimationFrame(() => {
+      document.addEventListener('pointerdown', handleOutsideClick);
+      document.addEventListener('keydown', handleEscape);
+      window.addEventListener('scroll', handleScroll, { passive: true });
+    });
+    return () => {
+      cancelAnimationFrame(frame);
+      document.removeEventListener('pointerdown', handleOutsideClick);
+      document.removeEventListener('keydown', handleEscape);
+      window.removeEventListener('scroll', handleScroll);
+    };
+  }, [showTagPopover]);
+
   // Auto-hide the status/tag filter row while scrolling to free up screen space on mobile;
   // it reappears once the user scrolls back near the top of the page (or on a fresh load).
   // Hysteresis is used to prevent scroll-recalculation feedback loops and flickering/blinking.
@@ -709,6 +751,11 @@ export default function StaffDashboard() {
         const sy = window.scrollY;
         setShowFilterBar((prev) => {
           if (prev && sy > 120) {
+            // The tag popover lives inside this row, so hiding the row unmounts the panel while
+            // its open flag stays true — scrolling back up would then pop it open unasked. Close
+            // it with the row rather than relying on the popover's own scroll handler, which is
+            // only mounted while the panel is open.
+            setShowTagPopover(false);
             return false;
           }
           if (!prev && sy < 40) {
@@ -2872,64 +2919,98 @@ export default function StaffDashboard() {
 
             </div>
 
-            {/* Status/Tag Filter Rows — auto-hide while scrolling, reappear near the top */}
-            <div className={`overflow-hidden transition-all duration-300 ease-in-out ${showFilterBar ? 'max-h-[500px] opacity-100' : 'max-h-0 opacity-0'}`}>
-              <div className="flex flex-col gap-2.5">
-                {/* Bottom Row: Task status tags */}
-                <div className="flex flex-wrap gap-1.5">
-                  {['Pending', 'Started', 'In Progress', 'Completed', 'ALL'].map(status => (
-                    <button
-                      key={status}
-                      onClick={() => setFilterStatus(status)}
-                      className={`px-2.5 py-1 text-[10px] font-bold rounded-lg border transition ${filterStatus === status
-                        ? 'bg-rose-100 border-rose-300 text-rose-800 shadow-sm'
-                        : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
-                        }`}
-                    >
-                      {status}
-                    </button>
-                  ))}
-                </div>
+            {/* Status/Tag Filter Rows — auto-hide while scrolling, reappear near the top.
+                overflow-hidden is what makes the max-h collapse animate, but it also CLIPS the tag
+                popover, which drops below this row — the panel rendered and was invisible, so the
+                button read as broken. It is therefore only applied while the row is collapsing or
+                collapsed; once open (and nothing is animating) the overflow is released so the
+                popover can escape the box. */}
+            <div className={`transition-all duration-300 ease-in-out ${showFilterBar ? 'max-h-[500px] opacity-100' : 'max-h-0 opacity-0 overflow-hidden'} ${showTagPopover ? '' : 'overflow-hidden'}`}>
+              {/* Status chips and the Tags popover share ONE wrapping row — the popover trigger is
+                  just another chip, so on a 320px screen it wraps alongside them instead of
+                  reserving a second line of its own above every task list. */}
+              <div className="flex flex-wrap items-center gap-1.5">
+                {['Pending', 'Started', 'In Progress', 'Completed', 'ALL'].map(status => (
+                  <button
+                    key={status}
+                    onClick={() => setFilterStatus(status)}
+                    className={`px-2.5 py-1 text-[10px] font-bold rounded-lg border transition ${filterStatus === status
+                      ? 'bg-rose-100 border-rose-300 text-rose-800 shadow-sm'
+                      : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+                      }`}
+                  >
+                    {status}
+                  </button>
+                ))}
 
-                {/* Dynamic Tag Filter Chips (created by Admin in "Manage Tags") */}
+                {/* Dynamic tag filters (tags themselves are created by Admin in "Manage Tags").
+                    Collapsed into a popover for the same reason as the Admin screen: an open chip
+                    row cost a whole line above every task list. No "Manage Tags" entry here —
+                    staff can filter and tag, but only an Admin may create or delete a tag. */}
                 {tags.length > 0 && (
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    {tags.map(tag => {
-                      const isActive = activeTagFilters.includes(tag.Tag_ID);
-                      const tagCount = tasks.filter(t => t.Assigned_Staff === user?.Staff_ID && (t.Tags || []).includes(tag.Tag_ID)).length;
-                      return (
-                        <button
-                          key={tag.Tag_ID}
-                          type="button"
-                          onClick={() => toggleTagFilter(tag.Tag_ID)}
-                          className="relative flex items-center gap-1 px-2.5 py-1 text-[10px] font-bold rounded-full border transition"
-                          style={isActive
-                            ? { backgroundColor: tag.color, borderColor: tag.color, color: '#fff' }
-                            : { backgroundColor: `${tag.color}14`, borderColor: `${tag.color}55`, color: tag.color }}
-                        >
-                          <TagIcon className="w-2.5 h-2.5" />
-                          <span>{tag.name}</span>
-                          {tagCount > 0 && (
-                            <span
-                              className="absolute -top-1.5 -right-1.5 min-w-[14px] h-[14px] px-0.5 rounded-full text-[9px] font-bold flex items-center justify-center shadow-sm"
-                              style={isActive
-                                ? { backgroundColor: '#fff', color: tag.color }
-                                : { backgroundColor: tag.color, color: '#fff' }}
-                            >
-                              {tagCount}
-                            </span>
-                          )}
-                        </button>
-                      );
-                    })}
-                    {activeTagFilters.length > 0 && (
-                      <button
-                        type="button"
-                        onClick={() => setActiveTagFilters([])}
-                        className="text-[10px] font-bold text-slate-400 hover:text-rose-600 px-1.5"
-                      >
-                        Clear tag filters ✕
-                      </button>
+                  <div className="relative" ref={tagPopoverRef}>
+                    <button
+                      type="button"
+                      onClick={() => setShowTagPopover(v => !v)}
+                      className={`flex items-center gap-1.5 px-3 py-1 text-[11px] font-bold rounded-lg border transition ${
+                        activeTagFilters.length > 0
+                          ? 'bg-indigo-100 border-indigo-300 text-indigo-800 shadow-sm'
+                          : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+                      }`}
+                      aria-expanded={showTagPopover}
+                    >
+                      <TagIcon className="w-3 h-3" />
+                      <span>Tags</span>
+                      {activeTagFilters.length > 0 && (
+                        <span className="min-w-[16px] h-4 px-1 rounded-full bg-indigo-600 text-white text-[10px] font-bold flex items-center justify-center">
+                          {activeTagFilters.length}
+                        </span>
+                      )}
+                      <ChevronDown className={`w-3 h-3 transition-transform ${showTagPopover ? 'rotate-180' : ''}`} />
+                    </button>
+
+                    {showTagPopover && (
+                      <div className="absolute top-full left-0 mt-1.5 z-50 w-[min(90vw,380px)] max-h-[60vh] overflow-y-auto bg-white border border-slate-200 rounded-2xl shadow-xl p-2.5 animate-fadeIn">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {tags.map(tag => {
+                            const isActive = activeTagFilters.includes(tag.Tag_ID);
+                            const tagCount = tasks.filter(t => t.Assigned_Staff === user?.Staff_ID && (t.Tags || []).includes(tag.Tag_ID)).length;
+                            return (
+                              <button
+                                key={tag.Tag_ID}
+                                type="button"
+                                onClick={() => toggleTagFilter(tag.Tag_ID)}
+                                className="relative flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold rounded-full border transition"
+                                style={isActive
+                                  ? { backgroundColor: tag.color, borderColor: tag.color, color: '#fff' }
+                                  : { backgroundColor: `${tag.color}14`, borderColor: `${tag.color}55`, color: tag.color }}
+                              >
+                                <TagIcon className="w-2.5 h-2.5" />
+                                <span>{tag.name}</span>
+                                {tagCount > 0 && (
+                                  <span
+                                    className="absolute -top-1.5 -right-1.5 min-w-[14px] h-[14px] px-0.5 rounded-full text-[9px] font-bold flex items-center justify-center shadow-sm"
+                                    style={isActive
+                                      ? { backgroundColor: '#fff', color: tag.color }
+                                      : { backgroundColor: tag.color, color: '#fff' }}
+                                  >
+                                    {tagCount}
+                                  </span>
+                                )}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        {activeTagFilters.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => setActiveTagFilters([])}
+                            className="mt-2 text-[11px] font-bold text-slate-400 hover:text-rose-600 px-1"
+                          >
+                            Clear tag filters ✕
+                          </button>
+                        )}
+                      </div>
                     )}
                   </div>
                 )}

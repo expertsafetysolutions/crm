@@ -3109,7 +3109,8 @@ export default function AdminDashboard() {
                   { label: 'Module Access', icon: Shield, color: 'text-violet-600', onClick: () => navigate('/settings/permissions') },
                   { label: 'Equipment Types', icon: Wrench, color: 'text-amber-600', onClick: () => navigate('/settings/equipment-categories') },
                   { label: 'New Staff Profile', icon: UserPlus, color: 'text-emerald-600', onClick: () => { setShowNewStaffModal(true); setHeaderOpen(false); } },
-                  { label: 'Use Staff Interface', icon: Shield, color: 'text-rose-600', onClick: () => { setShowStaffAccessModal(true); setHeaderOpen(false); } }
+                  { label: 'Use Staff Interface', icon: Shield, color: 'text-rose-600', onClick: () => { setShowStaffAccessModal(true); setHeaderOpen(false); } },
+                  { label: 'Staff Task Progress Report', icon: Briefcase, color: 'text-indigo-600', onClick: () => { setShowStaffProgressReport(true); setHeaderOpen(false); } }
                 ].map(action => {
                   const Icon = action.icon;
                   return (
@@ -3130,13 +3131,14 @@ export default function AdminDashboard() {
       )}
       {/* END NAVIGATION DRAWER */}
 
-      {/* Staff-Wise Task Progress Report — kept as an always-visible dashboard-body section
-          (not in the drawer above): it's data content, not navigation, so it shouldn't need the
-          menu open to be seen or re-opened every time it's checked. */}
+      {/* Staff-Wise Task Progress Report — opened only from Menu ▸ Quick Actions ▸
+          "Staff Task Progress Report" now, instead of sitting open-by-default in the dashboard
+          body. It carries staff/task/customer counts that shouldn't be visible on every page load. */}
+      {showStaffProgressReport && (
       <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden transition-all duration-200 mb-4 sm:mb-8">
-        {/* Main Title Tag - Click/Tap to Expand */}
+        {/* Main Title Tag - Click/Tap to Collapse */}
         <div
-          onClick={() => setShowStaffProgressReport(!showStaffProgressReport)}
+          onClick={() => setShowStaffProgressReport(false)}
           className="p-4 sm:p-5 bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 text-white flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 cursor-pointer select-none hover:opacity-95 transition"
         >
           <div className="flex items-center gap-3 min-w-0">
@@ -3157,8 +3159,8 @@ export default function AdminDashboard() {
               {tasks.length} Total Assigned Tasks
             </span>
             <div className="flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-xl bg-rose-600 text-white shadow-sm">
-              <span>{showStaffProgressReport ? 'Collapse Report' : 'Tap to Expand'}</span>
-              {showStaffProgressReport ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+              <span>Collapse Report</span>
+              <ChevronUp className="w-4 h-4" />
             </div>
           </div>
         </div>
@@ -3336,6 +3338,7 @@ export default function AdminDashboard() {
           </div>
         )}
       </div>
+      )}
 
       {/* Current-module banner — opens the Menu drawer to switch modules, now that it's the only
           navigation surface (the standalone Overview cards page was removed). */}
@@ -7130,7 +7133,8 @@ export default function AdminDashboard() {
                   { key: 'LEAVE_STATUS', label: 'Leave Approved / Rejected', desc: 'When an Admin approves or rejects a staff member’s leave request.' },
                   { key: 'PHOTO_ICARD_APPROVAL', label: 'Photo / I-Card Approval', desc: 'When an Admin approves or rejects a staff member’s profile photo or I-Card update request.' },
                   { key: 'ATTENDANCE_PUNCH', label: 'Staff Punch In / Punch Out', desc: 'Alerts every Admin the moment a staff member punches in or out, with the time and how late they were. Goes to Admins only — staff are not notified about each other.' },
-                  { key: 'ATTENDANCE_APPROVAL', label: 'Out-of-Office Punch Approval', desc: 'Alerts you when someone tries to punch from outside the office and is waiting on your decision — and tells them the outcome. Separate from the setting above, because a person blocked from starting work should still reach you even if routine punch alerts are muted.' }
+                  { key: 'ATTENDANCE_APPROVAL', label: 'Out-of-Office Punch Approval', desc: 'Alerts you when someone tries to punch from outside the office and is waiting on your decision — and tells them the outcome. Separate from the setting above, because a person blocked from starting work should still reach you even if routine punch alerts are muted.' },
+                  { key: 'OTP_CODE', label: 'Login Verification Code (OTP)', desc: 'Sends the staff member’s name and their 6-digit sign-in/reset code to your phone, mirroring the email so you don’t have to open your inbox to relay it.' }
                 ].map(item => {
                   const enabled = !!notificationSettings[item.key];
                   return (

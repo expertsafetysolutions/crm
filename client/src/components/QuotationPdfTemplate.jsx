@@ -66,6 +66,16 @@ const INNER_CONTENT_HEIGHT = CONTENT_HEIGHT - (INNER_PADDING_PX + PAGE_BORDER_PX
 // so the packer spills the remainder to a new page instead of shrinking further.
 const MIN_SHRINK = 0.85;
 
+// Slack added to PageSheet's per-page overflow:hidden clip, on top of naturalHeight*scale. The
+// clip height comes from the same off-screen measurement pass that feeds paginateRows, but that
+// pass and the real on-page render are separate DOM subtrees — a few px of drift between them
+// (sub-pixel rounding, a border, a font metric) is normal and paginateRows already budgets for it
+// via SAFETY_MARGIN_PX. This constant is the same idea applied to the clip itself: without it, an
+// under-measured tail has its own last few px sliced off here even though the packer left room to
+// spare, which is how the signature name/title under the stamp — the last element in `tail` — was
+// found silently clipped while the stamp box above it rendered fine.
+const CLIP_SAFETY_PX = 40;
+
 // Sampled from assets/header_logo.png — the EXPERT wordmark's red and its black keyline.
 const BRAND_RED = '#E01B24';      // page border, title band, grand total
 const BRAND_RED_DARK = '#A3111A'; // small red text, where pure red would vibrate
@@ -282,8 +292,19 @@ function PageSheet({ pageIndex, pageCount, security, seller, overlay, branding, 
             height of naturalHeight*scale — the TRUE painted height — rather than `auto`, which
             would still measure the unscaled naturalHeight and push the footer down too far.
             transformOrigin: top left means nothing paints past those bounds once scaled, so this
-            clip never touches visible content — it only trims the invisible reserved footprint. */}
-        <div className="relative" style={{ zIndex: 1, width: '100%', height: `${naturalHeight * scale}px`, overflow: 'hidden' }}>
+            clip never touches visible content — it only trims the invisible reserved footprint.
+
+            CLIP_SAFETY_PX pads the clip itself (not the packer's budget): the invisible
+            measurement pass and this real page are two separate DOM subtrees, so
+            getBoundingClientRect can return a few px less there than the real render needs —
+            sub-pixel rounding, a border added to one element, a font metric settling differently.
+            paginateRows already has its own SAFETY_MARGIN_PX so pages don't overflow the sheet,
+            but that budget slack does nothing for THIS box: naturalHeight came out of that same
+            measurement pass, so an under-measured tail clips its own last few px here even though
+            the page had room to spare. That is exactly why the signature name/title under the
+            stamp — the last thing in `tail` — was found silently sliced off by this
+            overflow:hidden while the stamp box above it rendered fine. */}
+        <div className="relative" style={{ zIndex: 1, width: '100%', height: `${naturalHeight * scale + CLIP_SAFETY_PX}px`, overflow: 'hidden' }}>
           <div
             className="flex flex-col"
             style={{
@@ -1048,20 +1069,14 @@ const QuotationPdfTemplate = React.forwardRef(({
       )}
 
       {/* ---------- SIGNATURE ---------- (last page only, part of the tail block) */}
-      <div className="flex justify-between items-end mt-3">
-        <div className="text-[8px] text-slate-600 font-bold max-w-[45%]">
-          {docType === 'QUOTATION'
-            ? 'We look forward to your valued order. This quotation is computer generated.'
-            : docType === 'PO'
-              ? 'Please supply the above items as per the agreed rates and terms.'
-              : 'Certified that the particulars given above are true and correct.'}
-        </div>
-
+      <div className="flex justify-end items-end mt-3">
         <div className="text-center flex flex-col items-center justify-end shrink-0" style={{ minWidth: '170px' }}>
           <div className="font-black text-[9px] mb-0.5">For {seller.legal_name || 'Expert Safety Solutions'}</div>
           {overlay.show_stamp !== false && (
             /* Fixed 80x80 slot sized by max-width/max-height, not object-fit — html2canvas
-               ignores object-fit and would stretch the round seal into an ellipse. */
+               ignores object-fit and would stretch the round seal into an ellipse. No border: the
+               stamp/signature scan is itself round and inked, a square frame around it just
+               competes with the artwork. */
             <div className="w-20 h-20 mx-auto -mb-1 flex items-center justify-center">
               <img
                 src={branding.stamp || '/assets/company_stamp.png'}
@@ -1074,14 +1089,14 @@ const QuotationPdfTemplate = React.forwardRef(({
           {/* Honours the "Show signatory name & line" toggle in Quotation Settings, which the
               settings screen has always offered but this template previously ignored. */}
           {overlay.show_signature !== false && (
-            <>
-              <div className="border-t border-slate-900 pt-0.5 font-black text-[9px] uppercase w-full">
-                {seller.authorized_signatory || 'NILESHKUMAR MANJIBHAI PADAYA'}
+            <div className="border-t border-slate-900 pt-0.5 w-full">
+              <div className="font-black text-[9px] uppercase">
+                {seller.authorized_signatory || 'Mr. Nilesh Padaya'}
               </div>
-              <div className="text-[7px] text-slate-600 font-bold leading-tight">
-                Authorized Signatory — {seller.legal_name || 'Expert Safety Solutions'}
+              <div className="text-[8px] text-slate-800 font-bold leading-tight">
+                Authorized Signatory
               </div>
-            </>
+            </div>
           )}
         </div>
       </div>

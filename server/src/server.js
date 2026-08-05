@@ -630,6 +630,10 @@ const REMINDER_JOBS = {
       return { reminders, expired };
     }
   },
+  [reminderScheduler.JOBS.PI_FOLLOWUP]: {
+    label: 'PI follow-up reminders',
+    run: () => require('./services/quotationCronService').runPiFollowUpReminders()
+  },
   [reminderScheduler.JOBS.PAYMENT_DUE]: {
     label: 'Invoice payment-due reminders',
     run: () => require('./services/quotationCronService').runPaymentDueReminders()
@@ -741,6 +745,7 @@ app.get('/api/cron/reminder-dispatch', async (req, res) => {
 const LEGACY_CRON_PATHS = {
   '/api/cron/refilling-due-check': reminderScheduler.JOBS.REFILLING_DUE,
   '/api/cron/quotation-followup-check': reminderScheduler.JOBS.QUOTATION_FOLLOWUP,
+  '/api/cron/pi-followup-check': reminderScheduler.JOBS.PI_FOLLOWUP,
   '/api/cron/payment-due-reminder-check': reminderScheduler.JOBS.PAYMENT_DUE,
   '/api/cron/annual-prospect-check': reminderScheduler.JOBS.ANNUAL_PROSPECT,
   '/api/cron/certificate-due-check': reminderScheduler.JOBS.CERTIFICATE_DUE

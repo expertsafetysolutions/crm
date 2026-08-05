@@ -80,7 +80,7 @@ function RouteLoadingFallback() {
 }
 
 export default function App() {
-  const { user, realUser, impersonatedStaff, stopImpersonating } = useAuth();
+  const { user, realUser, impersonatedStaff, stopImpersonating, autoLoginPending } = useAuth();
   const [currentView, setCurrentView] = useState(() => {
     return localStorage.getItem('expert_safety_current_view') || 'default';
   });
@@ -115,6 +115,13 @@ export default function App() {
         </Routes>
       </Suspense>
     );
+  }
+
+  // Dev-only: localhost with no saved session gets one silent attempt at the server's
+  // dev-auto-login route before the Login screen is ever shown — see AuthContext. Elsewhere
+  // (deployed, or a real session already saved) this stays false and nothing changes.
+  if (autoLoginPending) {
+    return <RouteLoadingFallback />;
   }
 
   if (!user && !realUser) {

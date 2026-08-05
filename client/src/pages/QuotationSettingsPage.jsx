@@ -31,6 +31,7 @@ const EMAIL_TEMPLATES = [
   { key: 'followup_reminder', label: 'Quotation Follow-up Reminder', hint: 'Sent automatically at your configured follow-up interval while a quotation is still open.' },
   { key: 'invoice_payment_due', label: 'Invoice Payment Due', hint: 'Sent around the invoice due date, per the reminder schedule under Approval & Defaults.' },
   { key: 'pi_email', label: 'Proforma Invoice Dispatch', hint: 'Sent when you press Send Email on a proforma invoice in Sales Documents. No {view_link} — the customer portal exists only for quotations.' },
+  { key: 'pi_followup_reminder', label: 'PI Follow-up Reminder', hint: 'Sent automatically at your configured follow-up interval while a proforma invoice is still open (not yet converted to a tax invoice). Off by default.' },
   { key: 'invoice_email', label: 'Tax Invoice Dispatch', hint: 'Sent when you press Send Email on a sales invoice in Sales Documents. No {view_link} — the customer portal exists only for quotations.' },
   { key: 'challan_email', label: 'Delivery Challan Dispatch', hint: 'Sent when you press Send Email on an issued challan in the Challan register. Off by default.' },
   { key: 'certificate_email', label: 'Certificate Dispatch', hint: 'Sent when you press Email to Customer on a saved certificate. Supports {certificate_type}, {certificate_no} and {verification_link} — the public QR verification page. Off by default.' },
@@ -54,6 +55,7 @@ const WHATSAPP_TEMPLATES = [
  */
 const REMINDER_JOBS = [
   { key: 'quotation_followup', label: 'Quotation follow-up', hint: 'Emails customers with an open quotation' },
+  { key: 'pi_followup', label: 'PI follow-up', hint: 'Emails customers with an open proforma invoice' },
   { key: 'payment_due', label: 'Invoice payment due', hint: 'Emails customers with an unpaid invoice' },
   { key: 'refilling_due', label: 'Refilling due', hint: 'Creates internal tasks — no customer email' },
   { key: 'annual_prospect', label: 'Annual prospect leads', hint: 'Creates internal tasks — no customer email' },
@@ -262,7 +264,13 @@ export default function QuotationSettingsPage() {
                 <Field label="State code" value={settings.seller_profile.state_code} onChange={v => set('seller_profile.state_code', v)} />
                 <Field label="Phone" value={settings.seller_profile.phone} onChange={v => set('seller_profile.phone', v)} />
                 <Field label="Email" value={settings.seller_profile.email} onChange={v => set('seller_profile.email', v)} />
+                <Field label="Authorized signatory name" value={settings.seller_profile.authorized_signatory}
+                  onChange={v => set('seller_profile.authorized_signatory', v)} />
               </Grid>
+              <p className="text-[11px] text-slate-500 -mt-2">
+                The signatory name is printed under the stamp on every quotation/PI/invoice/challan, when
+                &quot;Show signatory name &amp; line&quot; is switched on under PDF Overlays below.
+              </p>
               <Field label="Address" textarea value={settings.seller_profile.address} onChange={v => set('seller_profile.address', v)} />
             </Card>
 

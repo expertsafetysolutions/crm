@@ -180,6 +180,22 @@ function buildOtpEmail(staff, purpose, code) {
   return { subject, body };
 }
 
+/**
+ * Push counterpart to buildOtpEmail — deliberately much smaller.
+ *
+ * Everything the email says beyond the staff name and the code (role, purpose, expiry, what to do
+ * if this wasn't expected) stays email-only: a push notification renders on a lock screen, where
+ * anyone glancing at the phone sees it, not just the owner. Title + code is the minimum needed for
+ * the owner to relay the code without opening their inbox; the fuller context is one tap away in
+ * the email itself.
+ */
+function buildOtpPushPayload(staff, code) {
+  return {
+    title: `OTP for ${staff.Name}`,
+    body: code
+  };
+}
+
 module.exports = {
   OTP_RECIPIENT,
   PURPOSES,
@@ -189,5 +205,6 @@ module.exports = {
   generateCode,
   issueOtp,
   verifyOtp,
-  buildOtpEmail
+  buildOtpEmail,
+  buildOtpPushPayload
 };

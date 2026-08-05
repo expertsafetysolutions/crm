@@ -12,8 +12,13 @@ const NOTIFICATION_TYPES = {
   ATTENDANCE_PUNCH: 'ATTENDANCE_PUNCH',
   // Its own type rather than riding on ATTENDANCE_PUNCH: an Admin who has muted routine punch
   // chatter must STILL be interrupted by something that is actively blocking someone from starting
-  // work. Also carries the staff-facing approve/reject reply.
-  ATTENDANCE_APPROVAL: 'ATTENDANCE_APPROVAL'
+  // work. Also carries the staff-facing approve/reply.
+  ATTENDANCE_APPROVAL: 'ATTENDANCE_APPROVAL',
+  // Mirrors the OTP email that already goes to OTP_RECIPIENT, so the owner does not have to open
+  // their inbox to relay a code. Deliberately carries ONLY the staff name and the code — every
+  // other detail (role, purpose, expiry, what-to-do-if-unexpected) stays email-only. See
+  // otpService.buildOtpPushPayload for why.
+  OTP_CODE: 'OTP_CODE'
 };
 
 let vapidConfigured = false;

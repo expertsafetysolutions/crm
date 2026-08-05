@@ -101,6 +101,10 @@ const DEFAULT_QUOTATION_SETTINGS = {
     // and automatic, so it ships off for the same reason challan_email/certificate_email/
     // pod_confirmation do — deploying this cannot start messaging customers on its own.
     certificate_due_reminder: false,
+    // New and automatic, same reasoning as certificate_due_reminder above — an existing install
+    // must not suddenly start chasing every open PI the moment it upgrades. The office turns it on
+    // once they've reviewed the default template.
+    pi_followup_reminder: false,
     pod_confirmation: false,
     // ON: the customer is told on screen that a copy has been emailed to them, so suppressing it
     // would make the confirmation page a lie. It is also the customer's only durable record of the
@@ -179,6 +183,10 @@ const DEFAULT_QUOTATION_SETTINGS = {
     // send, so an open quotation is chased every few days forever and customers end up on their
     // tenth reminder. Overridable per quotation via Max_Reminders; 0 there means unlimited.
     max_follow_up_reminders: 5,
+    // Same cap concept as max_follow_up_reminders, kept separate so quotation and PI chase limits
+    // can be tuned independently — a PI is already a confirmed order in progress, so the office may
+    // want a shorter or longer chase than an unconverted quotation.
+    pi_max_follow_up_reminders: 5,
     auto_expiry_days: 30,
     default_gst_rate: 18,
     quote_no_prefix: 'EXP/Q',
@@ -251,6 +259,13 @@ const DEFAULT_QUOTATION_SETTINGS = {
     pi_email: {
       subject: 'Proforma Invoice {document_no} from Expert Safety Solutions',
       body: 'Dear {customer_name},\n\nPlease find attached our proforma invoice {document_no} dated {document_date} for {amount}.\n\nKindly confirm so we can proceed with the order.\n\nRegards,\nExpert Safety Solutions',
+      whatsapp_template_name: '',
+      whatsapp_template_status: 'not_submitted'
+    },
+    // No {view_link} here either, same reason as pi_email — a PI has no customer portal.
+    pi_followup_reminder: {
+      subject: 'Gentle reminder — Proforma Invoice {document_no}',
+      body: 'Dear {customer_name},\n\nA gentle reminder regarding proforma invoice {document_no} dated {document_date} for {amount}. Kindly confirm so we can proceed with the order.\n\nRegards,\nExpert Safety Solutions',
       whatsapp_template_name: '',
       whatsapp_template_status: 'not_submitted'
     },
@@ -365,6 +380,8 @@ const DEFAULT_QUOTATION_SETTINGS = {
    */
   reminder_schedule: {
     quotation_followup: 11,   // Quotation follow-up reminders
+    pi_followup: 13,          // Proforma Invoice follow-up reminders — separate hour from
+                               // quotation_followup so both dispatchers don't land in the same run
     payment_due: 12,          // Invoice payment-due reminders
     refilling_due: 9,         // Generates refilling-due follow-up TASKS (no customer email)
     annual_prospect: 9,       // Generates annual renewal lead TASKS (no customer email)

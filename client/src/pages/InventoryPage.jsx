@@ -426,7 +426,7 @@ export default function InventoryPage() {
               )}
             </div>
 
-            {(search || categoryFilter) && (
+            {(search || categoryFilter) && isAdmin && (
               <div className="text-xs text-slate-500">
                 Showing {visibleItems.length} of {items.length} items
               </div>

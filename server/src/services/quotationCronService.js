@@ -134,6 +134,100 @@ async function runQuotationFollowUpReminders() {
 }
 
 /**
+ * Module F.2: follow-up reminders for open Proforma Invoices, on the same per-document interval
+ * model as quotation follow-ups above (as opposed to payment reminders' global fixed-offset
+ * model). Mirrors resolveReminderLimit/recordReminderSent/runQuotationFollowUpReminders almost
+ * line for line — kept as separate PI-specific functions (rather than parameterizing the
+ * quotation ones) because they read and write a different collection/id field, and duplicating
+ * the small amount of logic here is cheaper than threading collection/idField through every call
+ * site of the quotation versions.
+ */
+function resolvePiReminderLimit(pi, settings) {
+  const own = Number(pi.Max_Reminders);
+  if (Number.isFinite(own) && own > 0) return own;
+  if (Number.isFinite(own) && own === 0) return 0;          // explicit "unlimited" on this row
+  const fallback = Number(settings?.defaults?.pi_max_follow_up_reminders);
+  return Number.isFinite(fallback) && fallback > 0 ? fallback : 0;
+}
+
+/** Post-send bookkeeping for a PI reminder — see recordReminderSent's doc comment for the shape. */
+async function recordPiReminderSent(pi, results, settings) {
+  const interval = Number(pi.Follow_Up_Interval_Days) || 3;
+  const log = Array.isArray(pi.Reminder_Log) ? pi.Reminder_Log : [];
+  const nextCount = (Number(pi.Reminder_Count) || 0) + 1;
+  const limit = resolvePiReminderLimit(pi, settings);
+  const reachedCap = limit > 0 && nextCount >= limit;
+
+  const patch = {
+    Next_Reminder_Date: reachedCap ? '' : istDateOffset(interval),
+    Last_Reminder_Sent_At: new Date().toISOString(),
+    Reminder_Count: nextCount,
+    Reminder_Log: [...log, {
+      timestamp: new Date().toISOString(),
+      channels: results.map(r => ({ channel: r.channel, status: r.ok ? 'sent' : 'failed', error: r.ok ? '' : String(r.error || '') }))
+    }]
+  };
+  if (reachedCap) {
+    patch.Reminder_Stopped = true;
+    patch.Reminder_Stopped_Reason = `Reached the ${limit}-reminder limit`;
+  }
+
+  await sheetsService.updateRow('PI_Master', 'PI_ID', pi.PI_ID, patch);
+  return { reachedCap, nextCount, limit };
+}
+
+/**
+ * A PI never carries a "Cancelled" status anywhere in this codebase (conversionService only ever
+ * writes 'Issued' at creation and 'Converted' on conversion) — so "still open" is Status !==
+ * 'Converted' with no Linked_Invoice_ID yet, the same signal SalesDocumentsPage's pending filter
+ * already uses, rather than a status value that does not exist.
+ */
+async function runPiFollowUpReminders() {
+  const todayStr = istToday();
+  const settings = await quotationEngine.getSettings();
+  const pis = await sheetsService.getAllPIs();
+
+  const due = pis.filter(p =>
+    !p.Linked_Invoice_ID
+    && p.Status !== 'Converted'
+    && p.Reminder_Stopped !== true
+    && p.Next_Reminder_Date
+    && p.Next_Reminder_Date <= todayStr
+  );
+
+  let sentCount = 0;
+  let failedCount = 0;
+  let stoppedCount = 0;
+
+  for (const pi of due) {
+    try {
+      const limit = resolvePiReminderLimit(pi, settings);
+      if (limit > 0 && (Number(pi.Reminder_Count) || 0) >= limit) {
+        await sheetsService.updateRow('PI_Master', 'PI_ID', pi.PI_ID, {
+          Reminder_Stopped: true,
+          Reminder_Stopped_Reason: `Reached the ${limit}-reminder limit`,
+          Next_Reminder_Date: ''
+        });
+        stoppedCount++;
+        continue;
+      }
+
+      const results = await dispatchService.sendPiFollowUpReminder(pi);
+      const anySent = results.some(r => r.ok);
+      if (anySent) sentCount++; else failedCount++;
+
+      const outcome = await recordPiReminderSent(pi, results, settings);
+      if (outcome.reachedCap) stoppedCount++;
+    } catch (e) {
+      failedCount++;
+      console.error(`PI follow-up reminder failed for ${pi.PI_ID}:`, e.message);
+    }
+  }
+
+  return { dueCount: due.length, sentCount, failedCount, stoppedCount, todayStr };
+}
+
+/**
  * Module G: payment-due reminders for unpaid Sales Invoices, fired at each configured offset
  * relative to the invoice due date (e.g. -3 = three days before, 0 = on the day, +7 = overdue).
  * Idempotent per (invoice, offset) via Reminder_Offsets_Sent, so a re-run can't double-send.
@@ -153,6 +247,12 @@ async function runPaymentDueReminders() {
   let failedCount = 0;
 
   for (const invoice of unpaid) {
+    // A staff-set snooze date takes every offset off the table until it passes — no bookkeeping
+    // to reset afterwards, since this is a pure date comparison re-evaluated on every run. An
+    // offset that would have fired mid-snooze is skipped for that gap, not fired late.
+    const snoozeUntil = invoice.Payment_Reminder_Snooze_Until;
+    if (snoozeUntil && snoozeUntil > todayStr) continue;
+
     // An offset of -3 means "remind 3 days before due", i.e. fire when due_date - 3 === today.
     const alreadySent = Array.isArray(invoice.Reminder_Offsets_Sent) ? invoice.Reminder_Offsets_Sent : [];
     const matchedOffset = offsets.find(off => {
@@ -539,6 +639,9 @@ module.exports = {
   // exactly like an automatic one.
   recordReminderSent,
   resolveReminderLimit,
+  runPiFollowUpReminders,
+  recordPiReminderSent,
+  resolvePiReminderLimit,
   runPaymentDueReminders,
   runPurchaseOrderReminders,
   generateAnnualProspectTasks,

@@ -19,6 +19,7 @@ const { mergeQuotationSettings } = require('./defaultQuotationSettings');
 
 const JOBS = {
   QUOTATION_FOLLOWUP: 'quotation_followup',
+  PI_FOLLOWUP: 'pi_followup',
   PAYMENT_DUE: 'payment_due',
   REFILLING_DUE: 'refilling_due',
   ANNUAL_PROSPECT: 'annual_prospect',

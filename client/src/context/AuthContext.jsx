@@ -95,6 +95,18 @@ export function AuthProvider({ children }) {
     }
   });
 
+  // Dev-only convenience: on localhost, with no session already saved, try the server's
+  // dev-auto-login route before ever painting the Login screen — so a dev machine never has to
+  // type Staff ID/password/OTP. The route itself 404s unless the server ALSO has NODE_ENV !==
+  // 'production' AND DEV_AUTO_LOGIN_STAFF_ID set, so this is inert against the deployed backend
+  // even if a build somehow shipped with this code (hostname check is the second, independent
+  // gate — belt and suspenders, since only one of the two needs to hold for real users to be safe).
+  const [autoLoginPending, setAutoLoginPending] = useState(() => {
+    const isLocalhost = typeof window !== 'undefined' &&
+      ['localhost', '127.0.0.1'].includes(window.location.hostname);
+    return isLocalhost && !localStorage.getItem(TOKEN_KEY);
+  });
+
   // Check offline queue count
   const updateQueueCount = useCallback(async () => {
     try {
@@ -249,6 +261,29 @@ export function AuthProvider({ children }) {
     return data.user;
   };
 
+  // Runs once, only when autoLoginPending started true (localhost + no saved session). A 404
+  // means the server-side gate is closed (production, or DEV_AUTO_LOGIN_STAFF_ID unset) — that is
+  // the expected result on every deployed environment, so it falls through to the normal Login
+  // screen silently rather than surfacing an error.
+  useEffect(() => {
+    if (!autoLoginPending) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/auth/dev-auto-login');
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled) await establishSession(data);
+      } catch (e) {
+        // Offline or server not running yet — fall through to the normal login screen.
+      } finally {
+        if (!cancelled) setAutoLoginPending(false);
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   /** Second step of a new-device sign-in: exchange the emailed code for a session. */
   const verifyOtp = async (staffId, password, code) => {
     const res = await fetch('/api/auth/verify-otp', {
@@ -338,6 +373,7 @@ export function AuthProvider({ children }) {
         permissions,
         canSeeMoney,
         token,
+        autoLoginPending,
         isOnline,
         pendingSyncCount,
         isSyncing,

@@ -1456,6 +1456,14 @@ router.get('/notifications/my', async (req, res) => {
 
     const notifications = [];
 
+    // Leave_Requests never stores a Staff_Name at write time (see POST /leave), so l.Staff_Name is
+    // always undefined — this map is what actually resolves a name for the notifications below.
+    const staffNameById = new Map(staffList.map(s => [s.Staff_ID, s.Name]));
+    const staffLabel = (l) => {
+      const name = l.Staff_Name || staffNameById.get(l.Staff_ID);
+      return name ? `${l.Staff_ID} – ${name}` : l.Staff_ID;
+    };
+
     /*
      * Online inquiry leads — surfaced to Admin AND Sales.
      *
@@ -1499,7 +1507,7 @@ router.get('/notifications/my', async (req, res) => {
         notifications.push({
           id: `leave-${l.Request_ID}`,
           title: 'Leave Request Pending',
-          message: `${l.Staff_Name || l.Staff_ID} applied for leave (${l.Start_Date || l.Leave_Date} to ${l.End_Date || l.Leave_Date})`,
+          message: `${staffLabel(l)} applied for leave (${l.Start_Date || l.Leave_Date} to ${l.End_Date || l.Leave_Date})`,
           time: l.Applied_At || 'Recently',
           type: 'APPROVAL_NEEDED',
           targetId: l.Request_ID,
@@ -1535,7 +1543,7 @@ router.get('/notifications/my', async (req, res) => {
                 notifications.push({
                   id: `leavereminder-${l.Request_ID}`,
                   title: 'Upcoming Leave Reminder',
-                  message: `Reminder: Staff ${l.Staff_Name || l.Staff_ID} has scheduled leave starting ${dayLabel} (${leaveDateStr}) [Status: ${l.Status}]`,
+                  message: `Reminder: Staff ${staffLabel(l)} has scheduled leave starting ${dayLabel} (${leaveDateStr}) [Status: ${l.Status}]`,
                   time: `${diffDays === 0 ? 'Today' : `${diffDays}d away`}`,
                   type: 'ALERT',
                   targetId: l.Request_ID,
@@ -4540,6 +4548,111 @@ router.post('/proforma-invoices/:id/convert-to-invoice', requirePermission('quot
   }
 });
 
+// Literal copy of PATCH /quotations/:id/reminder-settings, writing PI_Master keyed by PI_ID
+// instead of Quotation_Master/Quotation_ID — see that route for the full rationale of each field.
+router.patch('/proforma-invoices/:id/reminder-settings', async (req, res) => {
+  try {
+    const role = String(req.user.role || '');
+    if (role !== 'Admin' && role !== 'Sales') {
+      return res.status(403).json({ error: 'Only Admin or Sales staff can edit reminder settings' });
+    }
+
+    const existing = await sheetsService.getPIById(req.params.id);
+    if (!existing) return res.status(404).json({ error: 'PI not found' });
+
+    const { followUpIntervalDays, nextReminderDate, maxReminders, reminderStopped } = req.body;
+    const updateData = {};
+    if (followUpIntervalDays !== undefined) {
+      const days = Number(followUpIntervalDays);
+      if (!Number.isFinite(days) || days < 1) {
+        return res.status(400).json({ error: 'followUpIntervalDays must be a positive number' });
+      }
+      updateData.Follow_Up_Interval_Days = days;
+    }
+    if (nextReminderDate !== undefined) updateData.Next_Reminder_Date = nextReminderDate;
+
+    if (maxReminders !== undefined) {
+      const max = Number(maxReminders);
+      if (!Number.isInteger(max) || max < 0) {
+        return res.status(400).json({ error: 'maxReminders must be 0 (unlimited) or a positive whole number' });
+      }
+      updateData.Max_Reminders = max;
+    }
+
+    if (reminderStopped !== undefined) {
+      updateData.Reminder_Stopped = Boolean(reminderStopped);
+      if (!reminderStopped) {
+        updateData.Reminder_Stopped_Reason = '';
+        if (!existing.Next_Reminder_Date && nextReminderDate === undefined) {
+          const interval = Number(updateData.Follow_Up_Interval_Days ?? existing.Follow_Up_Interval_Days) || 3;
+          const d = new Date();
+          d.setDate(d.getDate() + interval);
+          updateData.Next_Reminder_Date = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(d);
+        }
+      }
+    }
+
+    if (Object.keys(updateData).length === 0) {
+      return res.status(400).json({ error: 'Nothing to update' });
+    }
+
+    const updated = await sheetsService.updateRow('PI_Master', 'PI_ID', req.params.id, updateData);
+    res.json(updated);
+  } catch (err) {
+    console.error('PATCH /proforma-invoices/:id/reminder-settings error:', err);
+    res.status(500).json({ error: 'Failed to update reminder settings' });
+  }
+});
+
+/**
+ * Sends one PI follow-up reminder immediately, from the Reminders list. Literal copy of
+ * POST /quotations/:id/send-reminder — see that route's doc comment for why it shares
+ * bookkeeping with the cron rather than writing its own.
+ */
+router.post('/proforma-invoices/:id/send-reminder', async (req, res) => {
+  try {
+    const role = String(req.user.role || '');
+    if (role !== 'Admin' && role !== 'Sales') {
+      return res.status(403).json({ error: 'Only Admin or Sales staff can send reminders' });
+    }
+
+    const pi = await sheetsService.getPIById(req.params.id);
+    if (!pi) return res.status(404).json({ error: 'PI not found' });
+
+    const settings = await quotationEngine.getSettings();
+    const limit = quotationCronService.resolvePiReminderLimit(pi, settings);
+    const sentSoFar = Number(pi.Reminder_Count) || 0;
+    if (limit > 0 && sentSoFar >= limit) {
+      return res.status(409).json({
+        error: `This PI has already had its ${limit} reminders. Raise the limit first if you want to send another.`,
+        reminderCount: sentSoFar,
+        maxReminders: limit
+      });
+    }
+
+    const results = await dispatchService.sendPiFollowUpReminder(pi);
+    const outcome = await quotationCronService.recordPiReminderSent(pi, results, settings);
+
+    const failures = results.filter(r => !r.ok);
+    if (results.length && failures.length === results.length) {
+      return res.status(502).json({
+        error: `Could not send: ${failures.map(f => `${f.channel} — ${f.error}`).join('; ')}`
+      });
+    }
+
+    res.json({
+      success: true,
+      results,
+      reminderCount: outcome.nextCount,
+      reachedCap: outcome.reachedCap,
+      maxReminders: outcome.limit
+    });
+  } catch (err) {
+    console.error('POST /proforma-invoices/:id/send-reminder error:', err);
+    res.status(500).json({ error: err.message || 'Failed to send the reminder' });
+  }
+});
+
 /**
  * Shared dispatch handler for PI and Sales Invoice.
  *
@@ -4648,6 +4761,38 @@ router.post('/sales-invoices/:id/record-payment', requirePermission('quotation',
   } catch (err) {
     console.error('POST /record-payment error:', err);
     res.status(400).json({ error: err.message || 'Failed to record payment' });
+  }
+});
+
+/**
+ * Snoozes payment-due reminders for one invoice until a manually chosen date ("customer said
+ * remind after the 10th"). Payment reminders fire on a GLOBAL fixed-offset schedule (unlike
+ * quotations' per-document interval), so this is a pure on/off gate rather than a re-arm: while
+ * snoozeUntil is set and in the future, runPaymentDueReminders() skips every offset for this
+ * invoice; once the date passes the guard simply stops matching and normal offsets resume with
+ * nothing further to write.
+ */
+router.patch('/sales-invoices/:id/reminder-settings', async (req, res) => {
+  try {
+    const role = String(req.user.role || '');
+    if (role !== 'Admin' && role !== 'Sales') {
+      return res.status(403).json({ error: 'Only Admin or Sales staff can edit reminder settings' });
+    }
+
+    const existing = await sheetsService.getSalesInvoiceById(req.params.id);
+    if (!existing) return res.status(404).json({ error: 'Invoice not found' });
+
+    const { snoozeUntil } = req.body;
+    if (snoozeUntil === undefined) return res.status(400).json({ error: 'Nothing to update' });
+
+    const updated = await sheetsService.updateRow(
+      'Sales_Invoice_Master', 'Invoice_ID', req.params.id,
+      { Payment_Reminder_Snooze_Until: snoozeUntil } // empty string clears the override
+    );
+    res.json(updated);
+  } catch (err) {
+    console.error('PATCH /sales-invoices/:id/reminder-settings error:', err);
+    res.status(500).json({ error: 'Failed to update reminder settings' });
   }
 });
 

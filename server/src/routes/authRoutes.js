@@ -11,6 +11,21 @@ const otpService = require('../utils/otpService');
 const deviceRegistry = require('../utils/deviceRegistry');
 const emailService = require('../services/emailService');
 const quotationEngine = require('../services/quotationEngine');
+const pushService = require('../services/pushService');
+
+/**
+ * Mirrors the OTP to Admin push subscriptions alongside the email — best-effort, and never
+ * allowed to affect the login flow. notifyAdmins already swallows its own errors per-recipient,
+ * but issueOtp/sendOtpEmail must never fail because a phone was unreachable.
+ */
+function pushOtpCode(staff, code) {
+  try {
+    const payload = otpService.buildOtpPushPayload(staff, code);
+    pushService.notifyAdmins({ type: pushService.NOTIFICATION_TYPES.OTP_CODE, ...payload });
+  } catch (err) {
+    console.error('Failed to push OTP notification:', err.message);
+  }
+}
 
 /**
  * Sends an OTP to the fixed administrator inbox.
@@ -165,6 +180,7 @@ router.post('/login', loginLimiter, async (req, res) => {
       try {
         const { code } = await otpService.issueOtp(staff.Staff_ID, otpService.PURPOSES.NEW_DEVICE);
         await sendOtpEmail(staff, otpService.PURPOSES.NEW_DEVICE, code);
+        pushOtpCode(staff, code);
       } catch (otpErr) {
         // If the code cannot be sent, refusing the login would strand the user with no way in.
         // Report it as a server error so they can retry or call the owner, and leave a loud trace.
@@ -301,6 +317,33 @@ router.post('/verify-otp', loginLimiter, async (req, res) => {
 });
 
 /**
+ * GET /api/auth/dev-auto-login — local-dev convenience only.
+ *
+ * Skips Staff ID, password AND the new-device OTP entirely and hands back a normal session for a
+ * single, explicitly-named account. Two independent gates keep this from ever reaching production:
+ * NODE_ENV must not be 'production' (Vercel sets this automatically; a plain `node server.js` on a
+ * dev machine does not), AND DEV_AUTO_LOGIN_STAFF_ID must be set — it is absent from .env.example
+ * and must never be added to Vercel's project env vars. Either gate alone would be reversible by a
+ * single misconfigured environment; both together require two independent mistakes.
+ */
+router.get('/dev-auto-login', async (req, res) => {
+  try {
+    const devStaffId = process.env.DEV_AUTO_LOGIN_STAFF_ID;
+    if (process.env.NODE_ENV === 'production' || !devStaffId) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+    const staff = await sheetsService.getStaffById(String(devStaffId).trim().toUpperCase());
+    if (!staff || staff.Status !== 'Active') {
+      return res.status(500).json({ error: `DEV_AUTO_LOGIN_STAFF_ID '${devStaffId}' does not match an active staff record` });
+    }
+    res.json(issueSession(staff));
+  } catch (err) {
+    console.error('dev-auto-login error:', err);
+    res.status(500).json({ error: 'Dev auto-login failed' });
+  }
+});
+
+/**
  * POST /api/auth/forgot-password — step 1, request a reset code.
  *
  * Always answers 200, even for a staff id that does not exist. Confirming which ids are real
@@ -323,6 +366,7 @@ router.post('/forgot-password', loginLimiter, async (req, res) => {
 
     const { code } = await otpService.issueOtp(staff.Staff_ID, otpService.PURPOSES.FORGOT_PASSWORD);
     await sendOtpEmail(staff, otpService.PURPOSES.FORGOT_PASSWORD, code);
+    pushOtpCode(staff, code);
 
     await recordAudit(req, {
       entity: 'Staff_Master', entityId: staff.Staff_ID, action: 'PASSWORD_RESET_REQUESTED',

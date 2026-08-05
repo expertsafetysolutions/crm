@@ -455,6 +455,17 @@ async function sendFollowUpReminder(quotation) {
   });
 }
 
+async function sendPiFollowUpReminder(pi) {
+  const settings = await getSettings();
+  return dispatchTemplated({
+    doc: pi,
+    templateKey: 'pi_followup_reminder',
+    recipientEmail: pi.Customer_Email_Snapshot,
+    recipientPhone: pi.Customer_Contact_Snapshot,
+    settings
+  });
+}
+
 async function sendPaymentDueReminder(invoice) {
   const settings = await getSettings();
   return dispatchTemplated({
@@ -603,6 +614,7 @@ module.exports = {
   sendPodConfirmation,
   sendCertificate,
   sendFollowUpReminder,
+  sendPiFollowUpReminder,
   sendPaymentDueReminder,
   sendCertificateDueReminder,
   sendPurchaseOrder,

@@ -348,6 +348,27 @@ export default function QuotationBuilderPage() {
     return items.find(i => i.Item_ID === line.Item_ID)?.Photo_URL || line.Photo_URL || '';
   }, [items]);
 
+  // Tracks the preview's real (possibly multi-page) natural height so the modal's scroll box isn't
+  // hard-pinned to one A4 sheet — QuotationPdfTemplate paginates internally and the parent has no
+  // other way to know the page count in advance.
+  //
+  // MUST stay above the `if (loading) return` below: every hook in a component must run on every
+  // render regardless of state, and this one used to sit after that early return — while loading it
+  // was skipped, and once loading finished React called it for the first time, tripping "Rendered
+  // more hooks than during the previous render." Recomputing printDoc's Line_Items here (instead of
+  // depending on the later `printDoc` const) is what makes moving it safe.
+  useEffect(() => {
+    if (!showPreview || !quotation) return undefined;
+    const el = previewRef.current;
+    if (!el) return undefined;
+    const measure = () => setPreviewNaturalHeight(el.scrollHeight || 1123);
+    measure();
+    if (typeof ResizeObserver === 'undefined') return undefined;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [showPreview, quotation, linePhoto]);
+
   /**
    * Copies a catalogue item onto a line.
    *
@@ -811,25 +832,6 @@ export default function QuotationBuilderPage() {
     ...quotation,
     Line_Items: (quotation.Line_Items || []).map(l => ({ ...l, Photo_URL: linePhoto(l) }))
   };
-
-  // Tracks the preview's real (possibly multi-page) natural height so the modal's scroll box isn't
-  // hard-pinned to one A4 sheet — QuotationPdfTemplate paginates internally and the parent has no
-  // other way to know the page count in advance.
-  //
-  // MUST stay below `printDoc`: it is a dep of this effect, and a `const` read from above its own
-  // declaration is a TDZ error — which crashed the whole page ("Cannot access 'printDoc' before
-  // initialization") the instant a quotation was opened, not just when the preview was shown.
-  useEffect(() => {
-    if (!showPreview) return undefined;
-    const el = previewRef.current;
-    if (!el) return undefined;
-    const measure = () => setPreviewNaturalHeight(el.scrollHeight || 1123);
-    measure();
-    if (typeof ResizeObserver === 'undefined') return undefined;
-    const ro = new ResizeObserver(measure);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [showPreview, printDoc]);
 
   // POST /api/items is gated on inventory.add, so hide the inline creator rather than let it 403.
   const canAddItem = isAdmin || Boolean(perms?.inventory?.add);

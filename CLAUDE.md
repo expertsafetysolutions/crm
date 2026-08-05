@@ -203,6 +203,85 @@ demands a written reason.
 - Older routes still use ad-hoc `if (req.user.role !== 'Admin')`. Prefer `requirePermission` for anything new.
 - Admin can impersonate a staff member client-side (`AuthContext.startImpersonating`). This swaps the active `user` but does NOT re-issue the token — backend calls still authenticate as the real Admin.
 
+## Security & Data Protection
+
+More is already in place here than is obvious from the route files. Read this before adding a
+control — several standard-sounding ones are wrong for this stack and are listed at the end.
+
+**HTTP hardening** (`middleware/security.js`, applied in `server.js` before anything else):
+- `helmet` with a CSP tuned to what the app genuinely loads. Loosening a directive there is never
+  cosmetic — each entry has a comment naming the feature that breaks without it (`wasm-unsafe-eval`
+  + `blob:` for tesseract.js OCR, `unsafe-inline` styles for the server-rendered public pages, the
+  CAPTCHA hosts for the inquiry form).
+- **A per-request CSP nonce** (`res.locals.cspNonce`) authorises the inline `<script>` on the public
+  quote portal. Use the nonce for any new server-rendered inline script; do NOT add `unsafe-inline`,
+  which would re-enable every inline script in the authenticated dashboards to fix one page.
+- Four separate rate limiters — `loginLimiter` (tight: 10 failed/15min, keyed `IP:staffId`),
+  `passwordChangeLimiter`, `apiLimiter` (600/min, sized for an offline-queue flush) and
+  `publicVerifyLimiter`. The generous numbers are deliberate: a whole workshop shares one NAT'd IP.
+  State is per-instance and best-effort on serverless — it raises the cost of an attack, it is not
+  a global ceiling.
+- HSTS is preload-eligible, and a non-HTTPS `x-forwarded-proto` is redirected on GET/HEAD but
+  **refused** on anything else — a POST body has already crossed the wire in the clear by then.
+
+**Authentication depth**:
+- `bcryptjs` hashing (`utils/passwordUtils.js`), with opportunistic rehash of legacy rows using the
+  password just proven correct.
+- **Account lockout** (`utils/loginGuard.js`): 5 *consecutive* failures → 15-minute lock. Keyed to
+  the ACCOUNT, never the IP — locking an IP would take out every colleague behind the workshop
+  router. Expires by comparing `Locked_Until` to the clock, so no cron is needed to clear it.
+- **Second factor + device registry** (`utils/deviceRegistry.js`): an emailed code on a browser the
+  account has not signed in from. Every device is challenged including the first. `Known_Devices`
+  is a bounded array on `Staff_Master`; sessions live in their own collection because `updateRow`
+  only does `$set` and concurrent logins would lose writes.
+- `scripts/reset-auth.js` clears every gate straight from Mongo with no working login. It is the
+  reason the strict rules above are safe — do not tighten auth further without confirming it works.
+
+**Encryption at rest** (`utils/fieldCrypto.js`, `encryptedFields.js`, `cryptoMiddleware.js`):
+- AES field-level encryption applied in `sheetsService` on write and reversed on read, so callers
+  and the client still see plaintext. **The protection is against a stolen dump, not against the
+  API** — anything readable through the API stays readable through the API.
+- **Currently INERT: `FIELD_ENCRYPTION_KEY` is not set**, so rows are stored as plaintext and
+  `verify:encryption` warns about it (the 33 in-memory crypto tests still pass — they use a fixed
+  test key, so a green run does NOT mean live data is encrypted; section 8 of that output is the
+  part that tells you). Turning it on is `npm run keygen` → set the variable → `npm run encrypt:data`
+  against a fresh backup. Until then, treat the customer register as plaintext at rest.
+- `ENCRYPTED_FIELDS` covers customer/vendor/staff contact details plus the `*_Snapshot` copies
+  frozen onto quotations, PIs, invoices and challans — encrypting the register but not the
+  snapshots would leave the same phone number in plaintext across four collections.
+- `NEVER_ENCRYPT` documents what must stay readable and why (`Company_Name` is on the public
+  verification page and every search; `GSTIN` has its state code extracted; `Password` is already a
+  hash). A test asserts the two sets never overlap — the same guarantee `moneyMask` has.
+- `BLIND_INDEXED` gives `Contact`/`Mobile` a searchable hash so "does this phone already exist?"
+  still works against ciphertext. **AES does not substring-match** — never encrypt a field that
+  server-side code filters or sorts on without adding a blind index first.
+- `npm run verify:encryption` is read-only and reports whether stored rows are *actually*
+  ciphertext, which is the check that matters. `npm run keygen`, `encrypt:data`, `decrypt:data`
+  manage the key and migrate existing rows.
+
+**Input handling**: `utils/htmlEscape.js` escapes every interpolation into server-rendered HTML and
+outbound email — the public inquiry form is the one payload from an anonymous stranger, and
+`utils/inquiryValidator.js` sanitises it behind the layered defence described above. React escapes
+by default on the client; `dangerouslySetInnerHTML` appears nowhere and must stay that way.
+
+**Secrets**: `MONGO_URI` and `JWT_SECRET` are required and the server throws without them — never
+add a fallback. `FIELD_ENCRYPTION_KEY`, `CRON_SECRET`, `MAIL_SAFE_MODE`, the CAPTCHA keys and the
+backup key are all environment-only. Nothing is committed; `npm run backup:secure` encrypts the dump.
+
+**Deliberately NOT done — do not "fix" these**:
+- **No CSRF tokens.** The JWT lives in `localStorage` and is sent as an `Authorization` header
+  (`AuthContext.jsx`); no cookie is used for auth anywhere. CSRF requires the browser to attach
+  credentials automatically, which never happens here. Adding CSRF machinery would be dead code —
+  and moving auth to cookies to justify it would *create* the vulnerability it protects against.
+- **No SQL-injection controls.** There is no SQL. The MongoDB analogue is operator injection, and it
+  is not currently reachable: `getStaffById` and friends resolve against cached arrays with JS
+  `.find()`, login coerces with `String(...).trim().toUpperCase()` before any lookup, and every
+  `queryTab` caller builds its filter from hardcoded keys. If a route ever passes a user-supplied
+  object straight into a Mongo filter, that is the moment to add a `$`-key stripper — not before.
+- **CORS stays open** (`app.use(cors())`). The token is not a cookie, so an open policy does not let
+  another origin act as the user; an allow-list would silently break every Vercel preview URL and
+  the field PWA with it.
+
 ## Document Numbering
 
 - **Customer-facing numbers** (quotation/PI/invoice) *and purchase orders* come from `quotationEngine.nextDocumentNumber()`, backed by the atomic `Counter_Master` sequence. A PO is issued to a vendor, so a repeated number lets one delivery be claimed for payment twice. It de-duplicates the period when the configured prefix already contains it, and seeds a brand-new counter from the highest number already issued — so changing a prefix cannot restart numbering and re-issue a number a customer already has.
@@ -243,6 +322,47 @@ demands a written reason.
 - Errors: every route wraps in try/catch and returns `res.status(xxx).json({error})`. `409` carries actionable payloads (`pendingRechecks`, `pendingStandby`, `duplicateOf`, `unpricedLines`).
 - **Calendar dates go through IST**, never `toISOString()`: `new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Kolkata'}).format(new Date())` — the deployment clock may not be IST.
 - Client dashboards are large single-file tab-switched components; new tabs follow the existing `activeTab === 'X'` pattern. New *modules* get their own lazy-loaded route instead.
+
+## Standing Directive — Principal UX/UI & Mobile-First Architect
+
+Act on every prompt, component and code block in this workspace as a Senior Principal Web Developer
+and UI/UX Architect with 20+ years of enterprise experience. Apply the patterns below **silently**;
+they do not need to be re-requested per task.
+
+- **Judgement.** Weigh performance, clean visual hierarchy, WCAG accessibility, zero bloat and
+  enterprise security in every architecture and UI decision — not only when asked to.
+- **320–480px first.** Every view, modal, table and form is engineered for the small viewport and
+  scales up. A screen that only works once it is wide is a broken screen.
+- **Thumb-friendly targets with clear tap feedback** — sized by the role table in the UI Standard
+  below, which is the authority when a number is in question.
+- **Sticky bottom action bar** for the primary CTA (Save, Submit, Send, Issue, Add) on mobile.
+- **Auto-hide on completion.** Sections, line items and inspection checkpoints collapse into a
+  compact summary badge once complete, and reopen into full edit mode on tap.
+- **Progressive disclosure always.** Never a wall of fields — accordions, wizard cards, smart
+  collapsing views.
+- **Universal smart search.** Substring, multi-keyword, any word order — never a bare dropdown.
+  Touch-optimised live filtering with match highlighting.
+
+Act equally as Lead QA Architect and CISO on every change:
+
+- **Regression guard first.** A new feature must not alter an existing database model, business rule
+  or customer workflow. This codebase has no automated test suite — `npm run verify` and
+  `npm run verify:encryption` are hand-written READ-ONLY scripts, not a safety net. So the guard is
+  discipline: read the existing path before changing it, and prefer a separate function over a new
+  branch inside a working one (`createManualChallan` vs `generateChallanDraft` is the pattern).
+- **Edge cases and null checks are part of the deliverable**, not a follow-up. Field data is dirty:
+  capacity is free text, challan numbers repeat, a phone may be missing, a photo may be 8MB.
+- **Testable shape.** Pure helpers in `utils/` that take arguments and return values — the reason
+  `capacity.js`, `moneyMask.js`, `loginGuard.js` and `permissions.js` can be verified without a
+  database. Keep new logic in that shape rather than inline in a route.
+- **Security is reviewed on every route**, per the Security section below — not only when the task
+  says "security".
+
+The UI Standard that follows is the concrete implementation of this directive: which component,
+which pixel size, which helper. Where the two touch the same question, follow the UI Standard — it
+carries the reasons this codebase settled on those numbers. Likewise the Security & Data Protection
+section is the authority on what is already in place; read it before adding a control, because
+several plausible-sounding additions are wrong for this stack and are listed there as such.
 
 ## UI Standard — read this BEFORE designing any screen
 
@@ -313,8 +433,17 @@ npm run build             # installs + builds client only, for Vercel — the on
 npm run verify            # READ-ONLY checks against the real DB: permissions, masking, standby,
                           #   costing, 3-way match, offline contract. Writes nothing.
 npm run verify -- --staff STAFF003   # exactly what one person can and cannot see
+npm run verify:encryption # READ-ONLY: crypto round-trip in memory, plus whether stored rows are
+                          #   ACTUALLY ciphertext. Writes nothing.
 npm run test:workflow     # WRITES real tasks + recurring inquiries — seeded data only
+
+npm run keygen            # generate a FIELD_ENCRYPTION_KEY
+npm run encrypt:data      # migrate existing plaintext rows — WRITES. Back up first.
+npm run backup:secure     # gzipped + encrypted dump; verify:backup checks one
 ```
+
+There is **no test framework, linter or CI** — `npm run build` is the only automated gate, and the
+`verify*` scripts are hand-written. Plan changes accordingly: nothing will catch a regression for you.
 
 `TESTING.md` carries the manual checklist for what a script cannot see: what to tap on a phone, and
 the test that actually matters — what should be **absent from the JSON**, not merely hidden on screen.

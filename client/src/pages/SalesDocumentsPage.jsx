@@ -1,15 +1,21 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  ArrowLeft, Search, FileText, Loader2, ReceiptIndianRupee, AlertTriangle, CheckCircle2, Mail
+  ArrowLeft, Search, FileText, Loader2, ReceiptIndianRupee, AlertTriangle, CheckCircle2, Mail, Bell
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { matchesQuery } from '../utils/searchUtils';
 import RecordPaymentModal from '../components/RecordPaymentModal';
+import RemindersReport from '../components/RemindersReport';
 import {
   formatMoney, formatDate, docStatusMeta, paymentStatusMeta,
   balanceDue, isChasable, daysPastDue
 } from '../utils/quotationUtils';
+
+// A PI never carries a "Cancelled" status in this codebase — conversionService only ever writes
+// 'Issued' at creation and 'Converted' on conversion — so "still open" is simply "not yet
+// converted", matching runPiFollowUpReminders' due-query on the server.
+const PI_OPEN_STATUSES = ['Issued'];
 
 /**
  * Sales document register — the read side of the conversion pipeline that the quotation builder
@@ -37,6 +43,8 @@ export default function SalesDocumentsPage() {
   const { token } = useAuth();
 
   const [tab, setTab] = useState('invoices');
+  // Only meaningful while tab === 'pi' — mirrors QuotationListPage's list/reminders view split.
+  const [piView, setPiView] = useState('list');
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -74,7 +82,7 @@ export default function SalesDocumentsPage() {
 
   // Switching tabs must clear the previous list, otherwise the old rows render for a frame against
   // the new tab's column meaning.
-  useEffect(() => { setRows([]); setFilter(''); }, [tab]);
+  useEffect(() => { setRows([]); setFilter(''); setPiView('list'); }, [tab]);
 
   const showFlash = (type, message) => {
     setFlash({ type, message });
@@ -164,6 +172,32 @@ export default function SalesDocumentsPage() {
     await load();
   };
 
+  /**
+   * One-time snooze of an invoice's payment-due reminders — "customer said remind after the
+   * 10th." Payment reminders fire on a global fixed-offset schedule (no per-invoice interval to
+   * re-arm), so this is a pure on/off date: while set and in the future, every offset is skipped
+   * for this invoice; once it passes, offsets resume on their own with nothing left to clear.
+   */
+  const setSnooze = async (invoice, snoozeUntil) => {
+    const id = invoice.Invoice_ID;
+    setBusyId(id);
+    try {
+      const res = await fetch(`/api/sales-invoices/${id}/reminder-settings`, {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ snoozeUntil })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Could not update the reminder snooze');
+      showFlash('ok', snoozeUntil ? `Reminders for ${invoice.Invoice_No} snoozed until ${snoozeUntil}.` : `Reminder snooze cleared for ${invoice.Invoice_No}.`);
+      await load();
+    } catch (e) {
+      showFlash('err', e.message);
+    } finally {
+      setBusyId('');
+    }
+  };
+
   return (
     <div className="min-h-screen bg-slate-50">
       <div className="bg-white border-b border-slate-200 sticky top-0 z-20">
@@ -179,15 +213,26 @@ export default function SalesDocumentsPage() {
             </button>
           </div>
 
-          <div className="flex gap-1 mt-3 border-b border-slate-100 -mb-3">
-            {TABS.map(t => (
-              <button key={t.id} onClick={() => setTab(t.id)}
-                className={`px-3 py-2 text-sm font-bold border-b-2 transition ${
-                  tab === t.id ? 'border-slate-900 text-slate-900' : 'border-transparent text-slate-400 hover:text-slate-600'
+          <div className="flex items-center justify-between mt-3 border-b border-slate-100 -mb-3">
+            <div className="flex gap-1">
+              {TABS.map(t => (
+                <button key={t.id} onClick={() => setTab(t.id)}
+                  className={`px-3 py-2 text-sm font-bold border-b-2 transition ${
+                    tab === t.id ? 'border-slate-900 text-slate-900' : 'border-transparent text-slate-400 hover:text-slate-600'
+                  }`}>
+                  {t.label}
+                </button>
+              ))}
+            </div>
+            {tab === 'pi' && (
+              <button onClick={() => setPiView(v => (v === 'list' ? 'reminders' : 'list'))}
+                className={`mb-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition ${
+                  piView === 'reminders' ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
                 }`}>
-                {t.label}
+                <Bell className="w-3.5 h-3.5" />
+                {piView === 'reminders' ? 'Back to list' : 'Reminders'}
               </button>
-            ))}
+            )}
           </div>
         </div>
       </div>
@@ -203,6 +248,26 @@ export default function SalesDocumentsPage() {
           </div>
         )}
 
+        {tab === 'pi' && piView === 'reminders' ? (
+          <RemindersReport
+            rows={rows}
+            loading={loading}
+            navigate={navigate}
+            token={token}
+            idKey="PI_ID"
+            noKeyField="PI_No"
+            endpointBase="/api/proforma-invoices"
+            openStatuses={PI_OPEN_STATUSES}
+            // No PI detail page exists in this app today — the Number/Customer cells render as
+            // plain text rather than a dead link.
+            detailPath={null}
+            noun="PI"
+            onRowUpdated={updated => setRows(list => list.map(
+              x => (x.PI_ID === updated.PI_ID ? { ...x, ...updated } : x)
+            ))}
+          />
+        ) : (
+        <>
         {summary && (
           <div className="grid grid-cols-3 gap-2 mb-4">
             <StatCard label="Outstanding" value={summary.outstanding} tone="amber" />
@@ -267,6 +332,7 @@ export default function SalesDocumentsPage() {
                       <th className="px-4 py-2.5 text-left font-bold">Status</th>
                       <th className="px-4 py-2.5 text-right font-bold">Total</th>
                       {tab === 'invoices' && <th className="px-4 py-2.5 text-right font-bold">Balance</th>}
+                      {tab === 'invoices' && <th className="px-4 py-2.5 text-left font-bold">Reminder snooze</th>}
                       <th className="px-4 py-2.5 text-right font-bold">Action</th>
                     </tr>
                   </thead>
@@ -308,6 +374,11 @@ export default function SalesDocumentsPage() {
                               </span>
                             </td>
                           )}
+                          {tab === 'invoices' && (
+                            <td className="px-4 py-2.5">
+                              <ReminderSnoozeCell row={r} busy={busyId === id} onSet={d => setSnooze(r, d)} />
+                            </td>
+                          )}
                           <td className="px-4 py-2.5 text-right whitespace-nowrap">
                             <div className="inline-flex items-center gap-1.5">
                               <SendEmailButton row={r} busy={busyId === id} enabled={canEmail} onSend={() => sendEmail(r)} />
@@ -323,6 +394,8 @@ export default function SalesDocumentsPage() {
               </div>
             </div>
           </>
+        )}
+        </>
         )}
       </div>
 
@@ -368,6 +441,47 @@ function SendEmailButton({ row, busy, enabled = true, onSend }) {
       <Mail className="w-3.5 h-3.5" />
       {sent ? 'Resend' : 'Send'}
     </button>
+  );
+}
+
+/**
+ * One-time date override for payment-due reminders — "customer said remind after the 10th."
+ * Only shown for chasable (unpaid, non-cancelled) invoices; snoozing a settled invoice is
+ * meaningless since nothing is chasing it anyway.
+ */
+function ReminderSnoozeCell({ row, busy, onSet }) {
+  if (!isChasable(row)) return <span className="text-slate-300 text-xs">—</span>;
+
+  const snoozeUntil = row.Payment_Reminder_Snooze_Until || '';
+  const today = new Date().toISOString().slice(0, 10);
+  const active = snoozeUntil && snoozeUntil > today;
+
+  return (
+    <div className="flex items-center gap-1.5">
+      <input
+        type="date" disabled={busy}
+        value={snoozeUntil}
+        min={today}
+        onChange={e => onSet(e.target.value)}
+        title="One-time snooze — offset-based reminders resume automatically after this date."
+        className="px-2 py-1.5 border border-slate-300 rounded-lg text-xs font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-slate-400"
+      />
+      {active && (
+        <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 text-[10px] font-extrabold whitespace-nowrap">
+          Snoozed
+        </span>
+      )}
+      {snoozeUntil && (
+        <button
+          onClick={() => onSet('')}
+          disabled={busy}
+          title="Clear snooze"
+          className="text-slate-400 hover:text-slate-600 text-[11px] font-bold disabled:opacity-50"
+        >
+          Clear
+        </button>
+      )}
+    </div>
   );
 }
 

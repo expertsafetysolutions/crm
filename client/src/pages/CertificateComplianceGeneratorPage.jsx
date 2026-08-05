@@ -2173,7 +2173,7 @@ export default function CertificateComplianceGeneratorPage() {
                     <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
                     <input
                       type="text"
-                      placeholder={`Type or select company name... (${customers.length} clients)`}
+                      placeholder={user?.Role === 'Admin' ? `Type or select company name... (${customers.length} clients)` : 'Type or select company name...'}
                       value={certCustomerSearch || certForm.customerName}
                       onChange={e => {
                         const val = e.target.value;
@@ -2713,7 +2713,7 @@ export default function CertificateComplianceGeneratorPage() {
                     <button type="button"
                       onClick={() => { setShowItemMasterPanel(p => !p); setImEditId(null); setImName(''); setImVariants(''); setImRefillYears('1'); setImHptYears('3'); setImSearch(''); }}
                       className="w-full flex items-center justify-between px-3 py-2 bg-indigo-50 border border-indigo-200 rounded-xl hover:bg-indigo-100 transition">
-                      <span className="font-bold text-indigo-800 text-[11px]">📦 Manage Item Master &amp; Variants ({equipmentMasterList.length} items)</span>
+                      <span className="font-bold text-indigo-800 text-[11px]">📦 Manage Item Master &amp; Variants{user?.Role === 'Admin' ? ` (${equipmentMasterList.length} items)` : ''}</span>
                       <span className="text-indigo-600 font-bold text-xs">{showItemMasterPanel ? '▲ Hide' : '▼ Manage'}</span>
                     </button>
                     {showItemMasterPanel && (

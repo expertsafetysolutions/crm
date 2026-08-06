@@ -27,6 +27,15 @@ import { useEffect, useRef } from 'react';
  * Call it unconditionally (hook rules) with the popup's own open flag and its own close callback.
  * That's the whole integration — no shared list to remember to update, which is what let the Admin
  * Menu drawer (`headerOpen`) slip through the old hand-maintained OR-chain in AdminDashboard.jsx.
+ *
+ * Also closes the topmost popup on Escape, for exactly the same reason and via the exact same
+ * stack — a small number of screens (AdminDashboard's menu drawer, its tag popover) had hand-rolled
+ * their own `keydown`+'Escape' listener next to their own state, but the other ~60 call sites across
+ * the app had no Escape handling at all: dozens of modals could only be closed with a mouse click or
+ * the phone back button, not the keyboard, on desktop. One listener here fixes all of them at once,
+ * consistent with why back-button handling itself lives in a shared hook rather than being repeated
+ * per popup. Screens with their own hand-rolled Escape handler are unaffected — this only reacts
+ * when its own module-level `stack` is non-empty, and those two hand-rolled cases don't push onto it.
  */
 
 // Module-level (not component-level): shared by every hook instance across the whole page, because
@@ -38,12 +47,42 @@ let popstateBound = false;
 function ensurePopstateListener() {
   if (popstateBound) return;
   popstateBound = true;
-  window.addEventListener('popstate', () => {
-    // Only the TOPMOST popup reacts to a given back press — that is what makes nested popups close
-    // one at a time instead of all at once. Pop before calling close(), so a close() that itself
-    // synchronously triggers another render/effect sees a consistent stack.
-    const top = stack.pop();
-    if (top) top.close();
+  window.addEventListener('popstate', (e) => {
+    // A real back-press lowers __popupDepth by exactly one and the browser's history.state is
+    // authoritative for what depth we landed on. Reconcile the stack to that depth rather than
+    // blindly popping the array's current top: history.back() is ASYNC, so when one popup closes
+    // programmatically (not via Back) and calls history.back() to consume its own entry, another
+    // popup opened in the SAME click can already have pushed a newer entry on top of the stack by
+    // the time this popstate finally fires. Blindly popping would then close that unrelated, still
+    // -open popup instead of finishing the first one's own cleanup — exactly the bug that closed a
+    // just-opened modal (e.g. View ID Card) a moment after a menu popup beneath it called
+    // history.back() to tidy up its own entry.
+    const landedDepth = e.state?.__popupDepth ?? 0;
+    while (stack.length > landedDepth) {
+      const entry = stack.pop();
+      // Only close entries whose OWN pushed depth is above where we landed — i.e. entries that a
+      // real back-press actually walked past. An entry already reconciled by its own isOpen:false
+      // branch is removed from `stack` there, so it never reaches this loop.
+      if (entry) entry.close();
+    }
+  });
+
+  // Escape closes only the TOPMOST popup, same LIFO rule as the back button — so stacking a confirm
+  // dialog on top of a modal takes two Escape presses, not one that closes both at once. Ignored
+  // while focus is in a text input/textarea/contenteditable/select ONLY if that field itself is
+  // still meaningfully editable-and-empty-of-intent — in practice every popup here is fine closing
+  // even mid-typing (Escape-to-close-dialog is standard OS/browser behavior, e.g. native <dialog>),
+  // so no such carve-out is added; a stray Escape while typing in a popup's field closing that popup
+  // matches what every OS dialog already does.
+  window.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (stack.length === 0) return;
+    const top = stack[stack.length - 1];
+    // Let the close() call go through the normal isOpen:false effect branch above (via React state
+    // update), rather than popping here directly — popping here AND leaving the popup's own state
+    // still "open" would desync the two, since the effect branch is what actually removes this
+    // entry from `stack` and consumes its history entry.
+    top.close();
   });
 }
 
@@ -84,14 +123,21 @@ export default function useModalBackButton(isOpen, onClose) {
       const idx = stack.indexOf(entryRef.current);
       if (idx !== -1) stack.splice(idx, 1);
       entryRef.current = null;
-      // Only step back if THIS popup's entry is still the current one on top of the browser's
-      // actual history — if a later popup already pushed on top (this one closed while buried
-      // under another), stepping back now would incorrectly consume that other popup's entry
-      // instead of this one's. That case wants no action: whichever popup is still open keeps
-      // its own entry, and this one simply had nothing left to clean up.
-      if (window.history.state?.__popupDepth === stack.length + 1) {
-        window.history.back();
-      }
+      // Deferred to a microtask rather than called inline: this effect and a SIBLING popup's
+      // opening effect (e.g. "close this menu, open that modal") both run synchronously in the
+      // same React commit. If a sibling's isOpen:true branch pushes its own history entry AFTER
+      // this line but BEFORE the guard below is read, the guard would still see the pre-push state
+      // and wrongly schedule a back() — whose async popstate then lands after the sibling's fresh
+      // push, undoing the very entry that "close this menu, open that modal" click just created
+      // (this is what silently closed View ID Card / Change Password / Company Details a moment
+      // after they opened, since all three close the profile menu in the same click). Queuing this
+      // check as a microtask lets every synchronous effect in the commit — including that sibling's
+      // push — finish first, so the guard reads the FINAL settled history state.
+      queueMicrotask(() => {
+        if (window.history.state?.__popupDepth === stack.length + 1) {
+          window.history.back();
+        }
+      });
     }
     // No cleanup here on every dep change — cleanup only matters on unmount (below), otherwise a
     // normal isOpen:true -> false transition would double-handle the back() this branch already did.

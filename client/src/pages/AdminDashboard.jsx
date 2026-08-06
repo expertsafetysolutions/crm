@@ -1453,6 +1453,12 @@ export default function AdminDashboard() {
   useModalBackButton(showCertTypeManagerModal, () => setShowCertTypeManagerModal(false));
   useModalBackButton(showClientEquipmentModal, () => setShowClientEquipmentModal(false));
   useModalBackButton(showNewTaskModal, () => setShowNewTaskModal(false));
+  useEffect(() => {
+    if (!showNewTaskModal) return;
+    const handleEscape = (e) => { if (e.key === 'Escape') setShowNewTaskModal(false); };
+    document.addEventListener('keydown', handleEscape);
+    return () => document.removeEventListener('keydown', handleEscape);
+  }, [showNewTaskModal]);
   useModalBackButton(showEditTaskModal, () => setShowEditTaskModal(false));
   useModalBackButton(showNewCustomerModal, () => setShowNewCustomerModal(false));
   useModalBackButton(showNewStaffModal, () => setShowNewStaffModal(false));
@@ -3046,6 +3052,13 @@ export default function AdminDashboard() {
                 <UserPlus className="w-4 h-4 text-indigo-600" />
                 <span>New Customer</span>
               </button>
+              <button
+                onClick={() => { setShowStaffAccessModal(true); setHeaderOpen(false); }}
+                className="w-11 h-11 shrink-0 rounded-xl bg-slate-100 hover:bg-slate-200 text-rose-600 flex items-center justify-center transition border border-slate-200 active:scale-95"
+                title="Staff Account Access"
+              >
+                <Shield className="w-4 h-4" />
+              </button>
             </div>
 
             {/* Modules — the primary navigation surface */}
@@ -3109,7 +3122,6 @@ export default function AdminDashboard() {
                   { label: 'Module Access', icon: Shield, color: 'text-violet-600', onClick: () => navigate('/settings/permissions') },
                   { label: 'Equipment Types', icon: Wrench, color: 'text-amber-600', onClick: () => navigate('/settings/equipment-categories') },
                   { label: 'New Staff Profile', icon: UserPlus, color: 'text-emerald-600', onClick: () => { setShowNewStaffModal(true); setHeaderOpen(false); } },
-                  { label: 'Use Staff Interface', icon: Shield, color: 'text-rose-600', onClick: () => { setShowStaffAccessModal(true); setHeaderOpen(false); } },
                   { label: 'Staff Task Progress Report', icon: Briefcase, color: 'text-indigo-600', onClick: () => { setShowStaffProgressReport(true); setHeaderOpen(false); } }
                 ].map(action => {
                   const Icon = action.icon;

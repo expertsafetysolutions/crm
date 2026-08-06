@@ -1391,6 +1391,12 @@ export default function AdminDashboard() {
     recurringPeriod: { type: 'Monthly', value: 1 }
   });
   const [customerSearchQuery, setCustomerSearchQuery] = useState('');
+  // Client Database & CRM tab: renders a batch at a time rather than all ~1600+ customer cards at
+  // once — mounting every card (each with its own GPS/edit/call/equipment buttons) froze the tab on
+  // open, especially on mobile. Resets to the first page whenever the search text changes, so a
+  // narrowed search doesn't land on an empty later page.
+  const [customerDirectoryPage, setCustomerDirectoryPage] = useState(1);
+  const CUSTOMER_DIRECTORY_PAGE_SIZE = 60;
   const [selectedCustomer, setSelectedCustomer] = useState(null);
   const [isNewCustomerMode, setIsNewCustomerMode] = useState(false);
 
@@ -2737,6 +2743,30 @@ export default function AdminDashboard() {
   const filteredCustomers = useMemo(() => customers.filter(c =>
     matchesQuery(searchQuery, [c.Company_Name, c.Contact, c.Auth_Person, c.Address, c.Customer_ID])
   ), [customers, searchQuery]);
+
+  // Per-customer task/interaction counts for the Client Database & CRM tab. Built ONCE per
+  // tasks/interactions change as O(n) count maps, not as a .filter() re-scan of the full tasks and
+  // interactions arrays for every one of ~1600 customers on every render — that O(customers ×
+  // (tasks + interactions)) scan was the actual freeze when opening this tab (millions of array
+  // iterations on the main thread, worse on mobile CPUs).
+  const taskCountByCustomer = useMemo(() => {
+    const map = new Map();
+    for (const t of tasks) {
+      const id = t.Customer_ID;
+      if (!id) continue;
+      map.set(id, (map.get(id) || 0) + 1);
+    }
+    return map;
+  }, [tasks]);
+  const interactionCountByCustomer = useMemo(() => {
+    const map = new Map();
+    for (const i of customerInteractions) {
+      const id = i.Customer_ID;
+      if (!id) continue;
+      map.set(id, (map.get(id) || 0) + 1);
+    }
+    return map;
+  }, [customerInteractions]);
 
   const getGroupedSuggestions = () => {
     if (!searchQuery || !searchQuery.trim()) return { customers: [], staff: [], tasks: [] };
@@ -4517,10 +4547,26 @@ export default function AdminDashboard() {
             </div>
           </div>
 
+          <div className="bg-white p-3 rounded-2xl border border-slate-200 shadow-sm space-y-2">
+            <div className="relative">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => { setSearchQuery(e.target.value); setCustomerDirectoryPage(1); }}
+                placeholder="Search company, contact, mobile, address..."
+                className="w-full pl-9 pr-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              />
+            </div>
+            <p className="text-[11px] text-slate-400 font-semibold px-1">
+              Showing {Math.min(customerDirectoryPage * CUSTOMER_DIRECTORY_PAGE_SIZE, filteredCustomers.length)} of {filteredCustomers.length} customers
+            </p>
+          </div>
+
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {customers.map(cust => {
-              const custTasksCount = tasks.filter(t => t.Customer_ID === cust.Customer_ID).length;
-              const custInteractionsCount = customerInteractions.filter(i => i.Customer_ID === cust.Customer_ID).length;
+            {filteredCustomers.slice(0, customerDirectoryPage * CUSTOMER_DIRECTORY_PAGE_SIZE).map(cust => {
+              const custTasksCount = taskCountByCustomer.get(cust.Customer_ID) || 0;
+              const custInteractionsCount = interactionCountByCustomer.get(cust.Customer_ID) || 0;
               return (
                 <div key={cust.Customer_ID} className="p-5 rounded-2xl bg-white border border-slate-200/80 shadow-sm hover:shadow-md transition flex flex-col justify-between space-y-4">
                   <div className="space-y-2">
@@ -4628,6 +4674,16 @@ export default function AdminDashboard() {
               );
             })}
           </div>
+
+          {filteredCustomers.length > customerDirectoryPage * CUSTOMER_DIRECTORY_PAGE_SIZE && (
+            <button
+              type="button"
+              onClick={() => setCustomerDirectoryPage(p => p + 1)}
+              className="w-full py-3 rounded-xl bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 font-bold text-xs shadow-sm transition"
+            >
+              Load {Math.min(CUSTOMER_DIRECTORY_PAGE_SIZE, filteredCustomers.length - customerDirectoryPage * CUSTOMER_DIRECTORY_PAGE_SIZE)} more customers
+            </button>
+          )}
         </div>
       )}
 

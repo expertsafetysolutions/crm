@@ -10,6 +10,7 @@ import { useDocSettings } from '../context/DocSettingsContext';
 import QuotationPdfTemplate from '../components/QuotationPdfTemplate';
 import SmartSearchSelect from '../components/SmartSearchSelect';
 import GstinInput from '../components/GstinInput';
+import CollapsibleSection from '../components/CollapsibleSection';
 import { downloadPdfFromElement, fetchAsBase64, safeFileName } from '../utils/pdfGenerator';
 import {
   formatMoney, formatDate, statusMeta, emptyLineItem,
@@ -847,7 +848,7 @@ export default function QuotationBuilderPage() {
   );
 
   return (
-    <div className="qt-theme min-h-screen bg-slate-50 pb-24">
+    <div className="qt-theme min-h-screen bg-slate-50 pb-24 overflow-x-hidden">
       {/* Solid-red app bar, mirroring the mobile accounting apps this module is modelled on.
           Status chips keep their own semantic colours but switch to a translucent-white shell so
           they stay legible against the red. */}
@@ -894,18 +895,25 @@ export default function QuotationBuilderPage() {
         </div>
       </div>
 
-      <div className="max-w-6xl mx-auto px-4 py-5 space-y-5">
-        {error && (
-          <div className="bg-rose-50 border border-rose-200 text-rose-700 px-4 py-3 rounded-xl text-sm flex items-start gap-2">
-            <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" /> <span>{error}</span>
-          </div>
-        )}
-        {notice && (
-          <div className="bg-emerald-50 border border-emerald-200 text-emerald-700 px-4 py-3 rounded-xl text-sm flex items-start gap-2">
-            <CheckCircle2 className="w-4 h-4 mt-0.5 shrink-0" /> <span>{notice}</span>
-          </div>
-        )}
+      {/* Fixed toast, not inline — an inline banner only appears at the top of the scrollable
+          content, so it went unseen whenever the save happened while scrolled down the form.
+          Anchored to the viewport so the confirmation is visible from wherever the user is. */}
+      {(error || notice) && (
+        <div className="fixed top-16 left-1/2 -translate-x-1/2 z-50 w-[calc(100%-2rem)] max-w-lg px-1">
+          {error && (
+            <div className="bg-rose-50 border border-rose-200 text-rose-700 px-4 py-3 rounded-xl text-sm shadow-lg flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" /> <span>{error}</span>
+            </div>
+          )}
+          {notice && (
+            <div className="bg-emerald-50 border border-emerald-200 text-emerald-700 px-4 py-3 rounded-xl text-sm shadow-lg flex items-start gap-2">
+              <CheckCircle2 className="w-4 h-4 mt-0.5 shrink-0" /> <span>{notice}</span>
+            </div>
+          )}
+        </div>
+      )}
 
+      <div className="max-w-6xl mx-auto px-4 py-5 space-y-5">
         {quotation?.Status === 'PendingApproval' && (
           <div className="bg-amber-50 border border-amber-200 px-4 py-3 rounded-xl text-sm flex items-center justify-between gap-3">
             <div className="flex items-start gap-2 text-amber-800">
@@ -940,10 +948,26 @@ export default function QuotationBuilderPage() {
           </div>
         )}
 
-        {/* Customer + document meta */}
-        <div className="qt-card">
+        {/* Customer + document meta — auto-collapses to a one-line summary once a customer is
+            picked and a subject is filled, so the next card (Items) is reachable without scrolling
+            past a fully-answered one. readOnly documents render as a plain card: there is nothing
+            left to fill in, so folding would only hide information someone opened the page to see. */}
+        <CardOrCollapsible
+          readOnly={readOnly}
+          summary={
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="font-bold text-sm truncate">{selectedCustomer?.Company_Name || 'Customer'}</span>
+              {form.subject && <span className="text-xs text-slate-400 truncate">· {form.subject}</span>}
+            </div>
+          }
+          isComplete={Boolean(selectedCustomer && form.subject)}
+        >
+          {/* min-w-0 on both grid children: without it, a CSS Grid item defaults to
+              min-width:auto, so a long unbroken address or subject-list entry can force the
+              track — and the whole page — wider than the viewport instead of wrapping/scrolling
+              inside its own card. That is what pushed this section off-screen on mobile. */}
           <div className="grid md:grid-cols-2 gap-5">
-            <div>
+            <div className="min-w-0">
               {readOnly ? (
                 <>
                   <div className="qt-section-label">Customer</div>
@@ -1004,7 +1028,7 @@ export default function QuotationBuilderPage() {
                       Edit
                     </button>
                   </div>
-                  {selectedCustomer.Address && <div>{selectedCustomer.Address}</div>}
+                  {selectedCustomer.Address && <div className="break-words">{selectedCustomer.Address}</div>}
                   {selectedCustomer.Email && <div>{selectedCustomer.Email}</div>}
                   {selectedCustomer.Contact && <div>{selectedCustomer.Contact}</div>}
                   <div>
@@ -1027,16 +1051,23 @@ export default function QuotationBuilderPage() {
                   naming the state resolves it too. Staff only see this control when every
                   automatic source has failed, since a wrong value flips CGST/SGST vs IGST. */}
               {selectedCustomer && !readOnly && !resolvedStateCode && (
-                <div className="qt-field mt-3">
-                  <select
-                    value={form.destinationStateCode}
-                    onChange={e => setForm(f => ({ ...f, destinationStateCode: e.target.value }))}
-                    className="qt-select"
-                  >
-                    <option value="">— Select state —</option>
-                    {stateOptions().map(s => <option key={s.code} value={s.code}>{s.code} — {s.name}</option>)}
-                  </select>
-                  <label>Place of supply</label>
+                <div className="mt-3">
+                  {/* Native <select> here used to pop its option list at OS/browser-controlled
+                      width — on a narrow phone the long state names ("Andaman & Nicobar Islands")
+                      forced that popup past the viewport edge, which no CSS on the trigger can
+                      constrain. SmartSearchSelect renders its own list, so it stays inside the
+                      screen like every other picker in this app. */}
+                  <SmartSearchSelect
+                    label="Place of supply"
+                    placeholder="Search state…"
+                    options={stateOptions()}
+                    value={stateOptions().find(s => s.code === form.destinationStateCode) || null}
+                    onChange={s => setForm(f => ({ ...f, destinationStateCode: s?.code || '' }))}
+                    getKey={s => s.code}
+                    getLabel={s => `${s.code} — ${s.name}`}
+                    getSearchable={s => [s.code, s.name]}
+                    emptyText="No state matches that."
+                  />
                   <div className="text-[11px] text-amber-700 mt-1">
                     Could not determine the state from this customer's GSTIN or address — please select it.
                   </div>
@@ -1044,7 +1075,7 @@ export default function QuotationBuilderPage() {
               )}
             </div>
 
-            <div className="space-y-4">
+            <div className="space-y-4 min-w-0">
               <SubjectCombo
                 value={form.subject}
                 disabled={readOnly}
@@ -1052,17 +1083,19 @@ export default function QuotationBuilderPage() {
                 onChange={v => setForm(f => ({ ...f, subject: v }))}
                 {...subjectActions}
               />
-              <div className="qt-field">
-                <select value={form.paymentTermsId} disabled={readOnly}
-                  onChange={e => setForm(f => ({ ...f, paymentTermsId: e.target.value }))}
-                  className="qt-select">
-                  <option value="">— Select —</option>
-                  {(settings?.payment_terms || []).map(t => (
-                    <option key={t.id} value={t.id}>{t.label}</option>
-                  ))}
-                </select>
-                <label>Payment terms</label>
-              </div>
+              {/* Same reasoning as the state picker above: a native <select>'s open list can
+                  render wider than the phone viewport with no way to constrain it from here. */}
+              <SmartSearchSelect
+                label="Payment terms"
+                placeholder="Search payment terms…"
+                disabled={readOnly}
+                options={settings?.payment_terms || []}
+                value={(settings?.payment_terms || []).find(t => t.id === form.paymentTermsId) || null}
+                onChange={t => setForm(f => ({ ...f, paymentTermsId: t?.id || '' }))}
+                getKey={t => t.id}
+                getLabel={t => t.label}
+                emptyText="No payment terms match that."
+              />
               {/* Unlike Subject, a payment term is a rate/credit-days commitment, not a one-line
                   label — adding one mid-document without a moment's thought is how a customer ends
                   up with "45 Days Credit" nobody meant to offer. So this stays Admin-only in
@@ -1101,7 +1134,7 @@ export default function QuotationBuilderPage() {
               </div>
             </div>
           </div>
-        </div>
+        </CardOrCollapsible>
 
         {/* Reminder history — mirrors quotationCronService.js's Reminder_Log/Reminder_Count/
             Next_Reminder_Date/Last_Reminder_Sent_At fields, which exist on every issued quotation
@@ -1456,8 +1489,28 @@ export default function QuotationBuilderPage() {
         </div>
 
         {/* T&C + notes */}
+        {/* T&C + despatch + notes — everything here is optional and never "finishes" the way a
+            customer pick does, so it starts folded (defaultOpen=false, no isComplete/autoCollapse)
+            rather than auto-collapsing on completion. Most quotations don't touch these fields at
+            all; keeping the card closed by default means Save/Send stays reachable without
+            scrolling past three fields nobody filled in. */}
         {!readOnly && (
-          <div className="qt-card">
+          <CollapsibleSection
+            defaultOpen={false}
+            autoCollapse={false}
+            summary={
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="font-bold text-sm">Terms, despatch &amp; notes</span>
+                <span className="text-xs text-slate-400 truncate">
+                  {[
+                    form.selectedTncIds.length ? `${form.selectedTncIds.length} T&C` : null,
+                    form.despatchThrough ? 'despatch' : null,
+                    form.notes ? 'notes' : null
+                  ].filter(Boolean).join(' · ') || 'optional'}
+                </span>
+              </div>
+            }
+          >
             <div className="qt-section-label mb-2.5">Terms &amp; Conditions</div>
             <div className="space-y-1">
               {(settings?.tnc_checklist || []).map(t => (
@@ -1502,7 +1555,7 @@ export default function QuotationBuilderPage() {
                 rows={2} placeholder=" " className="qt-textarea" />
               <label>Remarks / notes</label>
             </div>
-          </div>
+          </CollapsibleSection>
         )}
 
         {/* Catalogues to attach when this quotation is emailed. Hidden entirely when an Admin has
@@ -1899,6 +1952,22 @@ function Row({ label, value }) {
   );
 }
 
+/**
+ * A section that is a plain static card once the document is issued (readOnly — nothing left to
+ * fill in, so folding it would only hide information), and an auto-collapsing CollapsibleSection
+ * while it is still being drafted (folds itself once `isComplete` flips true, reopens on tap).
+ */
+function CardOrCollapsible({ readOnly, summary, isComplete, children }) {
+  if (readOnly) {
+    return <div className="qt-card overflow-hidden">{children}</div>;
+  }
+  return (
+    <CollapsibleSection summary={summary} isComplete={isComplete} reopenOnScrollUp>
+      {children}
+    </CollapsibleSection>
+  );
+}
+
 
 /**
  * Per-line remark, printed under the item on the PDF.
@@ -1969,6 +2038,7 @@ function ItemPicker({ items, line, onPick }) {
       value={selected}
       onChange={onPick}
       expandable
+      expandOnMobileFocus
       expandedTitle="Select an item"
       placeholder="Search item name or HSN…"
       getKey={i => i.Item_ID}

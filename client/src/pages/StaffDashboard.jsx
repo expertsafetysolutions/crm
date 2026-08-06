@@ -1072,7 +1072,7 @@ export default function StaffDashboard() {
     const staffName = user?.Name || user?.Staff_ID || 'Staff';
     const label = type === 'WhatsApp' ? 'WhatsApp Messaged' : 'Call Dialed';
     setRemarkTask(task);
-    setRemarkForm({ type, remarks: `${label}: ${staffName} - ${contactName || 'Contact'}\n\n` });
+    setRemarkForm({ type, remarks: `${label}: ${staffName} - ${contactName || 'Contact'}: \n\n` });
     setShowTagList(false);
     setShowRemarkInputs(true);
     setShowRemarksModal(true);
@@ -1083,7 +1083,7 @@ export default function StaffDashboard() {
   // "Call Received: Parth - Nilesh" — contact name first (they called), staff name second.
   const applyCallReceivedTag = (contactName) => {
     const staffName = user?.Name || user?.Staff_ID || 'Staff';
-    setRemarkForm({ type: 'Call Received', remarks: `Call Received: ${contactName} - ${staffName}\n\n` });
+    setRemarkForm({ type: 'Call Received', remarks: `Call Received: ${contactName} - ${staffName}: \n\n` });
     setShowTagList(false);
     setCallReceivedContactPicker({ isOpen: false, contacts: [] });
   };
@@ -3979,7 +3979,19 @@ export default function StaffDashboard() {
                       <textarea
                         required
                         rows={5}
-                        autoFocus
+                        // A plain autoFocus places the cursor at position 0 — fine for a blank box,
+                        // but the quick-interaction buttons prefill a title line ending "...: \n\n"
+                        // (e.g. "Call Received: Nilesh - Nilesh Padaya: ") the user should type
+                        // straight after the colon-space, not after the blank lines that follow it.
+                        // Land right after that "​: " when present; otherwise fall back to the end.
+                        ref={el => {
+                          if (el) {
+                            el.focus();
+                            const text = el.value;
+                            const titleEnd = text.match(/^.*: \n\n/) ? text.indexOf(': \n\n') + 2 : text.length;
+                            el.setSelectionRange(titleEnd, titleEnd);
+                          }
+                        }}
                         placeholder={`Write detailed discussion points, outcomes, and remarks for [${remarkForm.type}]...\n\nProvide all relevant details clearly.`}
                         value={remarkForm.remarks}
                         onChange={(e) => setRemarkForm({ ...remarkForm, remarks: e.target.value })}

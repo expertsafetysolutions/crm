@@ -44,7 +44,12 @@ export default function SmartSearchSelect({
   emptyText = 'Nothing matches that.',
   className = '',
   expandable = false,
-  expandedTitle = 'Select an item'
+  expandedTitle = 'Select an item',
+  // Opt-in (default false): when the trigger sits in a cramped row — a mobile line-item card with
+  // a photo thumbnail and delete button either side leaves only ~150px for the search box — the
+  // inline dropdown has nowhere good to go. On a narrow viewport, focusing the input jumps straight
+  // to the full-screen sheet instead of opening that cramped inline list.
+  expandOnMobileFocus = false
 }) {
   const [query, setQuery] = useState('');
   const [open, setOpen] = useState(false);
@@ -221,7 +226,10 @@ export default function SmartSearchSelect({
             disabled={disabled}
             autoComplete="off"
             onChange={e => { setQuery(e.target.value); setOpen(true); }}
-            onFocus={() => setOpen(true)}
+            onFocus={() => {
+              if (expandable && expandOnMobileFocus && window.innerWidth < 640) { setExpanded(true); setOpen(true); }
+              else setOpen(true);
+            }}
             onKeyDown={onKeyDown}
             role="combobox"
             aria-expanded={open}
@@ -248,9 +256,14 @@ export default function SmartSearchSelect({
           ref={listRef}
           role="listbox"
           // min-w so a dropdown in a narrow table cell is still readable, and z-50 to clear the
-          // ADD ITEM bar and the totals panel that sit below it in the same card.
-          className="absolute z-50 left-0 mt-1 w-max max-w-[min(32rem,90vw)] max-h-72 overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-xl"
-          style={{ minWidth: 'min(100%, 32rem)' }}
+          // ADD ITEM bar and the totals panel that sit below it in the same card. Per the CSS spec,
+          // a conflicting min-width always wins over max-width — an inline minWidth of "100%" here
+          // used to force the box wider than max-w-[90vw] whenever the trigger sat in a narrow,
+          // deeply-nested row (a mobile line-item card), which pushed the WHOLE PAGE into
+          // horizontal scroll instead of just this dropdown. min-w-full (a class, so it loses the
+          // cascade tie to max-w- at equal specificity by source order) plus an explicit vw cap
+          // keeps the box from ever exceeding the viewport, on any layout.
+          className="absolute z-50 left-0 mt-1 w-max min-w-[min(16rem,90vw)] max-w-[min(32rem,90vw)] max-h-72 overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-xl"
         >
           {matches.length === 0 ? (
             <div className="px-3 py-4 text-center">

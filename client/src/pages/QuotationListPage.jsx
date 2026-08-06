@@ -142,7 +142,7 @@ export default function QuotationListPage() {
 
       <div className="max-w-6xl mx-auto px-4 py-5">
         {view === 'lost' ? (
-          <OrderLostReport report={lostReport} loading={lostLoading} />
+          <OrderLostReport report={lostReport} loading={lostLoading} navigate={navigate} />
         ) : view === 'won' ? (
           <OrderWonReport report={wonReport} loading={wonLoading} navigate={navigate} />
         ) : view === 'reminders' ? (
@@ -249,7 +249,7 @@ export default function QuotationListPage() {
  * fills the row and small differences stay readable — with five reasons, percent-of-total bars are
  * all short and hard to compare.
  */
-function OrderLostReport({ report, loading }) {
+function OrderLostReport({ report, loading, navigate }) {
   if (loading) {
     return <div className="flex justify-center py-16"><Loader2 className="w-6 h-6 animate-spin text-slate-400" /></div>;
   }
@@ -302,6 +302,35 @@ function OrderLostReport({ report, loading }) {
           ))}
         </div>
       </div>
+
+      {Array.isArray(report.rows) && report.rows.length > 0 && (
+        <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+          <div className="px-4 py-2.5 border-b border-slate-100 text-xs font-bold uppercase tracking-wide text-slate-500">
+            Lost quotations
+          </div>
+          <div className="divide-y divide-slate-100">
+            {report.rows.map(r => (
+              <button key={r.taskId}
+                onClick={() => r.quotationId && navigate(`/quotations/${r.quotationId}`)}
+                className="w-full text-left px-4 py-3 flex items-center justify-between gap-2 hover:bg-slate-50">
+                <div className="min-w-0">
+                  <div className="font-semibold text-sm truncate">{r.customerName}</div>
+                  <div className="text-[11px] text-slate-500 font-mono">{r.quoteNo}</div>
+                  {r.reason && (
+                    <span className="inline-block mt-1 px-1.5 py-0.5 rounded bg-rose-50 text-rose-600 text-[10px] font-bold">
+                      {r.reason}
+                    </span>
+                  )}
+                </div>
+                <div className="text-right shrink-0">
+                  <div className="font-bold text-sm">{formatMoney(r.amount)}</div>
+                  <div className="text-[11px] text-slate-400">{r.closedAt ? formatDate(r.closedAt.slice(0, 10)) : ''}</div>
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

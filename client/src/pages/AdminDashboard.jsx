@@ -2290,7 +2290,7 @@ export default function AdminDashboard() {
     const staffName = user?.Name || user?.Staff_ID || 'Staff';
     const label = type === 'WhatsApp' ? 'WhatsApp Messaged' : 'Call Dialed';
     setRemarkTask(task);
-    setRemarkForm({ type, remarks: `${label}: ${staffName} - ${contactName || 'Contact'}\n\n` });
+    setRemarkForm({ type, remarks: `${label}: ${staffName} - ${contactName || 'Contact'}: \n\n` });
     setShowTagList(false);
     setShowRemarkInputs(true);
     setShowRemarksModal(true);
@@ -2301,7 +2301,7 @@ export default function AdminDashboard() {
   // "Call Received: Parth - Nilesh" — contact name first (they called), staff name second.
   const applyCallReceivedTag = (contactName) => {
     const staffName = user?.Name || user?.Staff_ID || 'Staff';
-    setRemarkForm({ type: 'Call Received', remarks: `Call Received: ${contactName} - ${staffName}\n\n` });
+    setRemarkForm({ type: 'Call Received', remarks: `Call Received: ${contactName} - ${staffName}: \n\n` });
     setShowTagList(false);
     setTagSearch('');
     setCallReceivedContactPicker({ isOpen: false, contacts: [] });
@@ -3096,7 +3096,7 @@ export default function AdminDashboard() {
               <h4 className="px-2.5 pb-1.5 text-[10px] font-black text-slate-400 uppercase tracking-widest">
                 Dashboard &amp; Modules
               </h4>
-              <div className="space-y-0.5">
+              <div className="grid grid-cols-2 gap-1.5">
                 {[
                   { id: 'PIPELINE', label: 'Work Orders & Pipeline', icon: Layers, tourId: 'admin-card-pipeline' },
                   { id: 'STAFF', label: 'Staff Roster & Scope', icon: Users, tourId: 'admin-card-staff' },
@@ -3110,24 +3110,25 @@ export default function AdminDashboard() {
                   { id: 'GEOFENCE', label: 'Office Location & Geofence', icon: MapPin }
                 ].map((tab, idx) => {
                   const isActive = activeTab === tab.id;
+                  const Icon = tab.icon;
                   return (
                     <button
                       key={tab.id}
                       data-tour={tab.tourId}
                       onClick={() => { setActiveTab(tab.id); setHeaderOpen(false); }}
-                      className={`w-full h-12 px-2.5 rounded-xl text-[13px] font-bold flex items-center gap-3 transition ${
+                      className={`relative h-14 px-2.5 rounded-xl border text-[11px] font-semibold flex flex-col items-center justify-center gap-1 text-center transition active:scale-95 ${
                         isActive
-                          ? 'bg-rose-50 text-rose-700'
-                          : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
+                          ? 'bg-rose-50 border-rose-200 text-rose-700'
+                          : 'bg-slate-50 hover:bg-slate-100 border-slate-200 text-slate-700'
                       }`}
                     >
-                      <span className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${
-                        isActive ? 'bg-rose-600 text-white' : 'bg-slate-100 text-slate-500'
+                      <span className={`absolute top-1.5 left-1.5 w-4 h-4 rounded-full flex items-center justify-center ${
+                        isActive ? 'bg-rose-600 text-white' : 'bg-slate-200 text-slate-500'
                       }`}>
-                        <span className="text-[10px] font-black">{idx + 1}</span>
+                        <span className="text-[9px] font-black">{idx + 1}</span>
                       </span>
-                      <span className="truncate flex-1 text-left">{tab.label}</span>
-                      {isActive && <span className="w-1.5 h-1.5 rounded-full bg-rose-600 shrink-0" />}
+                      <Icon className={`w-4 h-4 shrink-0 ${isActive ? 'text-rose-600' : 'text-slate-500'}`} />
+                      <span className="leading-tight line-clamp-2">{tab.label}</span>
                     </button>
                   );
                 })}
@@ -5327,7 +5328,20 @@ export default function AdminDashboard() {
                           <textarea
                             required
                             rows={5}
-                            autoFocus
+                            // A plain autoFocus places the cursor at position 0 — fine for a blank
+                            // box, but the quick-interaction buttons prefill a title line ending
+                            // "...: \n\n" (e.g. "Call Received: Nilesh - Nilesh Padaya: ") the user
+                            // should type straight after the colon-space, not after the blank lines
+                            // that follow it. Land right after that "​: " when present; otherwise
+                            // fall back to the end of whatever text is there.
+                            ref={el => {
+                              if (el) {
+                                el.focus();
+                                const text = el.value;
+                                const titleEnd = text.match(/^.*: \n\n/) ? text.indexOf(': \n\n') + 2 : text.length;
+                                el.setSelectionRange(titleEnd, titleEnd);
+                              }
+                            }}
                             placeholder={`Write detailed discussion points, outcomes, and remarks for [${remarkForm.type}]...\n\nProvide all relevant details clearly.`}
                             value={remarkForm.remarks}
                             onChange={(e) => setRemarkForm({ ...remarkForm, remarks: e.target.value })}

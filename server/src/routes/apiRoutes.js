@@ -4453,7 +4453,11 @@ router.post('/tasks/:id/close-quotation-task', async (req, res) => {
 
 router.get('/analytics/order-lost', async (req, res) => {
   try {
-    const tasks = await sheetsService.getAllTasks();
+    const [tasks, customers] = await Promise.all([
+      sheetsService.getAllTasks(),
+      sheetsService.getAllCustomers()
+    ]);
+    const customerById = new Map(customers.map(c => [c.Customer_ID, c]));
     const lost = tasks.filter(t => t.Reason_For_Order_Lost);
     const byReason = {};
     ORDER_LOST_REASONS.forEach(r => { byReason[r] = { reason: r, count: 0, value: 0 }; });
@@ -4465,7 +4469,18 @@ router.get('/analytics/order-lost', async (req, res) => {
     res.json({
       totalLost: lost.length,
       totalLostValue: lost.reduce((s, t) => s + (Number(t.Quote_Amount) || 0), 0),
-      byReason: Object.values(byReason).sort((a, b) => b.count - a.count)
+      byReason: Object.values(byReason).sort((a, b) => b.count - a.count),
+      rows: lost
+        .map(t => ({
+          taskId: t.Task_ID,
+          quotationId: t.Quotation_ID,
+          quoteNo: t.Quote_No || '',
+          customerName: customerById.get(t.Customer_ID)?.Company_Name || (t.Customer_ID ? `Customer (${t.Customer_ID})` : 'General Client'),
+          amount: Number(t.Quote_Amount) || 0,
+          reason: ORDER_LOST_REASONS.includes(t.Reason_For_Order_Lost) ? t.Reason_For_Order_Lost : 'Other',
+          closedAt: t.Closed_At || ''
+        }))
+        .sort((a, b) => new Date(b.closedAt) - new Date(a.closedAt))
     });
   } catch (err) {
     console.error('GET /analytics/order-lost error:', err);

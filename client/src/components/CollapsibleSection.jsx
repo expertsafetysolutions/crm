@@ -18,6 +18,11 @@ import { ChevronDown, Check } from 'lucide-react';
  *   autoCollapse   set false for sections the user should keep open regardless
  *   open/onToggle  optional control from a parent for accordion behaviour
  *   tone           'default' | 'warning' | 'danger' — the left status rail
+ *   reopenOnScrollUp  opt-in only (default false, so every existing caller is unaffected): when the
+ *                  user scrolls back up and the collapsed summary row re-enters view from below
+ *                  (scrolling toward it, not away), the section reopens on its own — no tap needed.
+ *                  Scrolling further down away from it does not re-collapse; that stays tap-only,
+ *                  so a section never slams shut while someone is reading past it.
  */
 export default function CollapsibleSection({
   summary,
@@ -29,11 +34,13 @@ export default function CollapsibleSection({
   onToggle,
   tone = 'default',
   badge = null,
-  className = ''
+  className = '',
+  reopenOnScrollUp = false
 }) {
   const [uncontrolledOpen, setUncontrolledOpen] = useState(defaultOpen);
   const isControlled = controlledOpen !== undefined;
   const isOpen = isControlled ? controlledOpen : uncontrolledOpen;
+  const rootRef = useRef(null);
 
   // Tracks the previous completeness so the fold happens on the false -> true edge only.
   const wasComplete = useRef(isComplete);
@@ -51,6 +58,30 @@ export default function CollapsibleSection({
     else setUncontrolledOpen(v => !v);
   };
 
+  // Reopen when the user scrolls UP into this section, not merely when it appears at all — an
+  // IntersectionObserver alone fires on any entry into the viewport, including scrolling DOWN past
+  // an already-collapsed card the user has no interest in reopening. Comparing each entry's
+  // boundingClientRect to the last one seen distinguishes "approaching from below" (top edge
+  // increasing toward/past 0, i.e. moving down the screen toward the top) from "approaching from
+  // above" (scrolling further down, entering from the bottom edge) — only the former re-expands.
+  useEffect(() => {
+    if (!reopenOnScrollUp || isOpen || typeof IntersectionObserver === 'undefined') return;
+    const el = rootRef.current;
+    if (!el) return;
+    let lastTop = null;
+    const observer = new IntersectionObserver(([entry]) => {
+      if (!entry.isIntersecting) { lastTop = entry.boundingClientRect.top; return; }
+      const scrollingUp = lastTop !== null && entry.boundingClientRect.top > lastTop;
+      lastTop = entry.boundingClientRect.top;
+      if (scrollingUp) {
+        if (isControlled) onToggle?.(true);
+        else setUncontrolledOpen(true);
+      }
+    }, { threshold: 0.6 });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [reopenOnScrollUp, isOpen, isControlled, onToggle]);
+
   const rail = tone === 'danger'
     ? 'border-l-rose-500'
     : tone === 'warning'
@@ -60,7 +91,7 @@ export default function CollapsibleSection({
         : 'border-l-slate-300';
 
   return (
-    <div className={`rounded-xl border border-slate-200 border-l-4 ${rail} bg-white shadow-sm overflow-hidden ${className}`}>
+    <div ref={rootRef} className={`rounded-xl border border-slate-200 border-l-4 ${rail} bg-white shadow-sm overflow-hidden ${className}`}>
       {/* 48px minimum so it stays tappable one-handed on a phone. */}
       <button
         type="button"
